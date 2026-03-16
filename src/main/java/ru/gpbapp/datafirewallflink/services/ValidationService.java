@@ -43,18 +43,23 @@ public final class ValidationService {
             for (String ruleId : sortedRuleIds) {
                 if (ruleId == null || ruleId.isBlank()) continue;
 
+                // В compiledRules ключи обычно вида Rule1065, а в detail/results нужен просто 1065
                 Rule rule = compiledRules.get(ruleId);
+                if (rule == null) {
+                    rule = compiledRules.get("Rule" + ruleId);
+                }
 
-                boolean ok;
+                boolean triggered;
                 try {
-                    ok = (rule != null) && rule.apply(normalizedMap);
+                    // true = правило сработало = найдена ошибка
+                    triggered = (rule != null) && rule.apply(normalizedMap);
                 } catch (Exception ex) {
-                    ok = false;
+                    triggered = false;
                     anyException = true;
                 }
 
-                String status = ok ? SUCCESS : ERROR;
-                if (!ok) anyError = true;
+                String status = triggered ? ERROR : SUCCESS;
+                if (triggered) anyError = true;
 
                 perRules.put(ruleId, status);
             }
