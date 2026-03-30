@@ -8,9 +8,6 @@ import org.slf4j.LoggerFactory;
 import ru.gpbapp.datafirewallflink.validation.AnswerBuilder;
 import ru.gpbapp.datafirewallflink.validation.ValidationResult;
 
-/**
- * Сервис формирования короткого ответа (ANSWER).
- */
 public final class ShortAnswerService {
 
     private static final Logger log = LoggerFactory.getLogger(ShortAnswerService.class);
@@ -23,11 +20,6 @@ public final class ShortAnswerService {
         this.answerBuilder = new AnswerBuilder(mapper);
     }
 
-    /**
-     * @param originalEvent исходное событие (QUERY)
-     * @param validation    результат валидации (details + ALL_RESULT + status)
-     * @return JSON-строка ответа ANSWER или null при ошибке
-     */
     public String build(JsonNode originalEvent, ValidationResult validation) {
         if (originalEvent == null || validation == null) return null;
 

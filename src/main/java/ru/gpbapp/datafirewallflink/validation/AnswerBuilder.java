@@ -2,7 +2,6 @@ package ru.gpbapp.datafirewallflink.validation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.time.Instant;
@@ -18,7 +17,6 @@ public final class AnswerBuilder {
     }
 
     public ObjectNode buildAnswer(JsonNode originalEvent, ValidationResult validation) {
-
         ObjectNode out = mapper.createObjectNode();
         copyIfExists(originalEvent, out, List.of(
                 "dfw_query_id",
@@ -40,7 +38,9 @@ public final class AnswerBuilder {
             out.put("dfw_created_dttm", now);
         }
 
-        String processStatus = (validation == null || validation.processStatus() == null) ? "ERROR" : validation.processStatus();
+        String processStatus = (validation == null || validation.processStatus() == null)
+                ? "ERROR"
+                : validation.processStatus();
         out.put("PROCESS_STATUS", processStatus);
 
         out.set("details", buildShortDetails(originalEvent, validation));
@@ -50,65 +50,87 @@ public final class AnswerBuilder {
     private ObjectNode buildShortDetails(JsonNode originalEvent, ValidationResult validation) {
         ObjectNode details = mapper.createObjectNode();
 
-        String all = (validation == null || validation.allResult() == null) ? "ERROR" : validation.allResult();
+        String all = (validation == null || validation.allResult() == null)
+                ? "ERROR"
+                : validation.allResult();
         details.put("ALL_RESULT", all);
 
-        Map<String, Map<String, String>> detailByField =
-                (validation == null || validation.detailByField() == null) ? Map.of() : validation.detailByField();
+        Map<String, Map<String, String>> general =
+                (validation == null || validation.detailByField() == null)
+                        ? Map.of()
+                        : validation.detailByField();
+
+        Map<String, Map<String, Map<String, String>>> byDataset =
+                (validation == null || validation.detailByDataset() == null)
+                        ? Map.of()
+                        : validation.detailByDataset();
 
         JsonNode data = (originalEvent == null) ? null : originalEvent.get("data");
 
+        JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress", "addressRegistration", "registrationAddress");
+        JsonNode registrationAddressNode = data == null ? null : firstExisting(data, "registrationAddress", "addressRegistration");
+
+        String homeDatasetCode = text(homeAddressNode, "dataset_code", "УС.ЛиК.Адрес проживания");
+        String regDatasetCode = text(registrationAddressNode, "dataset_code", "УС.ЛиК.Адрес регистрации");
+
         details.set("homeAddress", buildAddressShortNode(
-                data == null ? null : data.get("homeAddress"),
-                detailByField,
-                "УС.ЛиК.Адрес проживания"
+                homeAddressNode,
+                homeDatasetCode,
+                general,
+                byDataset
         ));
 
         details.set("registrationAddress", buildAddressShortNode(
-                data == null ? null : data.get("registrationAddress"),
-                detailByField,
-                "УС.ЛиК.Адрес регистрации"
+                registrationAddressNode,
+                regDatasetCode,
+                general,
+                byDataset
         ));
 
         details.set("contactInfo", buildContactShortNode(
                 data == null ? null : data.get("contactInfo"),
-                detailByField
+                general
         ));
 
         details.set("baseInfo", buildBaseInfoShortNode(
                 data == null ? null : data.get("baseInfo"),
-                detailByField
+                general
         ));
 
         details.set("documents", buildDocumentsShortNode(
                 data == null ? null : data.get("documents"),
-                detailByField
+                general
         ));
 
         return details;
     }
 
-    private ObjectNode buildAddressShortNode(JsonNode addr, Map<String, Map<String, String>> detailByField, String fallbackDataset) {
+    private ObjectNode buildAddressShortNode(
+            JsonNode addr,
+            String datasetCode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
         ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", text(addr, "dataset_code", fallbackDataset));
+        o.put("dataset_code", datasetCode);
 
-        o.put("city", statusByMappingFlexible(addr, "mapping.city", detailByField));
-        o.put("countryCode", statusByMappingFlexible(addr, "mapping.countryCode", detailByField));
-        o.put("postalCode", statusByMappingFlexible(addr, "mapping.postalCode", detailByField));
-        o.put("street", statusByMappingFlexible(addr, "mapping.street", detailByField));
-        o.put("area", statusByMappingFlexible(addr, "mapping.area", detailByField));
-        o.put("countryName", statusByMappingFlexible(addr, "mapping.countryName", detailByField));
-        o.put("settlement", statusByMappingFlexible(addr, "mapping.settlement", detailByField));
+        o.put("city", statusByMappingFlexible(addr, "mapping.city", datasetCode, general, byDataset));
+        o.put("countryCode", statusByMappingFlexible(addr, "mapping.countryCode", datasetCode, general, byDataset));
+        o.put("postalCode", statusByMappingFlexible(addr, "mapping.postalCode", datasetCode, general, byDataset));
+        o.put("street", statusByMappingFlexible(addr, "mapping.street", datasetCode, general, byDataset));
+        o.put("area", statusByMappingFlexible(addr, "mapping.area", datasetCode, general, byDataset));
+        o.put("countryName", statusByMappingFlexible(addr, "mapping.countryName", datasetCode, general, byDataset));
+        o.put("settlement", statusByMappingFlexible(addr, "mapping.settlement", datasetCode, general, byDataset));
 
         return o;
     }
 
     private ObjectNode buildContactShortNode(JsonNode contact, Map<String, Map<String, String>> detailByField) {
         ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", text(contact, "dataset_code", "УС.ЛиК.Контакты клиента"));
+        o.put("dataset_code", text(contact, "dataset_code", "УС.ЛИК.Контакты клиента"));
 
-        o.put("mobilePhone", statusByMappingFlexible(contact, "mapping.mobilePhone", detailByField));
-        o.put("emailValue", statusByMappingFlexible(contact, "mapping.emailValue", detailByField));
+        o.put("mobilePhone", statusByMappingFlexibleOld(contact, "mapping.mobilePhone", detailByField));
+        o.put("emailValue", statusByMappingFlexibleOld(contact, "mapping.emailValue", detailByField));
 
         return o;
     }
@@ -117,26 +139,26 @@ public final class AnswerBuilder {
         ObjectNode o = mapper.createObjectNode();
         o.put("dataset_code", text(base, "dataset_code", "УС.ЛиК.Данные клиента"));
 
-        o.put("citizenship", statusByMappingFlexible(base, "mapping.citizenship", detailByField));
-        o.put("birthPlace", statusByMappingFlexible(base, "mapping.birthPlace", detailByField));
-        o.put("surname", statusByMappingFlexible(base, "mapping.surname", detailByField));
-        o.put("name", statusByMappingFlexible(base, "mapping.name", detailByField));
-        o.put("gender", statusByMappingFlexible(base, "mapping.gender", detailByField));
-        o.put("fullName", statusByMappingFlexible(base, "mapping.fullName", detailByField));
-        o.put("birthdate", statusByMappingFlexible(base, "mapping.birthdate", detailByField));
-        o.put("patronymic", statusByMappingFlexible(base, "mapping.patronymic", detailByField));
+        o.put("citizenship", statusByMappingFlexibleOld(base, "mapping.citizenship", detailByField));
+        o.put("birthPlace", statusByMappingFlexibleOld(base, "mapping.birthPlace", detailByField));
+        o.put("surname", statusByMappingFlexibleOld(base, "mapping.surname", detailByField));
+        o.put("name", statusByMappingFlexibleOld(base, "mapping.name", detailByField));
+        o.put("gender", statusByMappingFlexibleOld(base, "mapping.gender", detailByField));
+        o.put("fullName", statusByMappingFlexibleOld(base, "mapping.fullName", detailByField));
+        o.put("birthdate", statusByMappingFlexibleOld(base, "mapping.birthdate", detailByField));
+        o.put("patronymic", statusByMappingFlexibleOld(base, "mapping.patronymic", detailByField));
 
         return o;
     }
 
     private ObjectNode buildDocumentsShortNode(JsonNode docs, Map<String, Map<String, String>> detailByField) {
         ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", "УС.ЛиК.Документы клиента");
+        o.put("dataset_code", text(docs, "dataset_code", "УС.ЛиК.Документы клиента"));
 
-        o.put("clientInn", statusByMappingFlexible(docs, "mapping.clientInn", detailByField));
-        o.put("clientSnils", statusByMappingFlexible(docs, "mapping.clientSnils", detailByField));
+        o.put("clientInn", statusByMappingFlexibleOld(docs, "mapping.clientInn", detailByField));
+        o.put("clientSnils", statusByMappingFlexibleOld(docs, "mapping.clientSnils", detailByField));
 
-        ArrayNode arr = mapper.createArrayNode();
+        var arr = mapper.createArrayNode();
         JsonNode cards = docs == null ? null : docs.get("clientIdCard");
         if (cards != null && cards.isArray() && cards.size() > 0) {
             JsonNode card0 = cards.get(0);
@@ -144,11 +166,11 @@ public final class AnswerBuilder {
 
             c.put("elemId", text(card0, "elemId", text(card0, "type", "UNKNOWN")));
 
-            c.put("issueAuthority", statusByMappingFlexible(card0, "mapping.issueAuthority", detailByField));
-            c.put("number", statusByMappingFlexible(card0, "mapping.number", detailByField));
-            c.put("issueDate", statusByMappingFlexible(card0, "mapping.issueDate", detailByField));
-            c.put("departmentCode", statusByMappingFlexible(card0, "mapping.departmentCode", detailByField));
-            c.put("series", statusByMappingFlexible(card0, "mapping.series", detailByField));
+            c.put("issueAuthority", statusByMappingFlexibleOld(card0, "mapping.issueAuthority", detailByField));
+            c.put("number", statusByMappingFlexibleOld(card0, "mapping.number", detailByField));
+            c.put("issueDate", statusByMappingFlexibleOld(card0, "mapping.issueDate", detailByField));
+            c.put("departmentCode", statusByMappingFlexibleOld(card0, "mapping.departmentCode", detailByField));
+            c.put("series", statusByMappingFlexibleOld(card0, "mapping.series", detailByField));
 
             arr.add(c);
         }
@@ -157,29 +179,64 @@ public final class AnswerBuilder {
         return o;
     }
 
-    /**
-     * Ищем logicalField в validation.detailByField() в двух вариантах:
-     *  1) как в mapping: "ОСНОВНЫЕ СВЕДЕНИЯ.ФИО одной строкой"
-     *  2) как в правилах/детальном: "ОСНОВНЫЕ СВЕДЕНИЯ,ФИО одной строкой"
-     */
-    private String statusByMappingFlexible(JsonNode node, String mappingKey, Map<String, Map<String, String>> detailByField) {
+    private String statusByMappingFlexible(
+            JsonNode node,
+            String mappingKey,
+            String datasetCode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
         String logical = text(node, mappingKey, null);
-        if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) return "ERROR";
+        if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
+            return "ERROR";
+        }
+
+        Map<String, String> rules = null;
+
+        Map<String, Map<String, String>> datasetDetail = byDataset.get(datasetCode);
+        if (datasetDetail != null) {
+            rules = datasetDetail.get(logical);
+            if (rules == null) {
+                rules = datasetDetail.get(logical.replace('.', ','));
+            }
+        }
+
+        if (rules == null) {
+            rules = general.get(logical);
+            if (rules == null) {
+                rules = general.get(logical.replace('.', ','));
+            }
+        }
+
+        return aggregateFieldStatus(rules);
+    }
+
+    private String statusByMappingFlexibleOld(
+            JsonNode node,
+            String mappingKey,
+            Map<String, Map<String, String>> detailByField
+    ) {
+        String logical = text(node, mappingKey, null);
+        if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
+            return "ERROR";
+        }
 
         Map<String, String> rules = detailByField.get(logical);
         if (rules == null) {
-            String alt = logical.replace('.', ',');
-            rules = detailByField.get(alt);
+            rules = detailByField.get(logical.replace('.', ','));
         }
 
         return aggregateFieldStatus(rules);
     }
 
     private String aggregateFieldStatus(Map<String, String> rules) {
-        if (rules == null || rules.isEmpty()) return "ERROR";
+        if (rules == null || rules.isEmpty()) {
+            return "ERROR";
+        }
         for (String v : rules.values()) {
-            if (v == null) continue;
-            if ("ERROR".equalsIgnoreCase(v)) return "ERROR";
+            if (v != null && "ERROR".equalsIgnoreCase(v)) {
+                return "ERROR";
+            }
         }
         return "SUCCESS";
     }
@@ -197,5 +254,17 @@ public final class AnswerBuilder {
         if (node == null || field == null) return def;
         JsonNode v = node.get(field);
         return (v == null || v.isNull()) ? def : v.asText(def);
+    }
+
+    private static JsonNode firstExisting(JsonNode node, String... names) {
+        if (node == null || names == null) return null;
+        for (String name : names) {
+            if (name == null) continue;
+            JsonNode found = node.get(name);
+            if (found != null && !found.isNull()) {
+                return found;
+            }
+        }
+        return null;
     }
 }

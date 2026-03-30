@@ -38,7 +38,6 @@ public final class ValidationService {
         // logicalField -> (ruleName -> status)
         Map<String, Map<String, String>> detailByField = new LinkedHashMap<>();
 
-        // стабильный порядок полей
         Map<String, Set<String>> sortedFields = new TreeMap<>(fieldToRuleIds);
 
         for (Map.Entry<String, Set<String>> entry : sortedFields.entrySet()) {
@@ -66,7 +65,6 @@ public final class ValidationService {
 
                 boolean triggered;
                 try {
-                    // true = правило сработало = найдена ошибка
                     triggered = rule != null && rule.apply(normalizedMap);
                 } catch (Exception ex) {
                     triggered = false;
@@ -93,7 +91,8 @@ public final class ValidationService {
                 null,
                 all,
                 processStatus,
-                Collections.unmodifiableMap(detailByField)
+                Collections.unmodifiableMap(detailByField),
+                Collections.emptyMap()
         );
     }
 
@@ -103,7 +102,6 @@ public final class ValidationService {
             return rule;
         }
 
-        // fallback: если в кеше правил ключи с префиксом Rule, а сюда вдруг пришёл голый id
         if (!ruleName.startsWith("Rule")) {
             rule = compiledRules.get("Rule" + ruleName);
             if (rule != null) {
@@ -111,7 +109,6 @@ public final class ValidationService {
             }
         }
 
-        // fallback: если в compiledRules по какой-то причине ключ без префикса, а сюда пришёл Rule1140
         if (ruleName.startsWith("Rule") && ruleName.length() > 4) {
             return compiledRules.get(ruleName.substring(4));
         }

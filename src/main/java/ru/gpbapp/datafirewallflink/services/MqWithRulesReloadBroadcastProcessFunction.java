@@ -33,8 +33,10 @@ import ru.gpbapp.datafirewallflink.mq.MqReply;
 import ru.gpbapp.datafirewallflink.rule.RulesReloader;
 import ru.gpbapp.datafirewallflink.validation.ValidationResult;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -83,27 +85,12 @@ public class MqWithRulesReloadBroadcastProcessFunction
     private transient boolean logPayloads;
     private transient int logPreviewLen;
 
-    /**
-     * Конструктор функции.
-     *
-     * <p>Сохраняет descriptor broadcast-state, в котором будет лежать
-     * последнее событие обновления кэша из Kafka.</p>
-     */
     public MqWithRulesReloadBroadcastProcessFunction(
             MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
     }
 
-    /**
-     * Инициализация функции при старте subtask.
-     *
-     * <p>Здесь создаются локальные runtime-кэши, нормализатор, сервисы ответов,
-     * клиент Ignite API и инфраструктура загрузки compiled_rules.</p>
-     *
-     * <p>После инициализации выполняется bootstrap-загрузка актуальных версий
-     * всех кэшей через Ignite latest API. Дальнейшие обновления приходят через Kafka.</p>
-     */
     @Override
     public void open(Configuration parameters) {
         RuntimeContext rc = getRuntimeContext();
@@ -130,9 +117,11 @@ public class MqWithRulesReloadBroadcastProcessFunction
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
         this.igniteApiClient = new IgniteRulesApiClient(igniteApiUrl);
 
-
         boolean bootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);
-        boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);        initTestCaches();
+        boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
+
+        initTestCaches();
+
         if (bootstrapEnabled) {
             CacheBootstrapService bootstrapService = new CacheBootstrapService(
                     igniteApiClient,
@@ -168,16 +157,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         );
     }
 
-    /**
-     * Настраивает источник загрузки compiled_rules.
-     *
-     * <p>Поддерживает два режима:</p>
-     * <p>- http: читаем bytecode правил через Ignite REST API</p>
-     * <p>- thin: читаем bytecode правил напрямую из Ignite thin client</p>
-     *
-     * <p>В конце создаётся {@link RulesReloader}, который потом либо во время bootstrap,
-     * либо по Kafka-событию загрузит конкретную versioned-версию compiled_rules.</p>
-     */
     private void initRulesLoaderAndLoad(ParameterTool pt) {
         String mode = pt.get("rules.loader", "http").toLowerCase(Locale.ROOT).trim();
 
@@ -212,18 +191,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         log.info("[RULES] rules loader initialized. Actual cache versions will be loaded during startup bootstrap.");
     }
 
-    /**
-     * Обрабатывает входящее MQ-сообщение.
-     *
-     * <p>Основной runtime flow:</p>
-     * <p>1. Парсит входной JSON</p>
-     * <p>2. Берёт первый найденный dataset_code из event.data.*.dataset_code</p>
-     * <p>3. По dataset_code находит controlArea в PoliticsDatasetControlAreaCache</p>
-     * <p>4. По controlArea получает field->rules mapping из PoliticsControlAreaRulesCache</p>
-     * <p>5. Нормализует входные данные в logicalField -> value</p>
-     * <p>6. Валидирует данные с помощью compiled_rules и найденного набора правил</p>
-     * <p>7. Строит short/detail ответ</p>
-     */
     @Override
     public void processElement(MqRecord in, ReadOnlyContext ctx, Collector<MqReply> out) {
         if (in == null || in.payload == null || in.payload.isBlank()) {
@@ -283,26 +250,55 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 return;
             }
 
-            log.info("[PIPE][{}] datasetCode={} controlArea={} mappedFields={}",
-                    qid, datasetCode, controlArea, fieldToRules.keySet());
-
-            Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
-
-            if (logPayloads && log.isInfoEnabled()) {
-                log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}",
-                        qid, normalizedMap.size(), normalizedMap.keySet());
-                log.info("[PIPE][{}] 2) NORMALIZED_MAP full(masked):\n{}",
-                        qid,
-                        prettyObject(maskMap(normalizedMap)));
+            Set<String> excludedBlocks = politicsDatasetExclusionCache.get(controlArea);
+            if (excludedBlocks == null) {
+                excludedBlocks = Set.of();
             }
+
+            log.info("[PIPE][{}] datasetCode={} controlArea={} mappedFields={} excludedBlocks={}",
+                    qid, datasetCode, controlArea, fieldToRules.keySet(), excludedBlocks);
 
             Map<String, Rule> compiledRules = rulesRegistry.snapshot();
 
-            ValidationResult validation = validationService.validate(
-                    compiledRules,
-                    normalizedMap,
-                    fieldToRules
-            );
+            ValidationResult validation;
+
+            if (excludedBlocks.isEmpty()) {
+                Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
+
+                if (logPayloads && log.isInfoEnabled()) {
+                    log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}",
+                            qid, normalizedMap.size(), normalizedMap.keySet());
+                    log.info("[PIPE][{}] 2) NORMALIZED_MAP full(masked):\n{}",
+                            qid,
+                            prettyObject(maskMap(normalizedMap)));
+                }
+
+                Map<String, Set<String>> filteredFieldToRules =
+                        filterFieldToRulesByNormalizedMap(fieldToRules, normalizedMap);
+
+                ValidationResult base = validationService.validate(
+                        compiledRules,
+                        normalizedMap,
+                        filteredFieldToRules
+                );
+
+                validation = new ValidationResult(
+                        base.details(),
+                        base.allResult(),
+                        base.processStatus(),
+                        base.detailByField(),
+                        Map.of()
+                );
+            } else {
+                validation = validateWithExcludedBlocks(
+                        qid,
+                        originalEvent,
+                        controlArea,
+                        fieldToRules,
+                        excludedBlocks,
+                        compiledRules
+                );
+            }
 
             String shortJson = shortAnswerService.build(originalEvent, validation);
             if (shortJson == null) {
@@ -330,12 +326,129 @@ public class MqWithRulesReloadBroadcastProcessFunction
         }
     }
 
-    /**
-     * Обрабатывает событие обновления кэша из Kafka.
-     *
-     * <p>Начальная инициализация кэшей выполняется при старте через Ignite latest API.</p>
-     * <p>После старта новые версии compiled_rules и politics bundle приезжают через Kafka.</p>
-     */
+    private ValidationResult validateWithExcludedBlocks(
+            String qid,
+            JsonNode originalEvent,
+            String controlArea,
+            Map<String, Set<String>> fieldToRules,
+            Set<String> excludedBlocks,
+            Map<String, Rule> compiledRules
+    ) {
+        JsonNode baseEvent = removeExcludedBlocks(originalEvent, excludedBlocks);
+        Map<String, String> baseNormalizedMap = normalizer.normalize(baseEvent);
+
+        if (logPayloads && log.isInfoEnabled()) {
+            log.info("[PIPE][{}] 2) BASE_NORMALIZED_MAP size={} keys={}",
+                    qid, baseNormalizedMap.size(), baseNormalizedMap.keySet());
+            log.info("[PIPE][{}] 2) BASE_NORMALIZED_MAP full(masked):\n{}",
+                    qid,
+                    prettyObject(maskMap(baseNormalizedMap)));
+        }
+
+        Map<String, Set<String>> baseFieldToRules =
+                filterFieldToRulesByNormalizedMap(fieldToRules, baseNormalizedMap);
+
+        ValidationResult baseValidation = validationService.validate(
+                compiledRules,
+                baseNormalizedMap,
+                baseFieldToRules
+        );
+
+        Map<String, Map<String, Map<String, String>>> detailByDataset = new LinkedHashMap<>();
+
+        boolean anyError = "ERROR".equalsIgnoreCase(baseValidation.allResult());
+        boolean anyRuleException = "RULE_EXCEPTION".equalsIgnoreCase(baseValidation.processStatus());
+
+        for (String blockName : excludedBlocks) {
+            String blockDatasetCode = extractDatasetCodeForBlock(originalEvent, blockName);
+            if (blockDatasetCode == null || blockDatasetCode.isBlank()) {
+                log.warn("[PIPE][{}] dataset_code not found for excluded block={}", qid, blockName);
+                continue;
+            }
+
+            String blockControlArea = politicsDataset2ControlAreaCache.get(blockDatasetCode);
+            if (blockControlArea == null || blockControlArea.isBlank()) {
+                blockControlArea = controlArea;
+            }
+
+            Map<String, Set<String>> blockFieldToRules = politicsControlAreaRulesCache.get(blockControlArea);
+            if (blockFieldToRules == null || blockFieldToRules.isEmpty()) {
+                log.warn("[PIPE][{}] fieldToRules not found for excluded block={} datasetCode={} controlArea={}",
+                        qid, blockName, blockDatasetCode, blockControlArea);
+                continue;
+            }
+
+            JsonNode blockEvent = keepOnlyBlock(originalEvent, blockName);
+            Map<String, String> blockNormalizedMap = normalizer.normalize(blockEvent);
+
+            if (logPayloads && log.isInfoEnabled()) {
+                log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} size={} keys={}",
+                        qid, blockName, blockDatasetCode, blockNormalizedMap.size(), blockNormalizedMap.keySet());
+                log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}",
+                        qid, blockName, blockDatasetCode, prettyObject(maskMap(blockNormalizedMap)));
+            }
+
+            Map<String, Set<String>> filteredBlockFieldToRules =
+                    filterFieldToRulesByNormalizedMap(blockFieldToRules, blockNormalizedMap);
+
+            ValidationResult blockValidation = validationService.validate(
+                    compiledRules,
+                    blockNormalizedMap,
+                    filteredBlockFieldToRules
+            );
+
+            if ("ERROR".equalsIgnoreCase(blockValidation.allResult())) {
+                anyError = true;
+            }
+            if ("RULE_EXCEPTION".equalsIgnoreCase(blockValidation.processStatus())) {
+                anyRuleException = true;
+            }
+
+            detailByDataset.put(blockDatasetCode, blockValidation.detailByField());
+        }
+
+        String allResult = anyError ? "ERROR" : "SUCCESS";
+        String processStatus = anyRuleException ? "RULE_EXCEPTION" : "OK";
+
+        return new ValidationResult(
+                null,
+                allResult,
+                processStatus,
+                baseValidation.detailByField(),
+                detailByDataset
+        );
+    }
+
+    private Map<String, Set<String>> filterFieldToRulesByNormalizedMap(
+            Map<String, Set<String>> fieldToRules,
+            Map<String, String> normalizedMap
+    ) {
+        if (fieldToRules == null || fieldToRules.isEmpty() || normalizedMap == null || normalizedMap.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+
+        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
+            String logicalField = entry.getKey();
+            if (logicalField == null || logicalField.isBlank()) {
+                continue;
+            }
+
+            if (normalizedMap.containsKey(logicalField)) {
+                result.put(logicalField, entry.getValue());
+                continue;
+            }
+
+            String alt = logicalField.replace('.', ',');
+            if (normalizedMap.containsKey(alt)) {
+                result.put(logicalField, entry.getValue());
+            }
+        }
+
+        return result;
+    }
+
     @Override
     public void processBroadcastElement(
             CacheUpdateEvent ev,
@@ -386,13 +499,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         }
     }
 
-    /**
-     * Загружает новую версию compiled_rules.
-     *
-     * <p>Из version формирует имя Ignite-cache вида compiled_rules_${version},
-     * затем через RulesReloader собирает новые Rule-объекты и атомарно публикует их
-     * в CompiledRulesRegistry.</p>
-     */
     private void reloadCompiledRules(long version) {
         String fullCacheName = CACHE_COMPILED_RULES + "_" + version;
 
@@ -404,19 +510,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 version, rulesRegistry.size());
     }
 
-    /**
-     * Загружает новую версию politics bundle.
-     *
-     * <p>Читает из Ignite API versioned-кэши:</p>
-     * <p>- politics_dataset2control_area_${version}</p>
-     * <p>- politics_control_area_rules_${version}</p>
-     * <p>- politics_error_messages_${version}</p>
-     * <p>- politics_dataset_exclusion_${version}</p>
-     * <p>- politics_filter_flag_${version}</p>
-     *
-     * <p>После чтения конвертирует payload в нужные структуры и атомарно публикует их
-     * в локальные snapshot-кэши.</p>
-     */
     private void reloadPoliticsCaches(long version) {
         String versionStr = String.valueOf(version);
 
@@ -475,14 +568,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         );
     }
 
-    /**
-     * Из входного JSON ищет первый dataset_code внутри event.data.
-     *
-     * <p>Например из event.data.homeAddress.dataset_code вернёт
-     * "УС.ЛиК.Адрес проживания".</p>
-     *
-     * <p>Этот dataset_code потом используется как ключ в PoliticsDatasetControlAreaCache.</p>
-     */
     private String extractFirstDatasetCode(JsonNode originalEvent) {
         JsonNode dataNode = originalEvent.path("data");
         if (!dataNode.isObject()) {
@@ -507,12 +592,63 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return null;
     }
 
-    /**
-     * Конвертирует payload из Ignite API в Map<String, String>.
-     *
-     * <p>Используется для кэшей, где структура простая:
-     * key -> string value.</p>
-     */
+    private String extractDatasetCodeForBlock(JsonNode originalEvent, String blockName) {
+        JsonNode blockNode = originalEvent.path("data").path(blockName);
+        if (!blockNode.isObject()) {
+            return null;
+        }
+
+        JsonNode datasetCodeNode = blockNode.get("dataset_code");
+        if (datasetCodeNode == null || datasetCodeNode.isNull()) {
+            return null;
+        }
+
+        String datasetCode = datasetCodeNode.asText(null);
+        return datasetCode == null ? null : datasetCode.trim();
+    }
+
+    private JsonNode removeExcludedBlocks(JsonNode originalEvent, Set<String> excludedBlocks) {
+        JsonNode copy = originalEvent == null ? null : originalEvent.deepCopy();
+        if (copy == null) {
+            return mapper.createObjectNode();
+        }
+
+        JsonNode dataNode = copy.path("data");
+        if (dataNode instanceof com.fasterxml.jackson.databind.node.ObjectNode dataObj) {
+            for (String block : excludedBlocks) {
+                dataObj.remove(block);
+            }
+        }
+
+        return copy;
+    }
+
+    private JsonNode keepOnlyBlock(JsonNode originalEvent, String blockName) {
+        JsonNode copy = originalEvent == null ? null : originalEvent.deepCopy();
+        if (copy == null) {
+            return mapper.createObjectNode();
+        }
+
+        JsonNode dataNode = copy.path("data");
+        if (dataNode instanceof com.fasterxml.jackson.databind.node.ObjectNode dataObj) {
+            Iterator<String> it = dataObj.fieldNames();
+            List<String> toRemove = new ArrayList<>();
+
+            while (it.hasNext()) {
+                String name = it.next();
+                if (!blockName.equals(name)) {
+                    toRemove.add(name);
+                }
+            }
+
+            for (String name : toRemove) {
+                dataObj.remove(name);
+            }
+        }
+
+        return copy;
+    }
+
     private Map<String, String> toStringMap(Map<String, Object> payload, String cacheName) {
         if (payload == null) {
             throw new IllegalStateException("Payload is null for cache " + cacheName);
@@ -534,11 +670,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return result;
     }
 
-    /**
-     * Конвертирует payload из Ignite API в Map<String, Boolean>.
-     *
-     * <p>Используется для politics_filter_flag.</p>
-     */
     private Map<String, Boolean> toBooleanMap(Map<String, Object> payload, String cacheName) {
         if (payload == null) {
             throw new IllegalStateException("Payload is null for cache " + cacheName);
@@ -561,12 +692,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return result;
     }
 
-    /**
-     * Конвертирует payload из Ignite API в Map<String, Set<String>>.
-     *
-     * <p>Используется для структур вида:
-     * key -> список/множество строк.</p>
-     */
     private Map<String, Set<String>> toSetMap(Map<String, Object> payload, String cacheName) {
         if (payload == null) {
             throw new IllegalStateException("Payload is null for cache " + cacheName);
@@ -588,12 +713,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return result;
     }
 
-    /**
-     * Конвертирует payload из Ignite API в Map<String, Map<String, Set<String>>>.
-     *
-     * <p>Используется для politics_control_area_rules, где:
-     * controlArea -> (logicalField -> set(ruleName)).</p>
-     */
     private Map<String, Map<String, Set<String>>> toNestedRulesMap(
             Map<String, Object> payload,
             String cacheName
@@ -626,11 +745,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return result;
     }
 
-    /**
-     * Освобождает внешние ресурсы при остановке функции.
-     *
-     * <p>Нужно главным образом для thin-client подключения к Ignite.</p>
-     */
     @Override
     public void close() {
         try {
@@ -642,9 +756,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         }
     }
 
-    /**
-     * Преобразует объект в pretty JSON/string для логирования.
-     */
     private String prettyObject(Object o) {
         try {
             return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(o);
@@ -653,11 +764,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         }
     }
 
-    /**
-     * Делает простую inline-маскировку чувствительных полей в строковом JSON.
-     *
-     * <p>Используется как fallback, если красивый JSON-парсинг не удался.</p>
-     */
     private String maskInline(String s) {
         if (s == null) {
             return null;
@@ -671,9 +777,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 .replaceAll("(\"departmentCode\"\\s*:\\s*\")[^\"]*(\")", "$1***$2");
     }
 
-    /**
-     * Формирует pretty JSON и маскирует чувствительные поля перед логированием.
-     */
     private String maskJsonPretty(String json) {
         if (json == null || json.isBlank()) {
             return json;
@@ -687,9 +790,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         }
     }
 
-    /**
-     * Рекурсивно проходит по JsonNode и затирает чувствительные поля.
-     */
     private void maskNode(JsonNode node) {
         if (node == null) {
             return;
@@ -713,10 +813,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         }
     }
 
-    /**
-     * Определяет, относится ли ключ к чувствительным данным,
-     * которые нельзя писать в лог в открытом виде.
-     */
     private boolean isSensitiveKey(String key) {
         if (key == null) {
             return false;
@@ -731,9 +827,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 || k.equals("departmentcode");
     }
 
-    /**
-     * Маскирует чувствительные значения в нормализованной map перед логированием.
-     */
     private Map<String, String> maskMap(Map<String, String> m) {
         if (m == null) {
             return Map.of();
@@ -820,6 +913,7 @@ public class MqWithRulesReloadBroadcastProcessFunction
 
         politicsDatasetExclusionCache.replaceAll(
                 Map.of(
+                        "Дашборд.УС ЛИК", Set.of("homeAddress", "registrationAddress"),
                         "УС.ЛиК.Адрес проживания", Set.of(),
                         "УС.ЛиК.Адрес регистрации", Set.of()
                 ),

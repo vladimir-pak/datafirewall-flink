@@ -5,20 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.time.Instant;
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Формирует JSON детального ответа (ANSWER_DETAIL) в формате как у тебя в эталоне:
- * detail_results: {
- *   "Дашборд.УС ЛИК": { ... },
- *   "УС.ЛиК.Адрес проживания": { ... },
- *   "УС.ЛиК.Адрес регистрации": { ... }
- * }
- *
- * rule keys: "Rule1099" -> "1099"
- */
 public final class DetailAnswerBuilder {
 
     private static final Pattern RULE_NUM = Pattern.compile("(?i)^Rule(\\d+)$");
@@ -29,90 +22,59 @@ public final class DetailAnswerBuilder {
         this.mapper = mapper;
     }
 
-    public ObjectNode buildDetailAnswer(JsonNode originalEvent,
-                                        String allResult,
-                                        Map<String, Map<String, String>> detailByField) {
+    public ObjectNode buildDetailAnswer(JsonNode originalEvent, ValidationResult validation) {
+        Map<String, Map<String, String>> general =
+                validation == null || validation.detailByField() == null
+                        ? Map.of()
+                        : validation.detailByField();
 
-        if (detailByField == null) detailByField = Map.of();
-        if (allResult == null) allResult = "ERROR";
+        Map<String, Map<String, Map<String, String>>> byDataset =
+                validation == null || validation.detailByDataset() == null
+                        ? Map.of()
+                        : validation.detailByDataset();
 
         ObjectNode result = mapper.createObjectNode();
 
         String mainDataset = getText(originalEvent, "dfw_dataset_code", "UNKNOWN_DATASET");
-
         JsonNode data = originalEvent == null ? null : originalEvent.get("data");
-        String homeDs = getText(data == null ? null : data.get("homeAddress"), "dataset_code", "УС.ЛиК.Адрес проживания");
-        String regDs  = getText(data == null ? null : data.get("registrationAddress"), "dataset_code", "УС.ЛиК.Адрес регистрации");
 
-        // какие logicalField относятся к адресам — берём из mapping.* внутри этих объектов
-        Set<String> homeAddressLogical = collectMappingLogicalFields(data == null ? null : data.get("homeAddress"));
-        Set<String> regAddressLogical  = collectMappingLogicalFields(data == null ? null : data.get("registrationAddress"));
+        JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress", "addressRegistration", "registrationAddress");
+        JsonNode registrationAddressNode = data == null ? null : firstExisting(data, "registrationAddress", "addressRegistration");
 
-        Map<String, ObjectNode> buckets = new LinkedHashMap<>();
-        buckets.put(mainDataset, mapper.createObjectNode());
-        buckets.put(homeDs, mapper.createObjectNode());
-        buckets.put(regDs, mapper.createObjectNode());
-
-        Map<String, Boolean> hasError = new HashMap<>();
-        for (String ds : buckets.keySet()) hasError.put(ds, false);
-
-        Map<String, Map<String, String>> sortedFields =
-                (detailByField instanceof SortedMap) ? detailByField : new TreeMap<>(detailByField);
-
-        for (Map.Entry<String, Map<String, String>> fieldEntry : sortedFields.entrySet()) {
-
-            String logicalField = fieldEntry.getKey();
-            Map<String, String> ruleMap = fieldEntry.getValue();
-            if (logicalField == null || logicalField.isBlank() || ruleMap == null || ruleMap.isEmpty()) continue;
-
-            boolean isHome = homeAddressLogical.contains(logicalField);
-            boolean isReg  = regAddressLogical.contains(logicalField);
-
-            List<String> targetDatasets = new ArrayList<>();
-            if (isHome) targetDatasets.add(homeDs);
-            if (isReg)  targetDatasets.add(regDs);
-            if (targetDatasets.isEmpty()) targetDatasets.add(mainDataset);
-
-            ObjectNode rulesNode = mapper.createObjectNode();
-
-            Map<String, String> sortedRules =
-                    (ruleMap instanceof SortedMap) ? ruleMap : new TreeMap<>(ruleMap);
-
-            boolean fieldHasError = false;
-            for (Map.Entry<String, String> ruleEntry : sortedRules.entrySet()) {
-                String ruleName = ruleEntry.getKey();
-                String status = ruleEntry.getValue();
-                if (ruleName == null || ruleName.isBlank() || status == null) continue;
-
-                String normRuleKey = normalizeRuleKey(ruleName);
-                rulesNode.put(normRuleKey, status);
-
-                if ("ERROR".equalsIgnoreCase(status)) fieldHasError = true;
-            }
-
-            for (String ds : targetDatasets) {
-                ObjectNode dsNode = buckets.get(ds);
-                if (dsNode == null) continue;
-                dsNode.set(logicalField, rulesNode);
-                if (fieldHasError) hasError.put(ds, true);
-            }
-        }
-
-        // проставим ALL_RESULT на каждом dataset уровне
-        for (Map.Entry<String, ObjectNode> e : buckets.entrySet()) {
-            String ds = e.getKey();
-            ObjectNode dsNode = e.getValue();
-            dsNode.put("ALL_RESULT", hasError.getOrDefault(ds, false) ? "ERROR" : "SUCCESS");
-        }
+        String homeDs = getText(homeAddressNode, "dataset_code", "УС.ЛиК.Адрес проживания");
+        String regDs  = getText(registrationAddressNode, "dataset_code", "УС.ЛиК.Адрес регистрации");
 
         ObjectNode detailResults = mapper.createObjectNode();
-        for (Map.Entry<String, ObjectNode> e : buckets.entrySet()) {
-            detailResults.set(e.getKey(), e.getValue());
+
+        detailResults.set(mainDataset, buildBucket(general));
+
+        if (byDataset.containsKey(homeDs)) {
+            detailResults.set(homeDs, buildBucket(byDataset.get(homeDs)));
+        } else {
+            detailResults.set(homeDs, mapper.createObjectNode());
+            ((ObjectNode) detailResults.get(homeDs)).put("ALL_RESULT", "SUCCESS");
+        }
+
+        if (byDataset.containsKey(regDs)) {
+            detailResults.set(regDs, buildBucket(byDataset.get(regDs)));
+        } else {
+            detailResults.set(regDs, mapper.createObjectNode());
+            ((ObjectNode) detailResults.get(regDs)).put("ALL_RESULT", "SUCCESS");
+        }
+
+        for (Map.Entry<String, Map<String, Map<String, String>>> e : byDataset.entrySet()) {
+            String datasetCode = e.getKey();
+            if (datasetCode == null || datasetCode.isBlank()) {
+                continue;
+            }
+            if (datasetCode.equals(homeDs) || datasetCode.equals(regDs)) {
+                continue;
+            }
+            detailResults.set(datasetCode, buildBucket(e.getValue()));
         }
 
         result.set("detail_results", detailResults);
 
-        // --- meta поля ---
         copyIfExists(originalEvent, result, List.of(
                 "dfw_query_id",
                 "dfw_hostname",
@@ -132,32 +94,65 @@ public final class DetailAnswerBuilder {
         return result;
     }
 
+    private ObjectNode buildBucket(Map<String, Map<String, String>> detailByField) {
+        if (detailByField == null) {
+            detailByField = Map.of();
+        }
+
+        ObjectNode bucket = mapper.createObjectNode();
+        boolean hasError = false;
+
+        Map<String, Map<String, String>> sortedFields =
+                (detailByField instanceof TreeMap<?, ?>)
+                        ? detailByField
+                        : new TreeMap<>(detailByField);
+
+        for (Map.Entry<String, Map<String, String>> fieldEntry : sortedFields.entrySet()) {
+            String logicalField = fieldEntry.getKey();
+            Map<String, String> ruleMap = fieldEntry.getValue();
+
+            if (logicalField == null || logicalField.isBlank() || ruleMap == null || ruleMap.isEmpty()) {
+                continue;
+            }
+
+            ObjectNode rulesNode = mapper.createObjectNode();
+
+            Map<String, String> sortedRules =
+                    (ruleMap instanceof TreeMap<?, ?>)
+                            ? ruleMap
+                            : new TreeMap<>(ruleMap);
+
+            boolean fieldHasError = false;
+            for (Map.Entry<String, String> ruleEntry : sortedRules.entrySet()) {
+                String ruleName = ruleEntry.getKey();
+                String status = ruleEntry.getValue();
+                if (ruleName == null || ruleName.isBlank() || status == null) {
+                    continue;
+                }
+
+                String normRuleKey = normalizeRuleKey(ruleName);
+                rulesNode.put(normRuleKey, status);
+
+                if ("ERROR".equalsIgnoreCase(status)) {
+                    fieldHasError = true;
+                }
+            }
+
+            if (fieldHasError) {
+                hasError = true;
+            }
+
+            bucket.set(logicalField, rulesNode);
+        }
+
+        bucket.put("ALL_RESULT", hasError ? "ERROR" : "SUCCESS");
+        return bucket;
+    }
+
     private static String normalizeRuleKey(String ruleName) {
         Matcher m = RULE_NUM.matcher(ruleName.trim());
         if (m.matches()) return m.group(1);
         return ruleName.trim();
-    }
-
-    private static Set<String> collectMappingLogicalFields(JsonNode node) {
-        Set<String> out = new HashSet<>();
-        if (node == null || node.isNull() || !node.isObject()) return out;
-
-        Iterator<Map.Entry<String, JsonNode>> it = node.fields();
-        while (it.hasNext()) {
-            Map.Entry<String, JsonNode> e = it.next();
-            String k = e.getKey();
-            JsonNode v = e.getValue();
-            if (k == null || v == null || v.isNull()) continue;
-
-            //все поля вида mapping.xxx : "ЛОГИЧЕСКОЕ.ИМЯ"
-            if (k.startsWith("mapping.")) {
-                String logical = v.asText(null);
-                if (logical != null && !logical.isBlank() && !"none".equalsIgnoreCase(logical)) {
-                    out.add(logical);
-                }
-            }
-        }
-        return out;
     }
 
     private static void copyIfExists(JsonNode src, ObjectNode dst, List<String> fields) {
@@ -173,5 +168,17 @@ public final class DetailAnswerBuilder {
         if (node == null) return def;
         JsonNode v = node.get(field);
         return (v == null || v.isNull()) ? def : v.asText(def);
+    }
+
+    private static JsonNode firstExisting(JsonNode node, String... names) {
+        if (node == null || names == null) return null;
+        for (String name : names) {
+            if (name == null) continue;
+            JsonNode found = node.get(name);
+            if (found != null && !found.isNull()) {
+                return found;
+            }
+        }
+        return null;
     }
 }

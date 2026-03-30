@@ -24,11 +24,7 @@ public final class DetailAnswerService {
         if (originalEvent == null || validation == null) return null;
 
         try {
-            ObjectNode node = builder.buildDetailAnswer(
-                    originalEvent,
-                    validation.allResult(),
-                    validation.detailByField()
-            );
+            ObjectNode node = builder.buildDetailAnswer(originalEvent, validation);
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
             log.warn("Failed to build detail answer", e);
