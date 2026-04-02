@@ -1,5 +1,7 @@
 package ru.gpbapp.datafirewallflink.config;
 
+import org.apache.flink.api.java.utils.ParameterTool;
+
 public record JobConfig(
         String mqHost,
         int mqPort,
@@ -11,20 +13,21 @@ public record JobConfig(
         String mqPassword
 ) {
 
-    public static JobConfig fromArgs(String[] args) {
+    public static JobConfig fromArgs(ParameterTool pt) {
+        if (pt == null) {
+            pt = ParameterTool.fromMap(java.util.Map.of());
+        }
 
-        String host = "localhost";
-        int port = 1414;
-        String channel = "DEV.APP.SVRCONN";
-        String qmgr = "QM1";
-        String inQueue = "TEST.QUEUE";
-        String outQueue = "REPLY.QUEUE";
+        String host = pt.get("mq.host", "localhost");
+        int port = pt.getInt("mq.port", 1414);
+        String channel = pt.get("mq.channel", "DEV.APP.SVRCONN");
+        String qmgr = pt.get("mq.qmgr", "QM1");
+        String inQueue = pt.get("mq.inQueue", "TEST.QUEUE");
+        String outQueue = pt.get("mq.outQueue", "REPLY.QUEUE");
 
-        // 🥉 дефолт (локально)
         String user = "admin";
         String password = "admin123";
 
-        // 🥈 переменные окружения (если есть)
         String envUser = System.getenv("MQ_USER");
         String envPassword = System.getenv("MQ_PASSWORD");
 
@@ -35,34 +38,8 @@ public record JobConfig(
             password = envPassword;
         }
 
-        // 🥇 аргументы запуска (имеют высший приоритет)
-        for (String arg : args) {
-            if (arg == null) continue;
-
-            if (arg.startsWith("--mq.host="))
-                host = arg.substring("--mq.host=".length());
-
-            else if (arg.startsWith("--mq.port="))
-                port = Integer.parseInt(arg.substring("--mq.port=".length()));
-
-            else if (arg.startsWith("--mq.channel="))
-                channel = arg.substring("--mq.channel=".length());
-
-            else if (arg.startsWith("--mq.qmgr="))
-                qmgr = arg.substring("--mq.qmgr=".length());
-
-            else if (arg.startsWith("--mq.inQueue="))
-                inQueue = arg.substring("--mq.inQueue=".length());
-
-            else if (arg.startsWith("--mq.outQueue="))
-                outQueue = arg.substring("--mq.outQueue=".length());
-
-            else if (arg.startsWith("--mq.user="))
-                user = arg.substring("--mq.user=".length());
-
-            else if (arg.startsWith("--mq.password="))
-                password = arg.substring("--mq.password=".length());
-        }
+        user = pt.get("mq.user", user);
+        password = pt.get("mq.password", password);
 
         return new JobConfig(
                 host,

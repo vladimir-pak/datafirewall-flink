@@ -66,10 +66,6 @@ public class JsonEventProcessor {
         }
     }
 
-    /**
-     * ✅ Новый быстрый путь: конвертация без повторного парсинга.
-     * Используй, если ты уже сделал mapper.readTree(...) снаружи.
-     */
     public Optional<FlatProfileDto> toFlatProfile(JsonNode event) {
         if (event == null) return Optional.empty();
         try {

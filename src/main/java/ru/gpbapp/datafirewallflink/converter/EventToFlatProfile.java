@@ -39,19 +39,31 @@ public final class EventToFlatProfile {
         ObjectNode out = mapper.createObjectNode();
 
         JsonNode data = eventJson.path("data");
-        if (data.isMissingNode() || data.isNull()) return out;
+        if (data.isMissingNode() || data.isNull() || !data.isObject()) {
+            return out;
+        }
 
-        // baseInfo
-        projectSection(data.path("baseInfo"), out);
+        Iterator<Map.Entry<String, JsonNode>> fields = data.fields();
 
-        // documents
-        JsonNode documents = data.path("documents");
-        projectSection(documents, out);
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String blockName = entry.getKey();
+            JsonNode section = entry.getValue();
 
-        // clientIdCard → выбираем primary=true
-        JsonNode card = pickPrimary(documents.path("clientIdCard"));
-        if (card != null) {
-            projectSection(card, out);
+            if (section == null || !section.isObject()) {
+                continue;
+            }
+
+            // применяем mapping для любого блока
+            projectSection(section, out);
+
+            // специальная логика для документов (clientIdCard)
+            if ("documents".equals(blockName)) {
+                JsonNode card = pickPrimary(section.path("clientIdCard"));
+                if (card != null) {
+                    projectSection(card, out);
+                }
+            }
         }
 
         return out;

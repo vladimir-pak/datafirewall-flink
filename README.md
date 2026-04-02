@@ -61,3 +61,69 @@ DataFirewallFlink — приложение для обработки и филь
 - Атомарное переключение версии правил
 - Горизонтальная масштабируемость
 Архитектура обеспечивает консистентную и масштабируемую потоковую обработку с динамическим управлением бизнес-логикой.
+
+
+##  Параметры запуска
+
+--rules.loader=http
+--ignite.apiUrl=http://127.0.0.1:8080
+--kafka.bootstrap=localhost:9092
+--kafka.topic=rules-update
+--kafka.group=dfw-rules-group
+--use.mq=false
+--cache.bootstrap.enabled=true
+--politics.bootstrap.enabled=false
+--log.payloads=true
+--test.json.path=/Users/kampus/Downloads/query_full.json
+--mq.host=localhost
+--mq.port=1414
+--mq.channel=DEV.APP.SVRCONN
+--mq.qmgr=QM1
+--mq.inQueue=TEST.QUEUE
+--mq.outQueue=REPLY.QUEUE
+--mq.user=admin
+--mq.password=admin123
+--test.politic.caches.path=/Users/kampus/Downloads/test-caches.json
+--test.politic.caches.enabled=true
+--parallelism.source=1
+--parallelism.kafka=1
+--parallelism.process=1
+--parallelism.sink=1
+
+
+##  Параметры запуска описание
+
+
+--rules.loader=http \                          # Источник правил (http или thin)
+--ignite.apiUrl=http://127.0.0.1:8080 \        # URL Ignite API
+
+--kafka.bootstrap=localhost:9092 \             # Kafka broker
+--kafka.topic=rules-update \                   # Топик обновления кэшей
+--kafka.group=dfw-rules-group \                # Consumer group
+
+--use.mq=false \                               # false = читаем из файла тестовый режим, true = из MQ
+
+--cache.bootstrap.enabled=true \               # Загружать кэши при старте
+--politics.bootstrap.enabled=false \           # Загружать politics-кэши при старте
+
+--log.payloads=true \                          # Логировать payload (с маской) для скрытия данных
+
+--test.json.path=/Users/kampus/Downloads/query_full.json \  # Путь к тестовому  входному JSON если запустить без MQ 
+
+--mq.host=localhost \                          # MQ хост
+--mq.port=1414 \                               # MQ порт
+--mq.channel=DEV.APP.SVRCONN \                 # MQ канал
+--mq.qmgr=QM1 \                                # Queue manager
+
+--mq.inQueue=TEST.QUEUE \                      # Очередь входящих сообщений (используется только при use.mq=true)
+--mq.outQueue=REPLY.QUEUE \                    # Очередь для отправки ответов
+
+--mq.user=admin \                              # Пользователь MQ
+--mq.password=admin123                         # Пароль MQ
+--test.politic.caches.path=/Users/kampus/Downloads/test_politic_caches.json # путь к файлу с тестовыми политик кешами если не инициализировать через иннайт
+--test.politic.caches.enabled=true                     # использовать ли тестовое заполнение политик кешей
+
+
+
+
+

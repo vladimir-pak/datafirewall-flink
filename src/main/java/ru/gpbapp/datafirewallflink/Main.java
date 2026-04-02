@@ -20,6 +20,9 @@ import ru.gpbapp.datafirewallflink.mq.MqSink;
 import ru.gpbapp.datafirewallflink.mq.MqSource;
 import ru.gpbapp.datafirewallflink.services.MqWithRulesReloadBroadcastProcessFunction;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -28,169 +31,51 @@ public class Main {
 
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
-    // Тестовый JSON для режима --use.mq=false
-    private static final String TEST_JSON = """
-{
-  "dfw_hostname": "mkd-d32asl-wrk",
-  "dfw_user_login": "a_mkd_e_mq",
-  "dfw_readed_from_mq_dttm": "2025-09-01T12:02:50.4124228Z",
-  "dfw_action_dttm": "2025-09-01T12:02:50.4204910Z",
-  "dfw_action_type": "QUERY",
-  "dfw_created_dttm": "2025-09-01T12:02:50.394Z",
-  "dfw_dataset_code": "Дашборд.УС ЛИК",
-  "data": {
-    "homeAddress": {
-      "mapping.block": "АДРЕС.Строение",
-      "mapping.building": "none",
-      "mapping.areaType": "none",
-      "regionCode": "24",
-      "postalCode": "660043",
-      "mapping.area": "АДРЕС.Район",
-      "mapping.houseNumber": "none",
-      "regionType": "край",
-      "mapping.regionType": "none",
-      "area": null,
-      "dataset_code": "УС.ЛиК.Адрес проживания",
-      "flat": "48",
-      "block": null,
-      "regionName": "Красноярский",
-      "mapping.postalCode": "АДРЕС.Почтовый индекс",
-      "district": "Сибирский",
-      "settlement": null,
-      "mapping.district": "none",
-      "countryCode": "643",
-      "mapping.regionName": "АДРЕС.Наименование региона",
-      "areaType": null,
-      "building": null,
-      "mapping.countryCode": "АДРЕС.Код страны",
-      "mapping.street": "АДРЕС.Улица",
-      "houseNumber": "67",
-      "mapping.regionCode": "none",
-      "street": "Березина",
-      "city": "Красноярск",
-      "mapping.countryName": "АДРЕС.Страна",
-      "mapping.flat": "none",
-      "countryName": "Россия",
-      "mapping.settlement": "АДРЕС.Населенный пункт",
-      "mapping.city": "АДРЕС.Наименование города"
-    },
-    "documents": {
-      "mapping.clientSnils": "ОСНОВНЫЕ СВЕДЕНИЯ.СНИЛС",
-      "clientInn": null,
-      "dataset_code": "УС.ЛиК .Документы клиента",
-      "clientIdCard": [
-        {
-          "issueAuthority": "ТП ОУФМС РОССИИ ПО МОСКОВСКОЙ ОБЛ.В ДМИТРОВСКОМ Р-НЕ В ПОС. ИШКЕ",
-          "mapping.issueDate": "ДУЛ.Паспорт РФ.Дата выдачи",
-          "mapping.primary": "ДУЛ.Паспорт РФ.Признак основного",
-          "mapping.issueAuthority": "ДУЛ.Паспорт РФ.Кем выдан",
-          "primary": true,
-          "number": "518273",
-          "expiryDate": null,
-          "mapping.series": "ДУЛ.Паспорт РФ.Серия",
-          "mapping.number": "ДУЛ.Паспорт РФ.Номер",
-          "mapping.expiryDate": "none",
-          "mapping.departmentCode": "ДУЛ.Паспорт РФ.Код подразделения",
-          "mapping.type": "ДУЛ.Паспорт РФ.Тип ДУЛ",
-          "type": "PASSPORT_RU",
-          "issueDate": "2021-12-29",
-          "elemId": "PASSPORT_RU",
-          "departmentCode": "500-020",
-          "series": "4621"
-        }
-      ],
-      "clientSnils": "344-889-028 21",
-      "mapping.clientInn": "ИНН.Номер свидетельства"
-    },
-    "registrationAddress": {
-      "mapping.block": "АДРЕС.Строение",
-      "mapping.building": "none",
-      "mapping.areaType": "none",
-      "regionCode": "24",
-      "postalCode": "660043",
-      "mapping.area": "АДРЕС.Район",
-      "mapping.houseNumber": "none",
-      "regionType": "край",
-      "mapping.regionType": "none",
-      "area": null,
-      "dataset_code": "УС.ЛиК.Адрес регистрации",
-      "flat": "48",
-      "block": null,
-      "regionName": "Красноярский",
-      "mapping.postalCode": "АДРЕС.Почтовый индекс",
-      "district": "Сибирский",
-      "settlement": null,
-      "mapping.district": "none",
-      "countryCode": "643",
-      "mapping.regionName": "АДРЕС.Наименование региона",
-      "areaType": null,
-      "building": null,
-      "mapping.countryCode": "АДРЕС.Код страны",
-      "mapping.street": "АДРЕС.Улица",
-      "houseNumber": "67",
-      "mapping.regionCode": "none",
-      "street": "Березина",
-      "city": "Красноярск",
-      "mapping.countryName": "АДРЕС.Страна",
-      "mapping.flat": "none",
-      "countryName": "Россия",
-      "mapping.settlement": "АДРЕС.Населенный пункт",
-      "mapping.city": "АДРЕС.Наименование города"
-    },
-    "contactInfo": {
-      "mobilePhone": "79859971243",
-      "dataset_code": "УС.ЛИК.Контакты клиента",
-      "mapping.emailValue": "КОНТАКТ.Почта.Электронный адрес (email)",
-      "mapping.mobilePhone": "КОНТАКТ.Телефон.Номер телефона",
-      "emailValue": "makogonenkoadel66@gmail.com"
-    },
-    "baseInfo": {
-      "birthCountry": "РОССИЙСКАЯ ФЕДЕРАЦИЯ",
-      "birthdate": "1976-10-30",
-      "mapping.surname": "ОСНОВНЫЕ СВЕДЕНИЯ.Фамилия",
-      "isPatronymicLack": null,
-      "gender": "FEMALE",
-      "dataset_code": "УС.ЛиК.Данные клиента",
-      "mapping.name": "ОСНОВНЫЕ СВЕДЕНИЯ.Имя",
-      "birthPlace": "Алтай",
-      "mapping.fullName": "ОСНОВНЫЕ СВЕДЕНИЯ.ФИО одной строкой",
-      "surname": "Макогоненко",
-      "mapping.birthPlace": "ОСНОВНЫЕ СВЕДЕНИЯ.Место рождения",
-      "mapping.isPatronymicLack": "ОСНОВНЫЕ СВЕДЕНИЯ.Признак отсутствия отчества",
-      "name": "Адель",
-      "fullName": "Макогоненко Адель Фроловна",
-      "mapping.patronymic": "ОСНОВНЫЕ СВЕДЕНИЯ.Отчество",
-      "mapping.birthdate": "ОСНОВНЫЕ СВЕДЕНИЯ.Дата рождения",
-      "patronymic": "Фроловна",
-      "citizenship": ["РОССИЙСКАЯ ФЕДЕРАЦИЯ"],
-      "mapping.citizenship": "ГРАЖДАНСТВО.Страна",
-      "mapping.birthCountry": "none",
-      "mapping.gender": "ОСНОВНЫЕ СВЕДЕНИЯ.Пол"
-    }
-  },
-  "dfw_query_id": "ID:05510000000000002b7a0bcb516145a0b7ee76c93dd53ece"
-}
-""";
+    private static final String DEFAULT_KAFKA_BOOTSTRAP = "localhost:9092";
+    private static final String DEFAULT_KAFKA_TOPIC = "rules-update";
+    private static final String DEFAULT_KAFKA_GROUP = "dfw-rules-group";
+    private static final int DEFAULT_PARALLELISM = 1;
 
     public static void main(String[] args) throws Exception {
-
         String[] normalized = normalizeArgs(args);
         ParameterTool pt = ParameterTool.fromArgs(normalized);
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.getConfig().setGlobalJobParameters(pt);
 
-        int p = pt.getInt("parallelism", 1);
-        env.setParallelism(p);
+        int parallelism = pt.getInt("parallelism.source", DEFAULT_PARALLELISM);
+        env.setParallelism(parallelism);
 
-        JobConfig cfg = JobConfig.fromArgs(normalized);
-
-        String mqUser = cfg.mqUser();
-        String mqPassword = cfg.mqPassword();
+        JobConfig cfg = JobConfig.fromArgs(pt);
 
         boolean useMq = pt.getBoolean("use.mq", true);
+        String kafkaBootstrap = pt.get("kafka.bootstrap", DEFAULT_KAFKA_BOOTSTRAP);
+        String kafkaTopic = pt.get("kafka.topic", DEFAULT_KAFKA_TOPIC);
+        String kafkaGroup = pt.get("kafka.group", DEFAULT_KAFKA_GROUP);
 
-        // --- MQ stream (или тестовый JSON) ---
+        String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
+        String rulesLoader = pt.get("rules.loader", "http");
+        boolean cacheBootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);
+        boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
+        boolean logPayloads = pt.getBoolean("log.payloads", false);
+
+        String testJsonPath = pt.get("test.json.path", "").trim();
+
+        logStartupConfig(
+                parallelism,
+                useMq,
+                kafkaBootstrap,
+                kafkaTopic,
+                kafkaGroup,
+                igniteApiUrl,
+                rulesLoader,
+                cacheBootstrapEnabled,
+                politicsBootstrapEnabled,
+                logPayloads,
+                testJsonPath,
+                cfg
+        );
+
         final DataStream<MqRecord> mqStream;
 
         if (useMq) {
@@ -201,30 +86,36 @@ public class Main {
                                     cfg.mqChannel(),
                                     cfg.mqQmgr(),
                                     cfg.mqInQueue(),
-                                    mqUser,
-                                    mqPassword
+                                    cfg.mqUser(),
+                                    cfg.mqPassword()
                             ),
                             "mq-source"
                     )
                     .name("mq-source")
                     .setParallelism(1);
         } else {
-            log.warn("TEST MODE: using hardcoded JSON instead of MQ. Set --use.mq=true to read from MQ.");
-            mqStream = env
-                    .fromElements(new MqRecord(new byte[0], TEST_JSON))
+            if (testJsonPath.isBlank()) {
+                throw new IllegalArgumentException(
+                        "For --use.mq=false you must provide --test.json.path=/path/to/file.json"
+                );
+            }
+
+            String testJson = readJsonFile(testJsonPath);
+
+            log.warn(
+                    "TEST MODE: using JSON from file instead of MQ. path={}. Set --use.mq=true to read from MQ.",
+                    testJsonPath
+            );
+
+            mqStream = env.fromElements(new MqRecord(new byte[0], testJson))
                     .name("test-json-source")
                     .setParallelism(1);
         }
 
-// --- Kafka control stream ---
-        String bootstrap = pt.get("kafka.bootstrap", "localhost:9092");
-        String topic = pt.get("kafka.topic", "dfw-rules");
-        String group = pt.get("kafka.group", "dfw-rules-group");
-
         KafkaSource<CacheUpdateEvent> kafkaSource = KafkaSource.<CacheUpdateEvent>builder()
-                .setBootstrapServers(bootstrap)
-                .setTopics(topic)
-                .setGroupId(group)
+                .setBootstrapServers(kafkaBootstrap)
+                .setTopics(kafkaTopic)
+                .setGroupId(kafkaGroup)
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setValueOnlyDeserializer(new CacheUpdateEventDeserializationSchema())
                 .build();
@@ -234,7 +125,6 @@ public class Main {
                 .name("rules-kafka")
                 .setParallelism(1);
 
-// broadcast state: храним последнее событие обновления кэша
         MapStateDescriptor<String, CacheUpdateEvent> bcDesc =
                 new MapStateDescriptor<>(
                         "cache-update-broadcast",
@@ -244,7 +134,6 @@ public class Main {
 
         BroadcastStream<CacheUpdateEvent> bcUpdates = updates.broadcast(bcDesc);
 
-// --- connect MQ + broadcast updates ---
         DataStream<MqReply> processed = mqStream
                 .connect(bcUpdates)
                 .process(new MqWithRulesReloadBroadcastProcessFunction(bcDesc))
@@ -261,8 +150,8 @@ public class Main {
                         cfg.mqChannel(),
                         cfg.mqQmgr(),
                         cfg.mqOutQueue(),
-                        mqUser,
-                        mqPassword
+                        cfg.mqUser(),
+                        cfg.mqPassword()
                 ))
                 .name("mq-sink")
                 .setParallelism(1);
@@ -270,16 +159,84 @@ public class Main {
         env.execute("DataFirewall IBM MQ Job (SHORT ANSWER) + Kafka Rules Reload");
     }
 
+    private static void logStartupConfig(
+            int parallelism,
+            boolean useMq,
+            String kafkaBootstrap,
+            String kafkaTopic,
+            String kafkaGroup,
+            String igniteApiUrl,
+            String rulesLoader,
+            boolean cacheBootstrapEnabled,
+            boolean politicsBootstrapEnabled,
+            boolean logPayloads,
+            String testJsonPath,
+            JobConfig cfg
+    ) {
+        log.info(
+                "[MAIN] startup config: parallelism={}, use.mq={}, kafka.bootstrap={}, kafka.topic={}, kafka.group={}, " +
+                        "ignite.apiUrl={}, rules.loader={}, cache.bootstrap.enabled={}, politics.bootstrap.enabled={}, " +
+                        "log.payloads={}, test.json.path={}, mq.host={}, mq.port={}, mq.channel={}, mq.qmgr={}, mq.inQueue={}, mq.outQueue={}, mq.user={}",
+                parallelism,
+                useMq,
+                kafkaBootstrap,
+                kafkaTopic,
+                kafkaGroup,
+                igniteApiUrl,
+                rulesLoader,
+                cacheBootstrapEnabled,
+                politicsBootstrapEnabled,
+                logPayloads,
+                testJsonPath.isBlank() ? "<empty>" : testJsonPath,
+                cfg.mqHost(),
+                cfg.mqPort(),
+                cfg.mqChannel(),
+                cfg.mqQmgr(),
+                cfg.mqInQueue(),
+                cfg.mqOutQueue(),
+                cfg.mqUser()
+        );
+    }
+
+    private static String readJsonFile(String filePath) {
+        try {
+            Path path = Path.of(filePath);
+
+            if (!Files.exists(path)) {
+                throw new IllegalArgumentException("Test JSON file does not exist: " + filePath);
+            }
+            if (!Files.isRegularFile(path)) {
+                throw new IllegalArgumentException("Test JSON path is not a file: " + filePath);
+            }
+
+            String json = Files.readString(path, StandardCharsets.UTF_8);
+            if (json == null || json.isBlank()) {
+                throw new IllegalArgumentException("Test JSON file is empty: " + filePath);
+            }
+
+            return json;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read test JSON file: " + filePath, e);
+        }
+    }
+
     private static String[] normalizeArgs(String[] args) {
-        if (args == null || args.length == 0) return new String[0];
+        if (args == null || args.length == 0) {
+            return new String[0];
+        }
+
         List<String> out = new ArrayList<>();
         for (String a : args) {
-            if (a == null) continue;
+            if (a == null) {
+                continue;
+            }
             if (a.startsWith("--") && a.contains("=")) {
                 int idx = a.indexOf('=');
                 out.add(a.substring(0, idx));
                 out.add(a.substring(idx + 1));
-            } else out.add(a);
+            } else {
+                out.add(a);
+            }
         }
         return out.toArray(new String[0]);
     }

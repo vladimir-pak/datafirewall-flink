@@ -33,10 +33,9 @@ import ru.gpbapp.datafirewallflink.mq.MqReply;
 import ru.gpbapp.datafirewallflink.rule.RulesReloader;
 import ru.gpbapp.datafirewallflink.validation.ValidationResult;
 
-import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -120,7 +119,12 @@ public class MqWithRulesReloadBroadcastProcessFunction
         boolean bootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);
         boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
 
-        initTestCaches();
+        boolean testCachesEnabled = pt.getBoolean("test.politic.caches.enabled", false);
+        if (testCachesEnabled) {
+            initTestCaches(pt);
+        } else {
+            log.info("[TEST] test caches initialization is disabled.");
+        }
 
         if (bootstrapEnabled) {
             CacheBootstrapService bootstrapService = new CacheBootstrapService(
@@ -243,64 +247,151 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 return;
             }
 
-            Map<String, Set<String>> fieldToRules = politicsControlAreaRulesCache.get(controlArea);
-            if (fieldToRules == null || fieldToRules.isEmpty()) {
+            Map<String, Set<String>> allFieldToRules = politicsControlAreaRulesCache.get(controlArea);
+            if (allFieldToRules == null || allFieldToRules.isEmpty()) {
                 log.warn("[PIPE][{}] fieldToRules not found for controlArea={} datasetCode={}",
                         qid, controlArea, datasetCode);
                 return;
             }
 
+            log.info("[PIPE][{}] datasetCode={} controlArea={} mappedFields={}",
+                    qid, datasetCode, controlArea, allFieldToRules.keySet());
+
+            Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
+
+            if (logPayloads && log.isInfoEnabled()) {
+                log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}",
+                        qid, normalizedMap.size(), normalizedMap.keySet());
+                log.info("[PIPE][{}] 2) NORMALIZED_MAP full(masked):\n{}",
+                        qid,
+                        prettyObject(maskMap(normalizedMap)));
+            }
+
+            Map<String, Rule> compiledRules = rulesRegistry.snapshot();
+
+            // блоки, которые надо валидировать отдельно
             Set<String> excludedBlocks = politicsDatasetExclusionCache.get(controlArea);
             if (excludedBlocks == null) {
                 excludedBlocks = Set.of();
             }
 
-            log.info("[PIPE][{}] datasetCode={} controlArea={} mappedFields={} excludedBlocks={}",
-                    qid, datasetCode, controlArea, fieldToRules.keySet(), excludedBlocks);
+            JsonNode dataNode = originalEvent.path("data");
 
-            Map<String, Rule> compiledRules = rulesRegistry.snapshot();
+            Map<String, JsonNode> blockNodes = collectTopLevelBlockNodes(dataNode);
+            Map<String, Map<String, String>> excludedBlockNormalizedMaps = new LinkedHashMap<>();
+            Map<String, String> excludedBlockDatasetCodes = new LinkedHashMap<>();
+            Set<String> excludedLogicalFields = new LinkedHashSet<>();
 
-            ValidationResult validation;
-
-            if (excludedBlocks.isEmpty()) {
-                Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
-
-                if (logPayloads && log.isInfoEnabled()) {
-                    log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}",
-                            qid, normalizedMap.size(), normalizedMap.keySet());
-                    log.info("[PIPE][{}] 2) NORMALIZED_MAP full(masked):\n{}",
-                            qid,
-                            prettyObject(maskMap(normalizedMap)));
+            for (String blockName : excludedBlocks) {
+                JsonNode blockNode = blockNodes.get(blockName);
+                if (blockNode == null || !blockNode.isObject()) {
+                    continue;
                 }
 
-                Map<String, Set<String>> filteredFieldToRules =
-                        filterFieldToRulesByNormalizedMap(fieldToRules, normalizedMap);
+                Map<String, String> blockNormalized = normalizeSingleBlock(blockName, blockNode);
+                excludedBlockNormalizedMaps.put(blockName, blockNormalized);
+                excludedLogicalFields.addAll(blockNormalized.keySet());
 
-                ValidationResult base = validationService.validate(
-                        compiledRules,
-                        normalizedMap,
-                        filteredFieldToRules
-                );
+                String blockDatasetCode = text(blockNode, "dataset_code", blockName);
+                excludedBlockDatasetCodes.put(blockName, blockDatasetCode);
 
-                validation = new ValidationResult(
-                        base.details(),
-                        base.allResult(),
-                        base.processStatus(),
-                        base.detailByField(),
-                        Map.of()
-                );
-            } else {
-                validation = validateWithExcludedBlocks(
-                        qid,
-                        originalEvent,
-                        controlArea,
-                        fieldToRules,
-                        excludedBlocks,
-                        compiledRules
-                );
+                if (logPayloads && log.isInfoEnabled()) {
+                    log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}",
+                            qid,
+                            blockName,
+                            blockDatasetCode,
+                            prettyObject(maskMap(blockNormalized)));
+                }
             }
 
-            String shortJson = shortAnswerService.build(originalEvent, validation);
+            // основной dataset без полей excluded blocks
+            Map<String, String> mainNormalizedMap =
+                    removeLogicalFields(normalizedMap, excludedLogicalFields);
+
+            Map<String, Set<String>> mainFieldToRules =
+                    removeLogicalFieldsFromFieldToRules(allFieldToRules, excludedLogicalFields);
+
+            Map<String, String> mainEffectiveNormalizedMap =
+                    buildEffectiveNormalizedMap(controlArea, mainNormalizedMap, mainFieldToRules);
+
+            Map<String, Set<String>> mainEffectiveFieldToRules =
+                    buildEffectiveFieldToRules(controlArea, mainEffectiveNormalizedMap, mainFieldToRules);
+
+            ValidationResult mainValidation = validationService.validate(
+                    compiledRules,
+                    mainEffectiveNormalizedMap,
+                    mainEffectiveFieldToRules
+            );
+
+            Map<String, Map<String, String>> mergedDetailByField = new LinkedHashMap<>();
+            if (mainValidation.detailByField() != null) {
+                mergedDetailByField.putAll(mainValidation.detailByField());
+            }
+
+            Map<String, Map<String, Map<String, String>>> mergedDetailByDataset = new LinkedHashMap<>();
+            mergedDetailByDataset.put(datasetCode, safeFieldMap(mainValidation.detailByField()));
+
+            boolean anyError = "ERROR".equalsIgnoreCase(mainValidation.allResult());
+            boolean anyRuleException = "RULE_EXCEPTION".equalsIgnoreCase(mainValidation.processStatus());
+
+            // отдельная валидация excluded blocks
+            for (String blockName : excludedBlocks) {
+                JsonNode blockNode = blockNodes.get(blockName);
+                if (blockNode == null || !blockNode.isObject()) {
+                    continue;
+                }
+
+                String blockDatasetCode = excludedBlockDatasetCodes.getOrDefault(blockName, blockName);
+                String blockControlArea = politicsDataset2ControlAreaCache.get(blockDatasetCode);
+                if (blockControlArea == null || blockControlArea.isBlank()) {
+                    blockControlArea = controlArea;
+                }
+
+                Map<String, String> blockNormalizedMap =
+                        excludedBlockNormalizedMaps.getOrDefault(blockName, Map.of());
+
+                Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
+
+                // если mapping.* в блоке пустой/неполный — подстрахуемся реально найденными logical fields
+                blockLogicalFields.addAll(blockNormalizedMap.keySet());
+
+                Map<String, Set<String>> blockFieldToRules =
+                        selectFieldToRulesByKeys(allFieldToRules, blockLogicalFields);
+
+                Map<String, String> blockEffectiveNormalizedMap =
+                        buildEffectiveNormalizedMap(blockControlArea, blockNormalizedMap, blockFieldToRules);
+
+                Map<String, Set<String>> blockEffectiveFieldToRules =
+                        buildEffectiveFieldToRules(blockControlArea, blockEffectiveNormalizedMap, blockFieldToRules);
+
+                ValidationResult blockValidation = validationService.validate(
+                        compiledRules,
+                        blockEffectiveNormalizedMap,
+                        blockEffectiveFieldToRules
+                );
+
+                if (blockValidation.detailByField() != null) {
+                    mergedDetailByField.putAll(blockValidation.detailByField());
+                }
+                mergedDetailByDataset.put(blockDatasetCode, safeFieldMap(blockValidation.detailByField()));
+
+                if ("ERROR".equalsIgnoreCase(blockValidation.allResult())) {
+                    anyError = true;
+                }
+                if ("RULE_EXCEPTION".equalsIgnoreCase(blockValidation.processStatus())) {
+                    anyRuleException = true;
+                }
+            }
+
+            ValidationResult finalValidation = new ValidationResult(
+                    null,
+                    anyError ? "ERROR" : "SUCCESS",
+                    anyRuleException ? "RULE_EXCEPTION" : "OK",
+                    Map.copyOf(mergedDetailByField),
+                    Map.copyOf(mergedDetailByDataset)
+            );
+
+            String shortJson = shortAnswerService.build(originalEvent, finalValidation);
             if (shortJson == null) {
                 log.warn("[PIPE][{}] ShortAnswerService returned null.", qid);
                 return;
@@ -310,7 +401,7 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 log.info("[PIPE][{}] 3) ANSWER_SHORT:\n{}", qid, maskJsonPretty(shortJson));
             }
 
-            String detailJson = detailAnswerService.build(originalEvent, validation);
+            String detailJson = detailAnswerService.build(originalEvent, finalValidation);
             if (detailJson != null) {
                 if (logPayloads && log.isInfoEnabled()) {
                     log.info("[PIPE][{}] 4) ANSWER_DETAIL:\n{}", qid, maskJsonPretty(detailJson));
@@ -324,129 +415,6 @@ public class MqWithRulesReloadBroadcastProcessFunction
         } catch (Exception e) {
             log.error("Failed to build answers.", e);
         }
-    }
-
-    private ValidationResult validateWithExcludedBlocks(
-            String qid,
-            JsonNode originalEvent,
-            String controlArea,
-            Map<String, Set<String>> fieldToRules,
-            Set<String> excludedBlocks,
-            Map<String, Rule> compiledRules
-    ) {
-        JsonNode baseEvent = removeExcludedBlocks(originalEvent, excludedBlocks);
-        Map<String, String> baseNormalizedMap = normalizer.normalize(baseEvent);
-
-        if (logPayloads && log.isInfoEnabled()) {
-            log.info("[PIPE][{}] 2) BASE_NORMALIZED_MAP size={} keys={}",
-                    qid, baseNormalizedMap.size(), baseNormalizedMap.keySet());
-            log.info("[PIPE][{}] 2) BASE_NORMALIZED_MAP full(masked):\n{}",
-                    qid,
-                    prettyObject(maskMap(baseNormalizedMap)));
-        }
-
-        Map<String, Set<String>> baseFieldToRules =
-                filterFieldToRulesByNormalizedMap(fieldToRules, baseNormalizedMap);
-
-        ValidationResult baseValidation = validationService.validate(
-                compiledRules,
-                baseNormalizedMap,
-                baseFieldToRules
-        );
-
-        Map<String, Map<String, Map<String, String>>> detailByDataset = new LinkedHashMap<>();
-
-        boolean anyError = "ERROR".equalsIgnoreCase(baseValidation.allResult());
-        boolean anyRuleException = "RULE_EXCEPTION".equalsIgnoreCase(baseValidation.processStatus());
-
-        for (String blockName : excludedBlocks) {
-            String blockDatasetCode = extractDatasetCodeForBlock(originalEvent, blockName);
-            if (blockDatasetCode == null || blockDatasetCode.isBlank()) {
-                log.warn("[PIPE][{}] dataset_code not found for excluded block={}", qid, blockName);
-                continue;
-            }
-
-            String blockControlArea = politicsDataset2ControlAreaCache.get(blockDatasetCode);
-            if (blockControlArea == null || blockControlArea.isBlank()) {
-                blockControlArea = controlArea;
-            }
-
-            Map<String, Set<String>> blockFieldToRules = politicsControlAreaRulesCache.get(blockControlArea);
-            if (blockFieldToRules == null || blockFieldToRules.isEmpty()) {
-                log.warn("[PIPE][{}] fieldToRules not found for excluded block={} datasetCode={} controlArea={}",
-                        qid, blockName, blockDatasetCode, blockControlArea);
-                continue;
-            }
-
-            JsonNode blockEvent = keepOnlyBlock(originalEvent, blockName);
-            Map<String, String> blockNormalizedMap = normalizer.normalize(blockEvent);
-
-            if (logPayloads && log.isInfoEnabled()) {
-                log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} size={} keys={}",
-                        qid, blockName, blockDatasetCode, blockNormalizedMap.size(), blockNormalizedMap.keySet());
-                log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}",
-                        qid, blockName, blockDatasetCode, prettyObject(maskMap(blockNormalizedMap)));
-            }
-
-            Map<String, Set<String>> filteredBlockFieldToRules =
-                    filterFieldToRulesByNormalizedMap(blockFieldToRules, blockNormalizedMap);
-
-            ValidationResult blockValidation = validationService.validate(
-                    compiledRules,
-                    blockNormalizedMap,
-                    filteredBlockFieldToRules
-            );
-
-            if ("ERROR".equalsIgnoreCase(blockValidation.allResult())) {
-                anyError = true;
-            }
-            if ("RULE_EXCEPTION".equalsIgnoreCase(blockValidation.processStatus())) {
-                anyRuleException = true;
-            }
-
-            detailByDataset.put(blockDatasetCode, blockValidation.detailByField());
-        }
-
-        String allResult = anyError ? "ERROR" : "SUCCESS";
-        String processStatus = anyRuleException ? "RULE_EXCEPTION" : "OK";
-
-        return new ValidationResult(
-                null,
-                allResult,
-                processStatus,
-                baseValidation.detailByField(),
-                detailByDataset
-        );
-    }
-
-    private Map<String, Set<String>> filterFieldToRulesByNormalizedMap(
-            Map<String, Set<String>> fieldToRules,
-            Map<String, String> normalizedMap
-    ) {
-        if (fieldToRules == null || fieldToRules.isEmpty() || normalizedMap == null || normalizedMap.isEmpty()) {
-            return Map.of();
-        }
-
-        Map<String, Set<String>> result = new LinkedHashMap<>();
-
-        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
-            String logicalField = entry.getKey();
-            if (logicalField == null || logicalField.isBlank()) {
-                continue;
-            }
-
-            if (normalizedMap.containsKey(logicalField)) {
-                result.put(logicalField, entry.getValue());
-                continue;
-            }
-
-            String alt = logicalField.replace('.', ',');
-            if (normalizedMap.containsKey(alt)) {
-                result.put(logicalField, entry.getValue());
-            }
-        }
-
-        return result;
     }
 
     @Override
@@ -592,61 +560,204 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return null;
     }
 
-    private String extractDatasetCodeForBlock(JsonNode originalEvent, String blockName) {
-        JsonNode blockNode = originalEvent.path("data").path(blockName);
-        if (!blockNode.isObject()) {
-            return null;
+    private Map<String, JsonNode> collectTopLevelBlockNodes(JsonNode dataNode) {
+        Map<String, JsonNode> result = new LinkedHashMap<>();
+        if (dataNode == null || !dataNode.isObject()) {
+            return result;
         }
 
-        JsonNode datasetCodeNode = blockNode.get("dataset_code");
-        if (datasetCodeNode == null || datasetCodeNode.isNull()) {
-            return null;
+        Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry.getValue() != null && entry.getValue().isObject()) {
+                result.put(entry.getKey(), entry.getValue());
+            }
         }
-
-        String datasetCode = datasetCodeNode.asText(null);
-        return datasetCode == null ? null : datasetCode.trim();
+        return result;
     }
 
-    private JsonNode removeExcludedBlocks(JsonNode originalEvent, Set<String> excludedBlocks) {
-        JsonNode copy = originalEvent == null ? null : originalEvent.deepCopy();
-        if (copy == null) {
-            return mapper.createObjectNode();
-        }
-
-        JsonNode dataNode = copy.path("data");
-        if (dataNode instanceof com.fasterxml.jackson.databind.node.ObjectNode dataObj) {
-            for (String block : excludedBlocks) {
-                dataObj.remove(block);
-            }
-        }
-
-        return copy;
+    private Map<String, String> normalizeSingleBlock(String blockName, JsonNode blockNode) {
+        com.fasterxml.jackson.databind.node.ObjectNode root = mapper.createObjectNode();
+        com.fasterxml.jackson.databind.node.ObjectNode data = mapper.createObjectNode();
+        data.set(blockName, blockNode);
+        root.set("data", data);
+        return normalizer.normalize(root);
     }
 
-    private JsonNode keepOnlyBlock(JsonNode originalEvent, String blockName) {
-        JsonNode copy = originalEvent == null ? null : originalEvent.deepCopy();
-        if (copy == null) {
-            return mapper.createObjectNode();
+    private Set<String> collectLogicalFieldsFromBlock(JsonNode blockNode) {
+        Set<String> out = new LinkedHashSet<>();
+        if (blockNode == null || !blockNode.isObject()) {
+            return out;
         }
 
-        JsonNode dataNode = copy.path("data");
-        if (dataNode instanceof com.fasterxml.jackson.databind.node.ObjectNode dataObj) {
-            Iterator<String> it = dataObj.fieldNames();
-            List<String> toRemove = new ArrayList<>();
+        Iterator<Map.Entry<String, JsonNode>> it = blockNode.fields();
+        while (it.hasNext()) {
+            Map.Entry<String, JsonNode> e = it.next();
+            String key = e.getKey();
+            JsonNode value = e.getValue();
 
-            while (it.hasNext()) {
-                String name = it.next();
-                if (!blockName.equals(name)) {
-                    toRemove.add(name);
-                }
+            if (key == null || !key.startsWith("mapping.") || value == null || value.isNull()) {
+                continue;
             }
 
-            for (String name : toRemove) {
-                dataObj.remove(name);
+            String logical = value.asText(null);
+            if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
+                continue;
+            }
+
+            out.add(logical.trim());
+        }
+        return out;
+    }
+
+    private Map<String, String> removeLogicalFields(
+            Map<String, String> source,
+            Set<String> toRemove
+    ) {
+        if (source == null || source.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        if (toRemove == null || toRemove.isEmpty()) {
+            return new LinkedHashMap<>(source);
+        }
+
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : source.entrySet()) {
+            if (!toRemove.contains(entry.getKey())) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Set<String>> removeLogicalFieldsFromFieldToRules(
+            Map<String, Set<String>> fieldToRules,
+            Set<String> toRemove
+    ) {
+        if (fieldToRules == null || fieldToRules.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        if (toRemove == null || toRemove.isEmpty()) {
+            return new LinkedHashMap<>(fieldToRules);
+        }
+
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
+            if (!toRemove.contains(entry.getKey())) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Set<String>> selectFieldToRulesByKeys(
+            Map<String, Set<String>> fieldToRules,
+            Set<String> allowedFields
+    ) {
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        if (fieldToRules == null || fieldToRules.isEmpty() || allowedFields == null || allowedFields.isEmpty()) {
+            return result;
+        }
+
+        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
+            if (allowedFields.contains(entry.getKey())) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Set<String>> filterFieldToRulesByNormalizedMap(
+            Map<String, Set<String>> fieldToRules,
+            Map<String, String> normalizedMap
+    ) {
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        if (fieldToRules == null || fieldToRules.isEmpty() || normalizedMap == null || normalizedMap.isEmpty()) {
+            return result;
+        }
+
+        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
+            String logicalField = entry.getKey();
+            if (logicalField == null || logicalField.isBlank()) {
+                continue;
+            }
+
+            if (normalizedMap.containsKey(logicalField)) {
+                result.put(logicalField, entry.getValue());
+                continue;
+            }
+
+            String alt = logicalField.replace('.', ',');
+            if (normalizedMap.containsKey(alt)) {
+                result.put(logicalField, entry.getValue());
             }
         }
 
-        return copy;
+        return result;
+    }
+
+    private Map<String, String> buildEffectiveNormalizedMap(
+            String controlArea,
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRules
+    ) {
+        Map<String, String> safeNormalized = normalizedMap == null
+                ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(normalizedMap);
+
+        Boolean filterFlag = politicsFilterFlagCache.get(controlArea);
+
+        // false/null -> текущая логика
+        if (!Boolean.TRUE.equals(filterFlag)) {
+            return safeNormalized;
+        }
+
+        // true -> добавляем все поля из fieldToRules, отсутствующие = null
+        Map<String, String> effective = new LinkedHashMap<>();
+
+        for (String logicalField : fieldToRules.keySet()) {
+            if (logicalField == null || logicalField.isBlank()) {
+                continue;
+            }
+
+            if (safeNormalized.containsKey(logicalField)) {
+                effective.put(logicalField, safeNormalized.get(logicalField));
+                continue;
+            }
+
+            String alt = logicalField.replace('.', ',');
+            if (safeNormalized.containsKey(alt)) {
+                effective.put(logicalField, safeNormalized.get(alt));
+                continue;
+            }
+
+            effective.put(logicalField, null);
+        }
+
+        // на всякий случай оставим и прочие фактически пришедшие поля
+        for (Map.Entry<String, String> entry : safeNormalized.entrySet()) {
+            effective.putIfAbsent(entry.getKey(), entry.getValue());
+        }
+
+        return effective;
+    }
+
+    private Map<String, Set<String>> buildEffectiveFieldToRules(
+            String controlArea,
+            Map<String, String> effectiveNormalizedMap,
+            Map<String, Set<String>> fieldToRules
+    ) {
+        Boolean filterFlag = politicsFilterFlagCache.get(controlArea);
+
+        if (Boolean.TRUE.equals(filterFlag)) {
+            return new LinkedHashMap<>(fieldToRules);
+        }
+
+        return filterFieldToRulesByNormalizedMap(fieldToRules, effectiveNormalizedMap);
+    }
+
+    private Map<String, Map<String, String>> safeFieldMap(Map<String, Map<String, String>> source) {
+        return source == null ? Map.of() : source;
     }
 
     private Map<String, String> toStringMap(Map<String, Object> payload, String cacheName) {
@@ -850,95 +961,101 @@ public class MqWithRulesReloadBroadcastProcessFunction
         return out;
     }
 
-    private void initTestCaches() {
-        rulesRegistry.replaceAll(Map.of(), "test");
-
-        politicsDataset2ControlAreaCache.replaceAll(
-                Map.of(
-                        "УС.ЛиК.Адрес проживания", "Дашборд.УС ЛИК",
-                        "УС.ЛиК.Адрес регистрации", "Дашборд.УС ЛИК",
-                        "УС.ЛИК.Контакты клиента", "Дашборд.УС ЛИК",
-                        "УС.ЛиК.Данные клиента", "Дашборд.УС ЛИК",
-                        "УС.ЛиК.Документы клиента", "Дашборд.УС ЛИК"
-                ),
-                "test"
-        );
-
-        politicsControlAreaRulesCache.replaceAll(
-                Map.of(
-                        "Дашборд.УС ЛИК", Map.ofEntries(
-                                Map.entry("АДРЕС.Страна", Set.of("Rule1164", "Rule1169")),
-                                Map.entry("АДРЕС.Район", Set.of("Rule1194")),
-                                Map.entry("АДРЕС.Код страны", Set.of("Rule1193", "Rule1192")),
-                                Map.entry("АДРЕС.Населенный пункт", Set.of("Rule1166", "Rule10198", "Rule10196")),
-                                Map.entry("АДРЕС.Улица", Set.of("Rule10213", "Rule10189", "Rule10188")),
-                                Map.entry("АДРЕС.Почтовый индекс", Set.of("Rule1099", "Rule1098")),
-                                Map.entry("АДРЕС.Наименование города", Set.of("Rule1094", "Rule1096", "Rule1097", "Rule1095", "Rule1144")),
-
-                                Map.entry("КОНТАКТ.Телефон.Номер телефона", Set.of("Rule1146", "Rule1178", "Rule1196")),
-                                Map.entry("КОНТАКТ.Почта.Электронный адрес (email)", Set.of("Rule1174")),
-
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.СНИЛС", Set.of("Rule1180", "Rule1135", "Rule1182", "Rule1080", "Rule1181")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Имя", Set.of("Rule1070", "Rule1068", "Rule1066", "Rule1069", "Rule10192")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Фамилия", Set.of("Rule10328", "Rule1081", "Rule1083", "Rule10121", "Rule1084")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Отчество", Set.of("Rule1162", "Rule1078", "Rule1076", "Rule10194", "Rule10067")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Дата рождения", Set.of("Rule1158", "Rule10185", "Rule1148", "Rule10127")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Место рождения", Set.of("Rule1161", "Rule1075", "Rule1073", "Rule1072", "Rule1074")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Пол", Set.of("Rule1079")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.ФИО одной строкой", Set.of("Rule1091", "Rule1087", "Rule1090", "Rule1088", "Rule1175")),
-                                Map.entry("ОСНОВНЫЕ СВЕДЕНИЯ.Дата смерти", Set.of("Rule1065")),
-
-                                Map.entry("ИНН.Номер свидетельства", Set.of("Rule1092", "Rule1093", "Rule1086")),
-
-                                Map.entry("ДУЛ.Паспорт РФ.Номер", Set.of("Rule1107", "Rule10184")),
-                                Map.entry("ДУЛ.Паспорт РФ.Серия", Set.of("Rule10220", "Rule1109", "Rule1112")),
-                                Map.entry("ДУЛ.Паспорт РФ.Кем выдан", Set.of("Rule1108", "Rule1165", "Rule10201", "Rule1110", "Rule1179")),
-                                Map.entry("ДУЛ.Паспорт РФ.Дата выдачи", Set.of("Rule10133", "Rule10244", "Rule10132", "Rule10135", "Rule10134", "Rule1103")),
-                                Map.entry("ДУЛ.Паспорт РФ.Код подразделения", Set.of("Rule1106", "Rule1105", "Rule1104")),
-
-                                Map.entry("ГРАЖДАНСТВО.Страна", Set.of("Rule10148", "Rule1085"))
-                        )
-                ),
-                "test"
-        );
-
-        politicsErrorMessagesCache.replaceAll(
-                Map.of(
-                        "Rule1164", "Тестовое сообщение для Rule1164",
-                        "Rule1174", "Тестовое сообщение для Rule1174",
-                        "Rule1158", "Тестовое сообщение для Rule1158"
-                ),
-                "test"
-        );
-
-        politicsDatasetExclusionCache.replaceAll(
-                Map.of(
-                        "Дашборд.УС ЛИК", Set.of("homeAddress", "registrationAddress"),
-                        "УС.ЛиК.Адрес проживания", Set.of(),
-                        "УС.ЛиК.Адрес регистрации", Set.of()
-                ),
-                "test"
-        );
-
-        politicsFilterFlagCache.replaceAll(
-                Map.of(
-                        "УС.ЛиК.Адрес проживания", Boolean.TRUE,
-                        "УС.ЛиК.Адрес регистрации", Boolean.TRUE,
-                        "УС.ЛИК.Контакты клиента", Boolean.TRUE,
-                        "УС.ЛиК.Данные клиента", Boolean.TRUE,
-                        "УС.ЛиК.Документы клиента", Boolean.TRUE
-                ),
-                "test"
-        );
-
-        log.info(
-                "[TEST] caches initialized manually: rules={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}",
-                rulesRegistry.size(),
-                politicsDataset2ControlAreaCache.size(),
-                politicsControlAreaRulesCache.size(),
-                politicsErrorMessagesCache.size(),
-                politicsDatasetExclusionCache.size(),
-                politicsFilterFlagCache.size()
-        );
+    private String text(JsonNode node, String field, String def) {
+        if (node == null) {
+            return def;
+        }
+        JsonNode v = node.get(field);
+        return (v == null || v.isNull()) ? def : v.asText(def);
     }
+
+
+    private void initTestCaches(ParameterTool pt) {
+        String path = pt.get("test.politic.caches.path", "").trim();
+
+        if (path.isBlank()) {
+            throw new IllegalArgumentException(
+                    "test.caches.path must be provided for test caches initialization"
+            );
+        }
+
+        try {
+            ru.gpbapp.datafirewallflink.dto.TestCachesConfigDto cfg =
+                    mapper.readValue(
+                            java.nio.file.Files.readString(
+                                    java.nio.file.Path.of(path),
+                                    java.nio.charset.StandardCharsets.UTF_8
+                            ),
+                            ru.gpbapp.datafirewallflink.dto.TestCachesConfigDto.class
+                    );
+
+            String version = (cfg.getVersion() == null || cfg.getVersion().isBlank())
+                    ? "test"
+                    : cfg.getVersion().trim();
+
+            rulesRegistry.replaceAll(Map.of(), version);
+
+            politicsDataset2ControlAreaCache.replaceAll(
+                    cfg.getDataset2ControlArea() == null ? Map.of() : cfg.getDataset2ControlArea(),
+                    version
+            );
+
+            Map<String, Map<String, Set<String>>> controlAreaRules = new LinkedHashMap<>();
+            if (cfg.getControlAreaRules() != null) {
+                for (Map.Entry<String, Map<String, java.util.List<String>>> areaEntry : cfg.getControlAreaRules().entrySet()) {
+                    Map<String, Set<String>> fieldRules = new LinkedHashMap<>();
+                    if (areaEntry.getValue() != null) {
+                        for (Map.Entry<String, java.util.List<String>> fieldEntry : areaEntry.getValue().entrySet()) {
+                            fieldRules.put(
+                                    fieldEntry.getKey(),
+                                    fieldEntry.getValue() == null
+                                            ? java.util.Set.of()
+                                            : new java.util.LinkedHashSet<>(fieldEntry.getValue())
+                            );
+                        }
+                    }
+                    controlAreaRules.put(areaEntry.getKey(), fieldRules);
+                }
+            }
+
+            Map<String, Set<String>> datasetExclusion = new LinkedHashMap<>();
+            if (cfg.getDatasetExclusion() != null) {
+                for (Map.Entry<String, java.util.List<String>> entry : cfg.getDatasetExclusion().entrySet()) {
+                    datasetExclusion.put(
+                            entry.getKey(),
+                            entry.getValue() == null
+                                    ? java.util.Set.of()
+                                    : new java.util.LinkedHashSet<>(entry.getValue())
+                    );
+                }
+            }
+
+            politicsControlAreaRulesCache.replaceAll(controlAreaRules, version);
+            politicsErrorMessagesCache.replaceAll(
+                    cfg.getErrorMessages() == null ? Map.of() : cfg.getErrorMessages(),
+                    version
+            );
+            politicsDatasetExclusionCache.replaceAll(datasetExclusion, version);
+            politicsFilterFlagCache.replaceAll(
+                    cfg.getFilterFlag() == null ? Map.of() : cfg.getFilterFlag(),
+                    version
+            );
+
+            log.info(
+                    "[TEST] caches initialized from file: path={}, version={}, rules={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}",
+                    path,
+                    version,
+                    rulesRegistry.size(),
+                    politicsDataset2ControlAreaCache.size(),
+                    politicsControlAreaRulesCache.size(),
+                    politicsErrorMessagesCache.size(),
+                    politicsDatasetExclusionCache.size(),
+                    politicsFilterFlagCache.size()
+            );
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize test caches from file: " + path, e);
+        }
+    }
+
 }

@@ -6,8 +6,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -38,7 +40,7 @@ public final class DetailAnswerBuilder {
         String mainDataset = getText(originalEvent, "dfw_dataset_code", "UNKNOWN_DATASET");
         JsonNode data = originalEvent == null ? null : originalEvent.get("data");
 
-        JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress", "addressRegistration", "registrationAddress");
+        JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress");
         JsonNode registrationAddressNode = data == null ? null : firstExisting(data, "registrationAddress", "addressRegistration");
 
         String homeDs = getText(homeAddressNode, "dataset_code", "УС.ЛиК.Адрес проживания");
@@ -46,20 +48,41 @@ public final class DetailAnswerBuilder {
 
         ObjectNode detailResults = mapper.createObjectNode();
 
-        detailResults.set(mainDataset, buildBucket(general));
+        Map<String, Map<String, String>> homeBucketMap = byDataset.getOrDefault(homeDs, Map.of());
+        Map<String, Map<String, String>> regBucketMap = byDataset.getOrDefault(regDs, Map.of());
+
+        Set<String> excludedFromMain = new LinkedHashSet<>();
+        excludedFromMain.addAll(homeBucketMap.keySet());
+        excludedFromMain.addAll(regBucketMap.keySet());
+
+        for (Map.Entry<String, Map<String, Map<String, String>>> e : byDataset.entrySet()) {
+            String datasetCode = e.getKey();
+            if (datasetCode == null || datasetCode.isBlank()) {
+                continue;
+            }
+            if (datasetCode.equals(mainDataset)) {
+                continue;
+            }
+            excludedFromMain.addAll(e.getValue().keySet());
+        }
+
+        Map<String, Map<String, String>> mainFiltered = removeFields(general, excludedFromMain);
+        detailResults.set(mainDataset, buildBucket(mainFiltered));
 
         if (byDataset.containsKey(homeDs)) {
-            detailResults.set(homeDs, buildBucket(byDataset.get(homeDs)));
+            detailResults.set(homeDs, buildBucket(homeBucketMap));
         } else {
-            detailResults.set(homeDs, mapper.createObjectNode());
-            ((ObjectNode) detailResults.get(homeDs)).put("ALL_RESULT", "SUCCESS");
+            ObjectNode emptyHome = mapper.createObjectNode();
+            emptyHome.put("ALL_RESULT", "SUCCESS");
+            detailResults.set(homeDs, emptyHome);
         }
 
         if (byDataset.containsKey(regDs)) {
-            detailResults.set(regDs, buildBucket(byDataset.get(regDs)));
+            detailResults.set(regDs, buildBucket(regBucketMap));
         } else {
-            detailResults.set(regDs, mapper.createObjectNode());
-            ((ObjectNode) detailResults.get(regDs)).put("ALL_RESULT", "SUCCESS");
+            ObjectNode emptyReg = mapper.createObjectNode();
+            emptyReg.put("ALL_RESULT", "SUCCESS");
+            detailResults.set(regDs, emptyReg);
         }
 
         for (Map.Entry<String, Map<String, Map<String, String>>> e : byDataset.entrySet()) {
@@ -91,6 +114,28 @@ public final class DetailAnswerBuilder {
             result.put("dfw_created_dttm", now);
         }
 
+        return result;
+    }
+
+    private Map<String, Map<String, String>> removeFields(
+            Map<String, Map<String, String>> source,
+            Set<String> excludedFields
+    ) {
+        if (source == null || source.isEmpty()) {
+            return Map.of();
+        }
+        if (excludedFields == null || excludedFields.isEmpty()) {
+            return source;
+        }
+
+        Map<String, Map<String, String>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, String>> entry : source.entrySet()) {
+            String logicalField = entry.getKey();
+            if (logicalField == null || excludedFields.contains(logicalField)) {
+                continue;
+            }
+            result.put(logicalField, entry.getValue());
+        }
         return result;
     }
 
@@ -151,29 +196,43 @@ public final class DetailAnswerBuilder {
 
     private static String normalizeRuleKey(String ruleName) {
         Matcher m = RULE_NUM.matcher(ruleName.trim());
-        if (m.matches()) return m.group(1);
+        if (m.matches()) {
+            return m.group(1);
+        }
         return ruleName.trim();
     }
 
     private static void copyIfExists(JsonNode src, ObjectNode dst, List<String> fields) {
-        if (src == null || dst == null || fields == null) return;
+        if (src == null || dst == null || fields == null) {
+            return;
+        }
         for (String f : fields) {
-            if (f == null) continue;
+            if (f == null) {
+                continue;
+            }
             JsonNode v = src.get(f);
-            if (v != null && !v.isNull()) dst.set(f, v);
+            if (v != null && !v.isNull()) {
+                dst.set(f, v);
+            }
         }
     }
 
     private static String getText(JsonNode node, String field, String def) {
-        if (node == null) return def;
+        if (node == null) {
+            return def;
+        }
         JsonNode v = node.get(field);
         return (v == null || v.isNull()) ? def : v.asText(def);
     }
 
     private static JsonNode firstExisting(JsonNode node, String... names) {
-        if (node == null || names == null) return null;
+        if (node == null || names == null) {
+            return null;
+        }
         for (String name : names) {
-            if (name == null) continue;
+            if (name == null) {
+                continue;
+            }
             JsonNode found = node.get(name);
             if (found != null && !found.isNull()) {
                 return found;
