@@ -3,6 +3,7 @@ package ru.gpbapp.datafirewallflink.services;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.model.Rule;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.BroadcastState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
@@ -101,10 +102,12 @@ public class MqWithRulesReloadBroadcastProcessFunction
     public void open(Configuration parameters) {
         RuntimeContext rc = getRuntimeContext();
 
-        ParameterTool pt = (ParameterTool) rc.getExecutionConfig().getGlobalJobParameters();
-        if (pt == null) {
-            pt = ParameterTool.fromMap(Map.of());
-        }
+        ExecutionConfig.GlobalJobParameters globalParams =
+                rc.getExecutionConfig().getGlobalJobParameters();
+
+        ParameterTool pt = globalParams == null
+                ? ParameterTool.fromMap(Map.of())
+                : ParameterTool.fromMap(globalParams.toMap());
 
         this.logPayloads = pt.getBoolean("log.payloads", false);
         this.logPreviewLen = pt.getInt("log.preview.len", 600);
@@ -421,14 +424,17 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 log.warn("[PIPE][{}] DetailAnswerService returned null.", qid);
             }
 
+            log.info("[PIPE][{}] shortJson null? {}, detailJson null? {}",
+                    qid, shortJson == null, detailJson == null);
+            if (detailJson != null) {
+                log.info("[PIPE][{}] DETAIL_JSON={}", qid, detailJson);
+            }
+
             ProcessingResult result = new ProcessingResult(
                     new MqReply(in.msgId, shortJson),
                     detailJson
             );
-            log.info("[PIPE][{}] shortJson null? {}, detailJson null? {}", qid, shortJson == null, detailJson == null);
-            if (detailJson != null) {
-                log.info("[PIPE][{}] DETAIL_JSON={}", qid, detailJson);
-            }
+
             out.collect(result);
 
         } catch (Exception e) {
