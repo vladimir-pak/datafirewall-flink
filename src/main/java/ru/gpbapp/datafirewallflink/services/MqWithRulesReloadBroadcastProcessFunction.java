@@ -3,6 +3,7 @@ package ru.gpbapp.datafirewallflink.services;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.model.Rule;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.BroadcastState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
@@ -24,6 +25,7 @@ import ru.gpbapp.datafirewallflink.converter.MappingNormalizer;
 import ru.gpbapp.datafirewallflink.dto.CacheResponseDto;
 import ru.gpbapp.datafirewallflink.dto.HttpBytecodeSource;
 import ru.gpbapp.datafirewallflink.dto.IgniteBytecodeSource;
+import ru.gpbapp.datafirewallflink.dto.ProcessingResult;
 import ru.gpbapp.datafirewallflink.ignite.BytecodeSource;
 import ru.gpbapp.datafirewallflink.ignite.IgniteClientFacade;
 import ru.gpbapp.datafirewallflink.ignite.impl.IgniteClientFacadeImpl;
@@ -47,7 +49,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class MqWithRulesReloadBroadcastProcessFunction
-        extends BroadcastProcessFunction<MqRecord, CacheUpdateEvent, MqReply> {
+        extends BroadcastProcessFunction<MqRecord, CacheUpdateEvent, ProcessingResult> {
 
     private static final Logger log =
             LoggerFactory.getLogger(MqWithRulesReloadBroadcastProcessFunction.class);
@@ -100,10 +102,12 @@ public class MqWithRulesReloadBroadcastProcessFunction
     public void open(Configuration parameters) {
         RuntimeContext rc = getRuntimeContext();
 
-        ParameterTool pt = (ParameterTool) rc.getExecutionConfig().getGlobalJobParameters();
-        if (pt == null) {
-            pt = ParameterTool.fromMap(Map.of());
-        }
+        ExecutionConfig.GlobalJobParameters globalParams =
+                rc.getExecutionConfig().getGlobalJobParameters();
+
+        ParameterTool pt = globalParams == null
+                ? ParameterTool.fromMap(Map.of())
+                : ParameterTool.fromMap(globalParams.toMap());
 
         this.logPayloads = pt.getBoolean("log.payloads", false);
         this.logPreviewLen = pt.getInt("log.preview.len", 600);
@@ -202,7 +206,7 @@ public class MqWithRulesReloadBroadcastProcessFunction
     }
 
     @Override
-    public void processElement(MqRecord in, ReadOnlyContext ctx, Collector<MqReply> out) {
+    public void processElement(MqRecord in, ReadOnlyContext ctx, Collector<ProcessingResult> out) {
         if (in == null || in.payload == null || in.payload.isBlank()) {
             log.warn("[PIPE][no-qid] Empty MQ payload");
             return;
@@ -420,7 +424,18 @@ public class MqWithRulesReloadBroadcastProcessFunction
                 log.warn("[PIPE][{}] DetailAnswerService returned null.", qid);
             }
 
-            out.collect(new MqReply(in.msgId, shortJson));
+            log.info("[PIPE][{}] shortJson null? {}, detailJson null? {}",
+                    qid, shortJson == null, detailJson == null);
+            if (detailJson != null) {
+                log.info("[PIPE][{}] DETAIL_JSON={}", qid, detailJson);
+            }
+
+            ProcessingResult result = new ProcessingResult(
+                    new MqReply(in.msgId, shortJson),
+                    detailJson
+            );
+
+            out.collect(result);
 
         } catch (Exception e) {
             log.error("Failed to build answers.", e);
@@ -431,7 +446,7 @@ public class MqWithRulesReloadBroadcastProcessFunction
     public void processBroadcastElement(
             CacheUpdateEvent ev,
             Context ctx,
-            Collector<MqReply> out
+            Collector<ProcessingResult> out
     ) throws Exception {
         if (ev == null || !ev.isValid()) {
             return;

@@ -1,17 +1,23 @@
 package ru.gpbapp.datafirewallflink;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.connector.base.DeliveryGuarantee;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.BroadcastStream;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.gpbapp.datafirewallflink.config.JobConfig;
+import ru.gpbapp.datafirewallflink.dto.ProcessingResult;
 import ru.gpbapp.datafirewallflink.kafka.CacheUpdateEvent;
 import ru.gpbapp.datafirewallflink.kafka.CacheUpdateEventDeserializationSchema;
 import ru.gpbapp.datafirewallflink.mq.MqRecord;
@@ -34,7 +40,13 @@ public class Main {
     private static final String DEFAULT_KAFKA_BOOTSTRAP = "localhost:9092";
     private static final String DEFAULT_KAFKA_TOPIC = "rules-update";
     private static final String DEFAULT_KAFKA_GROUP = "dfw-rules-group";
+    private static final String DEFAULT_DETAIL_KAFKA_TOPIC = "detail-answer";
     private static final int DEFAULT_PARALLELISM = 1;
+
+    private static final long DEFAULT_CHECKPOINT_INTERVAL_MS = 5000L;
+    private static final long DEFAULT_CHECKPOINT_TIMEOUT_MS = 60000L;
+    private static final long DEFAULT_MIN_PAUSE_BETWEEN_CHECKPOINTS_MS = 1000L;
+    private static final int DEFAULT_MAX_CONCURRENT_CHECKPOINTS = 1;
 
     public static void main(String[] args) throws Exception {
         String[] normalized = normalizeArgs(args);
@@ -46,12 +58,53 @@ public class Main {
         int parallelism = pt.getInt("parallelism.source", DEFAULT_PARALLELISM);
         env.setParallelism(parallelism);
 
+        boolean detailKafkaEnabled = pt.getBoolean("detail.kafka.enabled", false);
+        boolean checkpointingEnabled = pt.getBoolean("flink.checkpoint.enabled", detailKafkaEnabled);
+
+        if (checkpointingEnabled) {
+            long checkpointInterval = pt.getLong(
+                    "flink.checkpoint.interval.ms",
+                    DEFAULT_CHECKPOINT_INTERVAL_MS
+            );
+            long checkpointTimeout = pt.getLong(
+                    "flink.checkpoint.timeout.ms",
+                    DEFAULT_CHECKPOINT_TIMEOUT_MS
+            );
+            long minPauseBetweenCheckpoints = pt.getLong(
+                    "flink.checkpoint.min.pause.ms",
+                    DEFAULT_MIN_PAUSE_BETWEEN_CHECKPOINTS_MS
+            );
+            int maxConcurrentCheckpoints = pt.getInt(
+                    "flink.checkpoint.max.concurrent",
+                    DEFAULT_MAX_CONCURRENT_CHECKPOINTS
+            );
+
+            env.enableCheckpointing(checkpointInterval);
+            env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.AT_LEAST_ONCE);
+            env.getCheckpointConfig().setCheckpointTimeout(checkpointTimeout);
+            env.getCheckpointConfig().setMinPauseBetweenCheckpoints(minPauseBetweenCheckpoints);
+            env.getCheckpointConfig().setMaxConcurrentCheckpoints(maxConcurrentCheckpoints);
+
+            log.info(
+                    "[MAIN] checkpointing enabled: intervalMs={}, timeoutMs={}, minPauseMs={}, maxConcurrent={}",
+                    checkpointInterval,
+                    checkpointTimeout,
+                    minPauseBetweenCheckpoints,
+                    maxConcurrentCheckpoints
+            );
+        } else {
+            log.info("[MAIN] checkpointing disabled");
+        }
+
         JobConfig cfg = JobConfig.fromArgs(pt);
 
         boolean useMq = pt.getBoolean("use.mq", true);
         String kafkaBootstrap = pt.get("kafka.bootstrap", DEFAULT_KAFKA_BOOTSTRAP);
         String kafkaTopic = pt.get("kafka.topic", DEFAULT_KAFKA_TOPIC);
         String kafkaGroup = pt.get("kafka.group", DEFAULT_KAFKA_GROUP);
+
+        String detailKafkaBootstrap = pt.get("detail.kafka.bootstrap", kafkaBootstrap);
+        String detailKafkaTopic = pt.get("detail.kafka.topic", DEFAULT_DETAIL_KAFKA_TOPIC);
 
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
         String rulesLoader = pt.get("rules.loader", "http");
@@ -73,6 +126,10 @@ public class Main {
                 politicsBootstrapEnabled,
                 logPayloads,
                 testJsonPath,
+                detailKafkaEnabled,
+                detailKafkaBootstrap,
+                detailKafkaTopic,
+                checkpointingEnabled,
                 cfg
         );
 
@@ -134,16 +191,21 @@ public class Main {
 
         BroadcastStream<CacheUpdateEvent> bcUpdates = updates.broadcast(bcDesc);
 
-        DataStream<MqReply> processed = mqStream
+        DataStream<ProcessingResult> processed = mqStream
                 .connect(bcUpdates)
                 .process(new MqWithRulesReloadBroadcastProcessFunction(bcDesc))
                 .name("mq-process-with-rules-reload")
                 .setParallelism(1);
 
-        processed
-                .filter(Objects::nonNull)
-                .name("filter-non-null")
+        DataStream<MqReply> shortReplies = processed
+                .map(ProcessingResult::getShortReply)
+                .name("extract-short-reply")
                 .setParallelism(1)
+                .filter(Objects::nonNull)
+                .name("filter-short-reply-non-null")
+                .setParallelism(1);
+
+        shortReplies
                 .addSink(new MqSink(
                         cfg.mqHost(),
                         cfg.mqPort(),
@@ -156,7 +218,41 @@ public class Main {
                 .name("mq-sink")
                 .setParallelism(1);
 
-        env.execute("DataFirewall IBM MQ Job (SHORT ANSWER) + Kafka Rules Reload");
+        if (detailKafkaEnabled) {
+            DataStream<String> detailReplies = processed
+                    .map(ProcessingResult::getDetailJson)
+                    .name("extract-detail-json")
+                    .setParallelism(1)
+                    .filter(s -> s != null && !s.isBlank())
+                    .name("filter-detail-json-non-null")
+                    .setParallelism(1);
+
+            KafkaSink<String> detailKafkaSink = KafkaSink.<String>builder()
+                    .setBootstrapServers(detailKafkaBootstrap)
+                    .setRecordSerializer(
+                            KafkaRecordSerializationSchema.builder()
+                                    .setTopic(detailKafkaTopic)
+                                    .setValueSerializationSchema(new SimpleStringSchema())
+                                    .build()
+                    )
+                    .setDeliverGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                    .build();
+
+            detailReplies
+                    .sinkTo(detailKafkaSink)
+                    .name("detail-kafka-sink")
+                    .setParallelism(1);
+
+            log.info(
+                    "[MAIN] detail kafka sink enabled: bootstrap={}, topic={}",
+                    detailKafkaBootstrap,
+                    detailKafkaTopic
+            );
+        } else {
+            log.info("[MAIN] detail kafka sink is disabled.");
+        }
+
+        env.execute("DataFirewall IBM MQ Job (SHORT ANSWER -> MQ, DETAIL ANSWER -> Kafka) + Kafka Rules Reload");
     }
 
     private static void logStartupConfig(
@@ -171,12 +267,17 @@ public class Main {
             boolean politicsBootstrapEnabled,
             boolean logPayloads,
             String testJsonPath,
+            boolean detailKafkaEnabled,
+            String detailKafkaBootstrap,
+            String detailKafkaTopic,
+            boolean checkpointingEnabled,
             JobConfig cfg
     ) {
         log.info(
                 "[MAIN] startup config: parallelism={}, use.mq={}, kafka.bootstrap={}, kafka.topic={}, kafka.group={}, " +
                         "ignite.apiUrl={}, rules.loader={}, cache.bootstrap.enabled={}, politics.bootstrap.enabled={}, " +
-                        "log.payloads={}, test.json.path={}, mq.host={}, mq.port={}, mq.channel={}, mq.qmgr={}, mq.inQueue={}, mq.outQueue={}, mq.user={}",
+                        "log.payloads={}, test.json.path={}, detail.kafka.enabled={}, detail.kafka.bootstrap={}, detail.kafka.topic={}, " +
+                        "checkpointing.enabled={}, mq.host={}, mq.port={}, mq.channel={}, mq.qmgr={}, mq.inQueue={}, mq.outQueue={}, mq.user={}",
                 parallelism,
                 useMq,
                 kafkaBootstrap,
@@ -188,6 +289,10 @@ public class Main {
                 politicsBootstrapEnabled,
                 logPayloads,
                 testJsonPath.isBlank() ? "<empty>" : testJsonPath,
+                detailKafkaEnabled,
+                detailKafkaBootstrap,
+                detailKafkaTopic,
+                checkpointingEnabled,
                 cfg.mqHost(),
                 cfg.mqPort(),
                 cfg.mqChannel(),
