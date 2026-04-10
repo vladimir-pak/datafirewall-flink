@@ -89,6 +89,9 @@ DataFirewallFlink — приложение для обработки и филь
 --parallelism.kafka=1
 --parallelism.process=1
 --parallelism.sink=1
+--detail.kafka.enabled=true
+--detail.kafka.bootstrap=localhost:9092
+--detail.kafka.topic=detail-answer
 
 
 ##  Параметры запуска описание
