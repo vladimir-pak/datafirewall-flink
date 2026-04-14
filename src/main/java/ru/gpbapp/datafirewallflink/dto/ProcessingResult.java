@@ -1,26 +1,34 @@
 package ru.gpbapp.datafirewallflink.dto;
 
-import ru.gpbapp.datafirewallflink.mq.MqReply;
-
 public class ProcessingResult {
 
-    private MqReply shortReply;
+    private byte[] correlId;
+    private String shortJson;
     private String detailJson;
 
     public ProcessingResult() {
     }
 
-    public ProcessingResult(MqReply shortReply, String detailJson) {
-        this.shortReply = shortReply;
+    public ProcessingResult(byte[] correlId, String shortJson, String detailJson) {
+        this.correlId = correlId;
+        this.shortJson = shortJson;
         this.detailJson = detailJson;
     }
 
-    public MqReply getShortReply() {
-        return shortReply;
+    public byte[] getCorrelId() {
+        return correlId;
     }
 
-    public void setShortReply(MqReply shortReply) {
-        this.shortReply = shortReply;
+    public void setCorrelId(byte[] correlId) {
+        this.correlId = correlId;
+    }
+
+    public String getShortJson() {
+        return shortJson;
+    }
+
+    public void setShortJson(String shortJson) {
+        this.shortJson = shortJson;
     }
 
     public String getDetailJson() {
@@ -34,7 +42,8 @@ public class ProcessingResult {
     @Override
     public String toString() {
         return "ProcessingResult{" +
-                "shortReply=" + shortReply +
+                "correlId=" + (correlId == null ? "null" : ("byte[" + correlId.length + "]")) +
+                ", shortJson='" + shortJson + '\'' +
                 ", detailJson='" + detailJson + '\'' +
                 '}';
     }

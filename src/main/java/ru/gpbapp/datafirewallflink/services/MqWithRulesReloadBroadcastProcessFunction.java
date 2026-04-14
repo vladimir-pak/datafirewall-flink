@@ -431,7 +431,8 @@ public class MqWithRulesReloadBroadcastProcessFunction
             }
 
             ProcessingResult result = new ProcessingResult(
-                    new MqReply(in.msgId, shortJson),
+                    in.msgId,
+                    shortJson,
                     detailJson
             );
 
