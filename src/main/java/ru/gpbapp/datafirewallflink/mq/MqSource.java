@@ -17,7 +17,7 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
 
-public class MqSource extends RichSourceFunction<MqRecord> {
+public class MqSource extends RichSourceFunction<MessageRecord> {
 
     private static final Logger log = LoggerFactory.getLogger(MqSource.class);
 
@@ -41,18 +41,12 @@ public class MqSource extends RichSourceFunction<MqRecord> {
     private final String queueName;
     private final String user;
     private final String password;
-
     private final int waitIntervalMs;
 
     private transient volatile boolean running;
-
     private transient MQQueueManager qMgr;
     private transient MQQueue queue;
 
-    /**
-     * Конструктор ровно под твой вызов:
-     * new MqSource(host, port, channel, qmgr, queue, user, password)
-     */
     public MqSource(
             String host,
             int port,
@@ -62,13 +56,9 @@ public class MqSource extends RichSourceFunction<MqRecord> {
             String user,
             String password
     ) {
-        this(host, port, channel, qmgr, queueName, user, password,
-                false, 600, 1000);
+        this(host, port, channel, qmgr, queueName, user, password, false, 600, 1000);
     }
 
-    /**
-     * Расширенный конструктор (если захочешь управлять логами и wait)
-     */
     public MqSource(
             String host,
             int port,
@@ -88,7 +78,6 @@ public class MqSource extends RichSourceFunction<MqRecord> {
         this.queueName = queueName;
         this.user = user;
         this.password = password;
-
         this.logPayloads = logPayloads;
         this.logPreviewLen = logPreviewLen;
         this.waitIntervalMs = waitIntervalMs;
@@ -96,43 +85,53 @@ public class MqSource extends RichSourceFunction<MqRecord> {
 
     @Override
     public void open(Configuration parameters) throws Exception {
+        running = true;
 
-        this.running = true;
+        int openOptions = MQConstants.MQOO_INPUT_AS_Q_DEF | MQConstants.MQOO_FAIL_IF_QUIESCING;
 
-        int openOptions =
-                MQConstants.MQOO_INPUT_AS_Q_DEF |
-                        MQConstants.MQOO_FAIL_IF_QUIESCING;
+        try {
+            log.info(
+                    "MqSource connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={}",
+                    getRuntimeContext().getIndexOfThisSubtask(),
+                    host,
+                    port,
+                    qmgr,
+                    channel,
+                    queueName,
+                    user
+            );
 
-        log.info(
-                "MqSource.open() subtask={} connecting to {}:{} qmgr={} channel={} queue={} user={}",
-                getRuntimeContext().getIndexOfThisSubtask(),
-                host, port, qmgr, channel, queueName, user
-        );
+            qMgr = MqConnect.connect(qmgr, host, port, channel, user, password);
+            queue = qMgr.accessQueue(queueName, openOptions);
 
-        qMgr = MqConnect.connect(qmgr, host, port, channel, user, password);
-        queue = qMgr.accessQueue(queueName, openOptions);
-
-        log.info(
-                "MqSource opened queue={} subtask={} log.payloads={} log.preview.len={} wait.ms={}",
-                queueName,
-                getRuntimeContext().getIndexOfThisSubtask(),
-                logPayloads,
-                logPreviewLen,
-                waitIntervalMs
-        );
+            log.info(
+                    "MqSource opened queue={} subtask={} log.payloads={} log.preview.len={} wait.ms={}",
+                    queueName,
+                    getRuntimeContext().getIndexOfThisSubtask(),
+                    logPayloads,
+                    logPreviewLen,
+                    waitIntervalMs
+            );
+        } catch (Exception e) {
+            close();
+            throw new RuntimeException(
+                    "Failed to open MqSource. host=" + host +
+                            ", port=" + port +
+                            ", qmgr=" + qmgr +
+                            ", channel=" + channel +
+                            ", queue=" + queueName,
+                    e
+            );
+        }
     }
 
     @Override
-    public void run(SourceContext<MqRecord> ctx) throws Exception {
-
+    public void run(SourceContext<MessageRecord> ctx) throws Exception {
         MQGetMessageOptions gmo = new MQGetMessageOptions();
-        gmo.options =
-                MQConstants.MQGMO_WAIT |
-                        MQConstants.MQGMO_FAIL_IF_QUIESCING;
+        gmo.options = MQConstants.MQGMO_WAIT | MQConstants.MQGMO_FAIL_IF_QUIESCING;
         gmo.waitInterval = waitIntervalMs;
 
         while (running) {
-
             MQMessage msg = new MQMessage();
 
             try {
@@ -141,8 +140,14 @@ public class MqSource extends RichSourceFunction<MqRecord> {
                 int messageLength = msg.getMessageLength();
                 int dataLength = msg.getDataLength();
 
-                log.debug("MQ message props: ccsid={} encoding={} format={} dataLength={} msgLength={}",
-                        msg.characterSet, msg.encoding, msg.format, dataLength, messageLength);
+                log.debug(
+                        "MQ message props: ccsid={} encoding={} format={} dataLength={} msgLength={}",
+                        msg.characterSet,
+                        msg.encoding,
+                        msg.format,
+                        dataLength,
+                        messageLength
+                );
 
                 byte[] buf = new byte[dataLength];
                 msg.readFully(buf);
@@ -172,9 +177,15 @@ public class MqSource extends RichSourceFunction<MqRecord> {
                     log.info("MQ READ msgId={} BODY preview={}", msgIdHex, preview(body, logPreviewLen));
                 }
 
-                ctx.collect(new MqRecord(msgIdBytes, body));
+                synchronized (ctx.getCheckpointLock()) {
+                    ctx.collect(new MessageRecord(msgIdBytes, body));
+                }
 
             } catch (MQException mqe) {
+                if (!running) {
+                    log.info("MqSource stopped during shutdown.");
+                    return;
+                }
 
                 if (mqe.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) {
                     continue;
@@ -195,33 +206,33 @@ public class MqSource extends RichSourceFunction<MqRecord> {
     @Override
     public void cancel() {
         running = false;
+        close();
     }
 
     @Override
     public void close() {
-
-        running = false;
-
         try {
-            if (queue != null) queue.close();
+            if (queue != null) {
+                queue.close();
+            }
         } catch (Exception e) {
             log.warn("Failed to close MQQueue", e);
+        } finally {
+            queue = null;
         }
 
         try {
-            if (qMgr != null) qMgr.disconnect();
+            if (qMgr != null) {
+                qMgr.disconnect();
+            }
         } catch (Exception e) {
             log.warn("Failed to disconnect MQQueueManager", e);
+        } finally {
+            qMgr = null;
         }
     }
 
-    /**
-     * Безопасный выбор Charset:
-     * - никогда не вызовет Charset.forName("IBM") или Charset.forName("Cp") без цифр
-     * - не использует IBM-xxxx (обычно не существует)
-     */
     private Charset detectCharset(MQMessage msg) {
-
         int ccsid = msg.characterSet;
 
         if (ccsid <= 0) {
@@ -234,26 +245,33 @@ public class MqSource extends RichSourceFunction<MqRecord> {
         }
 
         Charset cs = tryCharset("Cp" + ccsid);
-        if (cs != null) return cs;
+        if (cs != null) {
+            return cs;
+        }
 
         cs = tryCharset("IBM" + ccsid);
-        if (cs != null) return cs;
+        if (cs != null) {
+            return cs;
+        }
 
         cs = tryCharset("x-IBM" + ccsid);
-        if (cs != null) return cs;
+        if (cs != null) {
+            return cs;
+        }
 
         log.debug("Unknown CCSID={} -> fallback UTF-8", ccsid);
         return StandardCharsets.UTF_8;
     }
 
-    /**
-     * Не даём случайно вызвать Charset.forName() с "IBM" / "Cp" и т.п.
-     */
     private Charset tryCharset(String name) {
-        if (name == null) return null;
+        if (name == null) {
+            return null;
+        }
 
         String n = name.trim();
-        if (n.isEmpty()) return null;
+        if (n.isEmpty()) {
+            return null;
+        }
 
         boolean hasDigit = false;
         for (int i = 0; i < n.length(); i++) {
@@ -262,6 +280,7 @@ public class MqSource extends RichSourceFunction<MqRecord> {
                 break;
             }
         }
+
         if (!hasDigit) {
             log.debug("Skip charset candidate (no digits): '{}'", n);
             return null;
@@ -276,21 +295,24 @@ public class MqSource extends RichSourceFunction<MqRecord> {
     }
 
     private static String preview(String s, int max) {
-        if (s == null) return "null";
-        if (s.length() <= max) return s;
+        if (s == null) {
+            return "null";
+        }
+        if (s.length() <= max) {
+            return s;
+        }
         return s.substring(0, max) + "...(+" + (s.length() - max) + " chars)";
     }
 
     private static String toHexSafe(byte[] bytes) {
-
-        if (bytes == null) return "null";
+        if (bytes == null) {
+            return "null";
+        }
 
         StringBuilder sb = new StringBuilder(bytes.length * 2);
-
         for (byte b : bytes) {
             sb.append(String.format(Locale.ROOT, "%02X", b));
         }
-
         return sb.toString();
     }
 }

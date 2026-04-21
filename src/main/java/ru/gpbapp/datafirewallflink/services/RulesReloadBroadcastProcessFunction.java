@@ -30,8 +30,7 @@ import ru.gpbapp.datafirewallflink.ignite.BytecodeSource;
 import ru.gpbapp.datafirewallflink.ignite.IgniteClientFacade;
 import ru.gpbapp.datafirewallflink.ignite.impl.IgniteClientFacadeImpl;
 import ru.gpbapp.datafirewallflink.kafka.CacheUpdateEvent;
-import ru.gpbapp.datafirewallflink.mq.MqRecord;
-import ru.gpbapp.datafirewallflink.mq.MqReply;
+import ru.gpbapp.datafirewallflink.mq.MessageRecord;
 import ru.gpbapp.datafirewallflink.rule.RulesReloader;
 import ru.gpbapp.datafirewallflink.validation.ValidationResult;
 
@@ -48,11 +47,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public class MqWithRulesReloadBroadcastProcessFunction
-        extends BroadcastProcessFunction<MqRecord, CacheUpdateEvent, ProcessingResult> {
+public class RulesReloadBroadcastProcessFunction
+        extends BroadcastProcessFunction<MessageRecord, CacheUpdateEvent, ProcessingResult> {
 
     private static final Logger log =
-            LoggerFactory.getLogger(MqWithRulesReloadBroadcastProcessFunction.class);
+            LoggerFactory.getLogger(RulesReloadBroadcastProcessFunction.class);
 
     private static final String CACHE_COMPILED_RULES = "compiled_rules";
     private static final String CACHE_POLITICS = "politics";
@@ -92,7 +91,7 @@ public class MqWithRulesReloadBroadcastProcessFunction
     private transient boolean logPayloads;
     private transient int logPreviewLen;
 
-    public MqWithRulesReloadBroadcastProcessFunction(
+    public RulesReloadBroadcastProcessFunction(
             MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
@@ -206,9 +205,9 @@ public class MqWithRulesReloadBroadcastProcessFunction
     }
 
     @Override
-    public void processElement(MqRecord in, ReadOnlyContext ctx, Collector<ProcessingResult> out) {
+    public void processElement(MessageRecord in, ReadOnlyContext ctx, Collector<ProcessingResult> out) {
         if (in == null || in.payload == null || in.payload.isBlank()) {
-            log.warn("[PIPE][no-qid] Empty MQ payload");
+            log.warn("[PIPE][no-qid] Empty input payload");
             return;
         }
 
@@ -242,7 +241,7 @@ public class MqWithRulesReloadBroadcastProcessFunction
             );
 
             if (logPayloads && log.isInfoEnabled()) {
-                log.info("[PIPE][{}] 1) MQ_IN:\n{}", qid, maskJsonPretty(raw));
+                log.info("[PIPE][{}] 1) INBOUND:\n{}", qid, maskJsonPretty(raw));
             }
 
             String datasetCode = extractFirstDatasetCode(originalEvent);

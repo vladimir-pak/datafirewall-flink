@@ -1,6 +1,8 @@
 package ru.gpbapp.datafirewallflink.dto;
 
-public class ProcessingResult {
+import java.io.Serializable;
+
+public class ProcessingResult implements Serializable {
 
     private byte[] correlId;
     private String shortJson;
