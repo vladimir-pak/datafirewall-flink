@@ -1,4 +1,4 @@
-package ru.gpbapp.datafirewallflink.mq;
+package ru.gpbapp.datafirewallflink.services;
 
 import java.io.Serializable;
 import java.util.Arrays;

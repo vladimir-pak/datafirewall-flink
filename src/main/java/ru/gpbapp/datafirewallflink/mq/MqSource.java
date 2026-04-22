@@ -10,6 +10,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.gpbapp.datafirewallflink.services.MessageRecord;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +44,11 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
     private final String password;
     private final int waitIntervalMs;
 
+    private final boolean tlsEnabled;
+    private final String tlsCipherSuite;
+    private final String trustStore;
+    private final String trustStorePassword;
+
     private transient volatile boolean running;
     private transient MQQueueManager qMgr;
     private transient MQQueue queue;
@@ -56,7 +62,22 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
             String user,
             String password
     ) {
-        this(host, port, channel, qmgr, queueName, user, password, false, 600, 1000);
+        this(
+                host,
+                port,
+                channel,
+                qmgr,
+                queueName,
+                user,
+                password,
+                false,
+                600,
+                1000,
+                false,
+                null,
+                null,
+                null
+        );
     }
 
     public MqSource(
@@ -69,7 +90,11 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
             String password,
             boolean logPayloads,
             int logPreviewLen,
-            int waitIntervalMs
+            int waitIntervalMs,
+            boolean tlsEnabled,
+            String tlsCipherSuite,
+            String trustStore,
+            String trustStorePassword
     ) {
         this.host = host;
         this.port = port;
@@ -81,6 +106,10 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
         this.logPayloads = logPayloads;
         this.logPreviewLen = logPreviewLen;
         this.waitIntervalMs = waitIntervalMs;
+        this.tlsEnabled = tlsEnabled;
+        this.tlsCipherSuite = tlsCipherSuite;
+        this.trustStore = trustStore;
+        this.trustStorePassword = trustStorePassword;
     }
 
     @Override
@@ -91,17 +120,32 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
 
         try {
             log.info(
-                    "MqSource connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={}",
+                    "MqSource connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={} tls={} cipherSuite={} trustStore={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
                     host,
                     port,
                     qmgr,
                     channel,
                     queueName,
-                    user
+                    user,
+                    tlsEnabled,
+                    tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite,
+                    trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore
             );
 
-            qMgr = MqConnect.connect(qmgr, host, port, channel, user, password);
+            qMgr = MqConnect.connect(
+                    qmgr,
+                    host,
+                    port,
+                    channel,
+                    user,
+                    password,
+                    tlsEnabled,
+                    tlsCipherSuite,
+                    trustStore,
+                    trustStorePassword
+            );
+
             queue = qMgr.accessQueue(queueName, openOptions);
 
             log.info(
@@ -119,7 +163,8 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
                             ", port=" + port +
                             ", qmgr=" + qmgr +
                             ", channel=" + channel +
-                            ", queue=" + queueName,
+                            ", queue=" + queueName +
+                            ", tlsEnabled=" + tlsEnabled,
                     e
             );
         }

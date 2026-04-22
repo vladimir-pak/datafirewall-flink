@@ -9,6 +9,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.gpbapp.datafirewallflink.services.MessageReply;
 
 import java.nio.charset.StandardCharsets;
 
@@ -24,6 +25,11 @@ public class MqSink extends RichSinkFunction<MessageReply> {
     private final String user;
     private final String password;
 
+    private final boolean tlsEnabled;
+    private final String tlsCipherSuite;
+    private final String trustStore;
+    private final String trustStorePassword;
+
     private transient MQQueueManager qm;
     private transient MQQueue queue;
 
@@ -36,6 +42,34 @@ public class MqSink extends RichSinkFunction<MessageReply> {
             String user,
             String password
     ) {
+        this(
+                host,
+                port,
+                channel,
+                qmgr,
+                outQueue,
+                user,
+                password,
+                false,
+                null,
+                null,
+                null
+        );
+    }
+
+    public MqSink(
+            String host,
+            int port,
+            String channel,
+            String qmgr,
+            String outQueue,
+            String user,
+            String password,
+            boolean tlsEnabled,
+            String tlsCipherSuite,
+            String trustStore,
+            String trustStorePassword
+    ) {
         this.host = host;
         this.port = port;
         this.channel = channel;
@@ -43,6 +77,10 @@ public class MqSink extends RichSinkFunction<MessageReply> {
         this.outQueue = outQueue;
         this.user = user;
         this.password = password;
+        this.tlsEnabled = tlsEnabled;
+        this.tlsCipherSuite = tlsCipherSuite;
+        this.trustStore = trustStore;
+        this.trustStorePassword = trustStorePassword;
     }
 
     public MqSink(String host, int port, String channel, String qmgr, String outQueue) {
@@ -55,17 +93,31 @@ public class MqSink extends RichSinkFunction<MessageReply> {
 
         try {
             log.info(
-                    "MqSink connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={}",
+                    "MqSink connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={} tls={} cipherSuite={} trustStore={}",
                     subtask,
                     host,
                     port,
                     qmgr,
                     channel,
                     outQueue,
-                    user
+                    user,
+                    tlsEnabled,
+                    tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite,
+                    trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore
             );
 
-            qm = MqConnect.connect(qmgr, host, port, channel, user, password);
+            qm = MqConnect.connect(
+                    qmgr,
+                    host,
+                    port,
+                    channel,
+                    user,
+                    password,
+                    tlsEnabled,
+                    tlsCipherSuite,
+                    trustStore,
+                    trustStorePassword
+            );
 
             int openOptions = MQConstants.MQOO_OUTPUT | MQConstants.MQOO_FAIL_IF_QUIESCING;
             queue = qm.accessQueue(outQueue, openOptions);
@@ -78,7 +130,8 @@ public class MqSink extends RichSinkFunction<MessageReply> {
                             ", port=" + port +
                             ", qmgr=" + qmgr +
                             ", channel=" + channel +
-                            ", queue=" + outQueue,
+                            ", queue=" + outQueue +
+                            ", tlsEnabled=" + tlsEnabled,
                     e
             );
         }

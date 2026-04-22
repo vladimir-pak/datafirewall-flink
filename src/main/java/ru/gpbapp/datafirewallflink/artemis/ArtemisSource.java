@@ -5,7 +5,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import ru.gpbapp.datafirewallflink.mq.MessageRecord;
+import ru.gpbapp.datafirewallflink.services.MessageRecord;
 
 import javax.jms.BytesMessage;
 import javax.jms.Connection;
@@ -28,6 +28,10 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
     private final String queueName;
     private final long receiveTimeoutMs;
 
+    private final boolean tlsEnabled;
+    private final String trustStore;
+    private final String trustStorePassword;
+
     private transient volatile boolean running;
 
     private transient ActiveMQConnectionFactory connectionFactory;
@@ -42,11 +46,36 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
             String queueName,
             long receiveTimeoutMs
     ) {
+        this(
+                brokerUrl,
+                username,
+                password,
+                queueName,
+                receiveTimeoutMs,
+                false,
+                null,
+                null
+        );
+    }
+
+    public ArtemisSource(
+            String brokerUrl,
+            String username,
+            String password,
+            String queueName,
+            long receiveTimeoutMs,
+            boolean tlsEnabled,
+            String trustStore,
+            String trustStorePassword
+    ) {
         this.brokerUrl = brokerUrl;
         this.username = username;
         this.password = password;
         this.queueName = queueName;
         this.receiveTimeoutMs = receiveTimeoutMs;
+        this.tlsEnabled = tlsEnabled;
+        this.trustStore = trustStore;
+        this.trustStorePassword = trustStorePassword;
     }
 
     @Override
@@ -54,12 +83,19 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
         running = true;
 
         try {
+            if (tlsEnabled) {
+                setSystemPropertyIfPresent("javax.net.ssl.trustStore", trustStore);
+                setSystemPropertyIfPresent("javax.net.ssl.trustStorePassword", trustStorePassword);
+            }
+
             log.info(
-                    "ArtemisSource connecting: subtask={}, brokerUrl={}, queue={}, user={}",
+                    "ArtemisSource connecting: subtask={}, brokerUrl={}, queue={}, user={}, tls={}, trustStore={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
                     brokerUrl,
                     queueName,
-                    username
+                    username == null || username.isBlank() ? "<empty>" : "<set>",
+                    tlsEnabled,
+                    trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore
             );
 
             connectionFactory = new ActiveMQConnectionFactory(brokerUrl, username, password);
@@ -81,7 +117,9 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
         } catch (Exception e) {
             close();
             throw new RuntimeException(
-                    "Failed to open ArtemisSource. brokerUrl=" + brokerUrl + ", queue=" + queueName,
+                    "Failed to open ArtemisSource. brokerUrl=" + brokerUrl +
+                            ", queue=" + queueName +
+                            ", tlsEnabled=" + tlsEnabled,
                     e
             );
         }
@@ -162,6 +200,12 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
             jmsMessageId = UUID.randomUUID().toString();
         }
         return jmsMessageId.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void setSystemPropertyIfPresent(String key, String value) {
+        if (value != null && !value.isBlank()) {
+            System.setProperty(key, value);
+        }
     }
 
     private void closeQuietly(AutoCloseable c, String resourceName) {
