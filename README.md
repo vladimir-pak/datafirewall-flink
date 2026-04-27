@@ -65,68 +65,100 @@ DataFirewallFlink — приложение для обработки и филь
 
 ##  Параметры запуска
 
+############################
+#
+BACKEND
+SWITCH
+############################
+--messaging.backend=artemis
+#
+значения:
+mq
+|
+artemis
+############################
+#
+RULES
+/
+CACHE
+############################
 --rules.loader=http
 --ignite.apiUrl=http://127.0.0.1:8080
+--cache.bootstrap.enabled=true
+--politics.bootstrap.enabled=false
+--test.politic.caches.enabled=true
+--test.politic.caches.path=/Users/kampus/Downloads/test_politic_caches.json
+############################
+#
+LOGGING
+############################
+--log.payloads=true
+--log.preview.len=600
+############################
+#
+KAFKA
+(RULES)
+############################
 --kafka.bootstrap=localhost:9092
 --kafka.topic=rules-update
 --kafka.group=dfw-rules-group
---use.mq=false
---cache.bootstrap.enabled=true
---politics.bootstrap.enabled=false
---log.payloads=true
---test.json.path=/Users/kampus/Downloads/query_full.json
+#
+TLS
+(включать
+только
+если
+надо)
+--kafka.tls.enabled=false
+--kafka.security.protocol=SSL
+--kafka.ssl.truststore.location=
+--kafka.ssl.truststore.password=
+############################
+#
+KAFKA
+(DETAIL
+ANSWER)
+############################
+--detail.kafka.enabled=false
+--detail.kafka.bootstrap=localhost:9092
+--detail.kafka.topic=detail-answer
+--detail.kafka.tls.enabled=false
+--detail.kafka.security.protocol=SSL
+--detail.kafka.ssl.truststore.location=
+--detail.kafka.ssl.truststore.password=
+############################
+#
+ARTEMIS
+############################
+--artemis.broker.url=tcp://localhost:61616
+--artemis.user=admin
+--artemis.password=admin
+--artemis.in.queue=IN.Q
+--artemis.out.queue=OUT.Q
+--artemis.receive.timeout.ms=1000
+#
+TLS
+--artemis.tls.enabled=false
+--artemis.ssl.truststore.location=
+--artemis.ssl.truststore.password=
+############################
+#
+IBM
+MQ
+############################
 --mq.host=localhost
 --mq.port=1414
 --mq.channel=DEV.APP.SVRCONN
 --mq.qmgr=QM1
---mq.inQueue=TEST.QUEUE
---mq.outQueue=REPLY.QUEUE
+--mq.inQueue=IN.Q
+--mq.outQueue=OUT.Q
 --mq.user=admin
 --mq.password=admin123
---test.politic.caches.path=/Users/kampus/Downloads/test-caches.json
---test.politic.caches.enabled=true
---parallelism.source=1
---parallelism.kafka=1
---parallelism.process=1
---parallelism.sink=1
---detail.kafka.enabled=true
---detail.kafka.bootstrap=localhost:9092
---detail.kafka.topic=detail-answer
-
-
-##  Параметры запуска описание
-
-
---rules.loader=http \                          # Источник правил (http или thin)
---ignite.apiUrl=http://127.0.0.1:8080 \        # URL Ignite API
-
---kafka.bootstrap=localhost:9092 \             # Kafka broker
---kafka.topic=rules-update \                   # Топик обновления кэшей
---kafka.group=dfw-rules-group \                # Consumer group
-
---use.mq=false \                               # false = читаем из файла тестовый режим, true = из MQ
-
---cache.bootstrap.enabled=true \               # Загружать кэши при старте
---politics.bootstrap.enabled=false \           # Загружать politics-кэши при старте
-
---log.payloads=true \                          # Логировать payload (с маской) для скрытия данных
-
---test.json.path=/Users/kampus/Downloads/query_full.json \  # Путь к тестовому  входному JSON если запустить без MQ 
-
---mq.host=localhost \                           # MQ хост
---mq.port=1414 \                               # MQ порт
---mq.channel=DEV.APP.SVRCONN \                 # MQ канал
---mq.qmgr=QM1 \                                # Queue manager
-
---mq.inQueue=TEST.QUEUE \                      # Очередь входящих сообщений (используется только при use.mq=true)
---mq.outQueue=REPLY.QUEUE \                    # Очередь для отправки ответов
-
---mq.user=admin \                              # Пользователь MQ
---mq.password=admin123                         # Пароль MQ
---test.politic.caches.path=/Users/kampus/Downloads/test_politic_caches.json # путь к файлу с тестовыми политик кешами если не инициализировать через иннайт
---test.politic.caches.enabled=true                     # использовать ли тестовое заполнение политик кешей
-
-
-
+--mq.wait.interval.ms=1000
+#
+TLS
+--mq.tls.enabled=false
+--mq.tls.cipherSuite=
+--mq.ssl.truststore.location=
+--mq.ssl.truststore.password=
 
 

@@ -5,7 +5,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import ru.gpbapp.datafirewallflink.mq.MessageReply;
+import ru.gpbapp.datafirewallflink.services.MessageReply;
 
 import javax.jms.Connection;
 import javax.jms.MessageProducer;
@@ -23,6 +23,10 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
     private final String password;
     private final String queueName;
 
+    private final boolean tlsEnabled;
+    private final String trustStore;
+    private final String trustStorePassword;
+
     private transient ActiveMQConnectionFactory connectionFactory;
     private transient Connection connection;
     private transient Session session;
@@ -34,21 +38,51 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
             String password,
             String queueName
     ) {
+        this(
+                brokerUrl,
+                username,
+                password,
+                queueName,
+                false,
+                null,
+                null
+        );
+    }
+
+    public ArtemisSink(
+            String brokerUrl,
+            String username,
+            String password,
+            String queueName,
+            boolean tlsEnabled,
+            String trustStore,
+            String trustStorePassword
+    ) {
         this.brokerUrl = brokerUrl;
         this.username = username;
         this.password = password;
         this.queueName = queueName;
+        this.tlsEnabled = tlsEnabled;
+        this.trustStore = trustStore;
+        this.trustStorePassword = trustStorePassword;
     }
 
     @Override
     public void open(Configuration parameters) throws Exception {
         try {
+            if (tlsEnabled) {
+                setSystemPropertyIfPresent("javax.net.ssl.trustStore", trustStore);
+                setSystemPropertyIfPresent("javax.net.ssl.trustStorePassword", trustStorePassword);
+            }
+
             log.info(
-                    "ArtemisSink connecting: subtask={}, brokerUrl={}, queue={}, user={}",
+                    "ArtemisSink connecting: subtask={}, brokerUrl={}, queue={}, user={}, tls={}, trustStore={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
                     brokerUrl,
                     queueName,
-                    username
+                    username,
+                    tlsEnabled,
+                    trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore
             );
 
             connectionFactory = new ActiveMQConnectionFactory(brokerUrl, username, password);
@@ -69,7 +103,9 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
         } catch (Exception e) {
             close();
             throw new RuntimeException(
-                    "Failed to open ArtemisSink. brokerUrl=" + brokerUrl + ", queue=" + queueName,
+                    "Failed to open ArtemisSink. brokerUrl=" + brokerUrl +
+                            ", queue=" + queueName +
+                            ", tlsEnabled=" + tlsEnabled,
                     e
             );
         }
@@ -103,6 +139,12 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
 
         closeQuietly(connectionFactory, "Artemis ConnectionFactory");
         connectionFactory = null;
+    }
+
+    private void setSystemPropertyIfPresent(String key, String value) {
+        if (value != null && !value.isBlank()) {
+            System.setProperty(key, value);
+        }
     }
 
     private void closeQuietly(AutoCloseable c, String resourceName) {
