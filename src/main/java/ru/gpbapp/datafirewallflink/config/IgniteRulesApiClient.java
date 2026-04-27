@@ -39,8 +39,8 @@ public final class IgniteRulesApiClient {
      * - politics
      */
     public CacheResponseDto<String, Object> getActualCache(String cacheName) {
-        String url = baseUrl + "/api/v1/cache/latest/" +
-                URLEncoder.encode(cacheName, StandardCharsets.UTF_8);
+        String url = String.format("%s/api/v1/cache/%s/latest",
+                baseUrl, URLEncoder.encode(cacheName, StandardCharsets.UTF_8));
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
