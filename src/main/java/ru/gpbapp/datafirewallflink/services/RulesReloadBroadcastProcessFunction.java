@@ -431,7 +431,8 @@ public class RulesReloadBroadcastProcessFunction
             ProcessingResult result = new ProcessingResult(
                     in.msgId,
                     shortJson,
-                    detailJson
+                    detailJson,
+                    raw
             );
 
             out.collect(result);

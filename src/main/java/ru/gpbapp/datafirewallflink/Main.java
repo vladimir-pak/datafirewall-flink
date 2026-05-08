@@ -29,6 +29,10 @@ import ru.gpbapp.datafirewallflink.mq.MqSource;
 import ru.gpbapp.datafirewallflink.services.MessageRecord;
 import ru.gpbapp.datafirewallflink.services.MessageReply;
 import ru.gpbapp.datafirewallflink.services.RulesReloadBroadcastProcessFunction;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import ru.gpbapp.datafirewallflink.dto.AuditRecord;
+import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -140,6 +144,12 @@ public class Main {
         boolean cacheBootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);
         boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
         boolean logPayloads = pt.getBoolean("log.payloads", false);
+
+        boolean auditKafkaEnabled = pt.getBoolean("audit.kafka.enabled", true);
+        String auditKafkaBootstrap = pt.get("audit.kafka.bootstrap", kafkaBootstrap);
+        String auditKafkaTopic = pt.get("audit.kafka.topic", "audit-datafirewall");
+
+        KafkaSink<String> auditSink = null;
 
         if ("artemis".equals(backend)) {
             requireNotBlank(artemisUser, "artemis.user or ENV ARTEMIS_USER");
@@ -389,6 +399,49 @@ public class Main {
                     detailKafkaBootstrap, detailKafkaTopic);
         } else {
             log.info("[MAIN] detail kafka sink is disabled.");
+        }
+        if (auditKafkaEnabled) {
+            Properties auditProps = buildKafkaClientProperties(pt, "audit.kafka");
+
+            auditSink = KafkaSink.<String>builder()
+                    .setBootstrapServers(auditKafkaBootstrap)
+                    .setKafkaProducerConfig(auditProps)
+                    .setRecordSerializer(
+                            KafkaRecordSerializationSchema.builder()
+                                    .setTopic(auditKafkaTopic)
+                                    .setValueSerializationSchema(new SimpleStringSchema())
+                                    .build()
+                    )
+                    .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                    .build();
+
+            log.info("[MAIN] Audit Kafka sink enabled → topic={}", auditKafkaTopic);
+        }
+        if (auditKafkaEnabled && auditSink != null) {
+            processed
+                    .map(result -> {
+                        if (result == null || result.getShortJson() == null) {
+                            return null;
+                        }
+                        try {
+                            ObjectMapper mapper = new ObjectMapper();
+                            AuditRecord audit = new AuditRecord(
+                                    result.getCorrelId() != null ? new String(result.getCorrelId(), StandardCharsets.UTF_8) : "unknown",
+                                    result.getOriginalJson(),
+                                    result.getShortJson(),
+                                    result.getDetailJson(),
+                                    "PROCESSED"
+                            );
+                            return mapper.writeValueAsString(audit);
+                        } catch (Exception e) {
+                            log.warn("Failed to serialize audit record", e);
+                            return null;
+                        }
+                    })
+                    .filter(Objects::nonNull)
+                    .sinkTo(auditSink)
+                    .name("audit-kafka-sink")
+                    .setParallelism(1);
         }
 
         env.execute("DataFirewall Messaging Job (SHORT ANSWER -> MQ/ARTEMIS, DETAIL ANSWER -> Kafka) + Kafka Rules Reload");

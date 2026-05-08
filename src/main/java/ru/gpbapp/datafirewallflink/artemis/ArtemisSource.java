@@ -16,7 +16,13 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.UUID;
+
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 
 public class ArtemisSource extends RichSourceFunction<MessageRecord> {
 
@@ -142,11 +148,15 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
             if (message == null) {
                 continue;
             }
-
+//            String readedFromMQDttm = Instant.now()
+//                    .atOffset(ZoneOffset.UTC)
+//                    .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
             String payload = extractPayload(message);
             byte[] msgId = extractMessageId(message);
+//            String createdDttm = extractIngressTimestamp(message);
 
             synchronized (ctx.getCheckpointLock()) {
+//                ctx.collect(new MessageRecord(msgId, payload, createdDttm, readedFromMQDttm));
                 ctx.collect(new MessageRecord(msgId, payload));
             }
         }
@@ -171,6 +181,44 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
 
         closeQuietly(connectionFactory, "Artemis ConnectionFactory");
         connectionFactory = null;
+    }
+
+    private String extractIngressTimestamp(Message message) throws JMSException {
+        try {
+            Object timestampObj = message.getObjectProperty("_AMQ_INGRESS_TIMESTAMP");
+            if (timestampObj != null) {
+                String ingressTimestampStr = timestampObj.toString();
+
+                // Проверяем, что это число (миллисекунды)
+                if (isNumeric(ingressTimestampStr)) {
+                    long timestampMs = Long.parseLong(ingressTimestampStr);
+
+                    // Unix timestamp (ms) → Instant → ZonedDateTime → ISO 8601 с 7 цифрами ns
+                    Instant instant = Instant.ofEpochMilli(timestampMs);
+                    ZonedDateTime zdt = instant.atZone(ZoneOffset.UTC);
+
+                    // Формат: "2026-04-21T06:51:54.6896660Z" (7 цифр после точки)
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern(
+                            "yyyy-MM-dd'T'HH:mm:ss.SAAAAAA'Z'",
+                            Locale.ROOT
+                    ).withZone(ZoneOffset.UTC);
+
+                    return zdt.format(formatter);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse _AMQ_INGRESS_TIMESTAMP: {}", e.getMessage());
+        }
+
+        // Fallback: текущее время UTC
+        return Instant.now()
+                .atZone(ZoneOffset.UTC)
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SAAAAAA'Z'", Locale.ROOT));
+    }
+
+    // Вспомогательный метод для проверки числа
+    private boolean isNumeric(String str) {
+        return str != null && str.matches("-?\\d+");
     }
 
     private String extractPayload(Message message) throws JMSException {
