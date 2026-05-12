@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import ru.gpb.datafirewall.artemis.ArtemisConnectionUrlBuilder;
 import ru.gpb.datafirewall.artemis.ArtemisSink;
 import ru.gpb.datafirewall.artemis.ArtemisSource;
 import ru.gpb.datafirewall.config.JobConfig;
@@ -113,7 +114,7 @@ public class Main {
         // String detailKafkaBootstrap = pt.get("detail.kafka.bootstrap", kafkaBootstrap);
         // String detailKafkaTopic = pt.get("detail.kafka.topic", DEFAULT_DETAIL_KAFKA_TOPIC);
 
-        String artemisBrokerUrl = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
+        // String artemisBrokerUrl = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
         String artemisUser = firstNonBlank(
                 System.getenv("ARTEMIS_USER"),
                 pt.get("artemis.user", null),
@@ -139,6 +140,21 @@ public class Main {
         boolean artemisTlsEnabled = pt.getBoolean("artemis.tls.enabled", false);
         String artemisTrustStore = pt.get("artemis.ssl.truststore.location", null);
         String artemisTrustStorePassword = pt.get("artemis.ssl.truststore.password", null);
+        String artemisKeyStore = pt.get("artemis.ssl.keystore.location", null);
+        String artemisKeyStorePassword = pt.get("artemis.ssl.keystore.password", null);
+        String artemisCipherSuites = pt.get("artemis.ssl.enabled.cipher.suites", null);
+
+        String artemisBrokerUrlRaw = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
+
+        String artemisBrokerUrl = ArtemisConnectionUrlBuilder.buildFromBrokerUrl(
+                artemisBrokerUrlRaw,
+                artemisTlsEnabled,
+                artemisTrustStore,
+                artemisTrustStorePassword,
+                artemisKeyStore,
+                artemisKeyStorePassword,
+                artemisCipherSuites
+        );
 
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
         String rulesLoader = pt.get("rules.loader", "http");
@@ -230,10 +246,7 @@ public class Main {
                                         artemisUser,
                                         artemisPassword,
                                         artemisInQueue,
-                                        artemisReceiveTimeoutMs,
-                                        artemisTlsEnabled,
-                                        artemisTrustStore,
-                                        artemisTrustStorePassword
+                                        artemisReceiveTimeoutMs
                                 ),
                                 "artemis-source"
                         )
@@ -345,10 +358,7 @@ public class Main {
                             artemisBrokerUrl,
                             artemisUser,
                             artemisPassword,
-                            artemisOutQueue,
-                            artemisTlsEnabled,
-                            artemisTrustStore,
-                            artemisTrustStorePassword
+                            artemisOutQueue
                     ))
                     .name("artemis-sink")
                     .uid("artemis-sink");
@@ -452,12 +462,6 @@ public class Main {
         if ("artemis".equals(backend) && artemisTlsEnabled) {
             requireNotBlank(artemisTrustStore, "artemis.ssl.truststore.location");
             requireNotBlank(artemisTrustStorePassword, "artemis.ssl.truststore.password");
-            String brokerUrl = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
-            if (!brokerUrl.startsWith("ssl://")) {
-                throw new IllegalArgumentException(
-                        "When artemis.tls.enabled=true, artemis.broker.url must start with ssl://"
-                );
-            }
         }
     }
 

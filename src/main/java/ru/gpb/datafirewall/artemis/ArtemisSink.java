@@ -23,10 +23,6 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
     private final String password;
     private final String queueName;
 
-    private final boolean tlsEnabled;
-    private final String trustStore;
-    private final String trustStorePassword;
-
     private transient ActiveMQConnectionFactory connectionFactory;
     private transient Connection connection;
     private transient Session session;
@@ -38,51 +34,21 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
             String password,
             String queueName
     ) {
-        this(
-                brokerUrl,
-                username,
-                password,
-                queueName,
-                false,
-                null,
-                null
-        );
-    }
-
-    public ArtemisSink(
-            String brokerUrl,
-            String username,
-            String password,
-            String queueName,
-            boolean tlsEnabled,
-            String trustStore,
-            String trustStorePassword
-    ) {
         this.brokerUrl = brokerUrl;
         this.username = username;
         this.password = password;
         this.queueName = queueName;
-        this.tlsEnabled = tlsEnabled;
-        this.trustStore = trustStore;
-        this.trustStorePassword = trustStorePassword;
     }
 
     @Override
     public void open(Configuration parameters) throws Exception {
         try {
-            if (tlsEnabled) {
-                setSystemPropertyIfPresent("javax.net.ssl.trustStore", trustStore);
-                setSystemPropertyIfPresent("javax.net.ssl.trustStorePassword", trustStorePassword);
-            }
-
             log.info(
-                    "ArtemisSink connecting: subtask={}, brokerUrl={}, queue={}, user={}, tls={}, trustStore={}",
+                    "ArtemisSink connecting: subtask={}, brokerUrl={}, queue={}, user={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
-                    brokerUrl,
+                    maskBrokerUrl(brokerUrl),
                     queueName,
-                    username,
-                    tlsEnabled,
-                    trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore
+                    username == null || username.isBlank() ? "<empty>" : "<set>"
             );
 
             connectionFactory = new ActiveMQConnectionFactory(brokerUrl, username, password);
@@ -97,15 +63,14 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
             log.info(
                     "ArtemisSink opened: subtask={}, brokerUrl={}, queue={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
-                    brokerUrl,
+                    maskBrokerUrl(brokerUrl),
                     queueName
             );
         } catch (Exception e) {
             close();
             throw new RuntimeException(
-                    "Failed to open ArtemisSink. brokerUrl=" + brokerUrl +
-                            ", queue=" + queueName +
-                            ", tlsEnabled=" + tlsEnabled,
+                    "Failed to open ArtemisSink. brokerUrl=" + maskBrokerUrl(brokerUrl) +
+                            ", queue=" + queueName,
                     e
             );
         }
@@ -142,12 +107,6 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
         connectionFactory = null;
     }
 
-    private void setSystemPropertyIfPresent(String key, String value) {
-        if (value != null && !value.isBlank()) {
-            System.setProperty(key, value);
-        }
-    }
-
     private void closeQuietly(AutoCloseable c, String resourceName) {
         if (c == null) {
             return;
@@ -157,5 +116,16 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
         } catch (Exception e) {
             log.warn("Failed to close {}", resourceName, e);
         }
+    }
+
+    // Метод для маскирования паролей в trustStorePassword и keyStorePassword
+    private static String maskBrokerUrl(String url) {
+        if (url == null) {
+            return null;
+        }
+
+        return url
+                .replaceAll("(?i)(trustStorePassword=)[^&]*", "$1***")
+                .replaceAll("(?i)(keyStorePassword=)[^&]*", "$1***");
     }
 }

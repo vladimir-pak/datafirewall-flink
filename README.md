@@ -140,6 +140,9 @@ TLS
 --artemis.tls.enabled=false
 --artemis.ssl.truststore.location=
 --artemis.ssl.truststore.password=
+--artemis.ssl.keystore.location=
+--artemis.ssl.keystore.password=
+--artemis.ssl.enabled.cipher.suites=
 ############################
 #
 IBM
