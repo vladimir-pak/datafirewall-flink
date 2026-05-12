@@ -63,8 +63,7 @@ public class Main {
 
     @SuppressWarnings("deprecation")
     public static void main(String[] args) throws Exception {
-        String[] normalized = normalizeArgs(args);
-        ParameterTool pt = ParameterTool.fromArgs(normalized);
+        ParameterTool pt = loadParameters(args);
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.getConfig().setGlobalJobParameters(pt);
@@ -582,5 +581,21 @@ public class Main {
             }
         }
         return out.toArray(new String[0]);
+    }
+
+    private static ParameterTool loadParameters(String[] args) throws Exception {
+        String[] normalized = normalizeArgs(args);
+
+        ParameterTool cliParams = ParameterTool.fromArgs(normalized);
+
+        String configFile = cliParams.get("config.file", null);
+        if (configFile == null || configFile.isBlank()) {
+            return cliParams;
+        }
+
+        ParameterTool fileParams = ParameterTool.fromPropertiesFile(configFile);
+
+        // Важно: параметры из CLI должны иметь приоритет над файлом
+        return fileParams.mergeWith(cliParams);
     }
 }
