@@ -18,7 +18,13 @@ public final class AnswerBuilder {
         this.mapper = mapper;
     }
 
-    public ObjectNode buildAnswer(JsonNode originalEvent, ValidationResult validation) {
+    public ObjectNode buildAnswer(
+        JsonNode originalEvent,
+        ValidationResult validation,
+        String qid,
+        Long createdDttm,
+        Long readedDttm
+    ) {
         ObjectNode out = mapper.createObjectNode();
         copyIfExists(originalEvent, out, List.of(
                 "dfw_query_id",
@@ -39,10 +45,10 @@ public final class AnswerBuilder {
         // if (out.get("dfw_created_dttm") == null) {
         //     out.put("dfw_created_dttm", now);
         // }
-        out.put("dfw_created_dttm", originalEvent.get("createdDttm").toString());
-        out.put("dfw_readed_dttm", originalEvent.get("readedDttm").toString());
+        out.put("dfw_created_dttm", createdDttm);
+        out.put("dfw_readed_dttm", readedDttm);
         out.put("dfw_action_dttm", now);
-        out.put("dfw_query_id", originalEvent.get("eventId").toString());
+        out.put("dfw_query_id", qid);
 
         String processStatus = (validation == null || validation.processStatus() == null)
                 ? "ERROR"

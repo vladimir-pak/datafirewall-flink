@@ -21,11 +21,23 @@ public final class DetailAnswerService {
         this.builder = new DetailAnswerBuilder(mapper);
     }
 
-    public String build(JsonNode originalEvent, ValidationResult validation) {
+    public String build(
+        JsonNode originalEvent, 
+        ValidationResult validation,
+        String qid,
+        Long createdDttm,
+        Long readedDttm
+    ) {
         if (originalEvent == null || validation == null) return null;
 
         try {
-            ObjectNode node = builder.buildDetailAnswer(originalEvent, validation);
+            ObjectNode node = builder.buildDetailAnswer(
+                originalEvent,
+                validation,
+                qid,
+                createdDttm,
+                readedDttm
+            );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
             log.warn("Failed to build detail answer", e);

@@ -24,7 +24,13 @@ public final class DetailAnswerBuilder {
         this.mapper = mapper;
     }
 
-    public ObjectNode buildDetailAnswer(JsonNode originalEvent, ValidationResult validation) {
+    public ObjectNode buildDetailAnswer(
+        JsonNode originalEvent, 
+        ValidationResult validation,
+        String qid,
+        Long createdDttm,
+        Long readedDttm
+    ) {
         Map<String, Map<String, String>> general =
                 validation == null || validation.detailByField() == null
                         ? Map.of()
@@ -113,10 +119,10 @@ public final class DetailAnswerBuilder {
         // if (result.get("dfw_created_dttm") == null) {
         //     result.put("dfw_created_dttm", now);
         // }
-        result.put("dfw_created_dttm", originalEvent.get("createdDttm").toString());
-        result.put("dfw_readed_dttm", originalEvent.get("readedDttm").toString());
+        result.put("dfw_created_dttm", createdDttm);
+        result.put("dfw_readed_dttm", readedDttm);
         result.put("dfw_action_dttm", now);
-        result.put("dfw_query_id", originalEvent.get("eventId").toString());
+        result.put("dfw_query_id", qid);
         return result;
     }
 

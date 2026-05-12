@@ -21,11 +21,23 @@ public final class ShortAnswerService {
         this.answerBuilder = new AnswerBuilder(mapper);
     }
 
-    public String build(JsonNode originalEvent, ValidationResult validation) {
+    public String build(
+        JsonNode originalEvent, 
+        ValidationResult validation, 
+        String qid,
+        Long createdDttm,
+        Long readedDttm
+    ) {
         if (originalEvent == null || validation == null) return null;
 
         try {
-            ObjectNode node = answerBuilder.buildAnswer(originalEvent, validation);
+            ObjectNode node = answerBuilder.buildAnswer(
+                originalEvent, 
+                validation,
+                qid,
+                createdDttm,
+                readedDttm
+            );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
             log.warn("Failed to build short ANSWER json", e);

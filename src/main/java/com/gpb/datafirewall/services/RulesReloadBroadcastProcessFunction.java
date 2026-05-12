@@ -215,7 +215,8 @@ public class RulesReloadBroadcastProcessFunction
 
         try {
             JsonNode originalEvent = mapper.readTree(raw);
-            String qid = originalEvent.path("dfw_query_id").asText("no-qid");
+            // String qid = originalEvent.path("dfw_query_id").asText("no-qid");
+            String qid = in.jmsMessageId == null ? in.mqMessageId.toString() : in.jmsMessageId;
 
             ReadOnlyBroadcastState<String, CacheUpdateEvent> st =
                     ctx.getBroadcastState(rulesBroadcastDesc);
@@ -405,7 +406,7 @@ public class RulesReloadBroadcastProcessFunction
                     freezeErrors(mergedErrorsByField)
             );
 
-            String shortJson = shortAnswerService.build(originalEvent, finalValidation);
+            String shortJson = shortAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm);
             if (shortJson == null) {
                 log.warn("[PIPE][{}][eventId={}] ShortAnswerService returned null.", qid, eventId);
                 return;
@@ -415,7 +416,7 @@ public class RulesReloadBroadcastProcessFunction
                 log.info("[PIPE][{}] 3) ANSWER_SHORT:\n{}", qid, maskJsonPretty(shortJson));
             }
 
-            String detailJson = detailAnswerService.build(originalEvent, finalValidation);
+            String detailJson = detailAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm);
             if (detailJson != null) {
                 if (logPayloads && log.isInfoEnabled()) {
                     log.info("[PIPE][{}] 4) ANSWER_DETAIL:\n{}", qid, maskJsonPretty(detailJson));
