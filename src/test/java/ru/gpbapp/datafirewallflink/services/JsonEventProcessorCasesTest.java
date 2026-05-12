@@ -2,8 +2,7 @@ package ru.gpbapp.datafirewallflink.services;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
-import ru.gpb.datafirewall.services.JsonEventProcessor;
+import com.gpb.datafirewall.services.JsonEventProcessor;
 
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
