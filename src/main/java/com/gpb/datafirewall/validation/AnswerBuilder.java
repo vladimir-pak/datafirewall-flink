@@ -42,6 +42,7 @@ public final class AnswerBuilder {
         out.put("dfw_created_dttm", originalEvent.get("createdDttm").toString());
         out.put("dfw_readed_dttm", originalEvent.get("readedDttm").toString());
         out.put("dfw_action_dttm", now);
+        out.put("dfw_query_id", originalEvent.get("eventId").toString());
 
         String processStatus = (validation == null || validation.processStatus() == null)
                 ? "ERROR"

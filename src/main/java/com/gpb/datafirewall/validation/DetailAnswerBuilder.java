@@ -116,6 +116,7 @@ public final class DetailAnswerBuilder {
         result.put("dfw_created_dttm", originalEvent.get("createdDttm").toString());
         result.put("dfw_readed_dttm", originalEvent.get("readedDttm").toString());
         result.put("dfw_action_dttm", now);
+        result.put("dfw_query_id", originalEvent.get("eventId").toString());
         return result;
     }
 
