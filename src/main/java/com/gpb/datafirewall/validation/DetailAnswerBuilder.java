@@ -109,11 +109,13 @@ public final class DetailAnswerBuilder {
 
         String now = Instant.now().toString();
         result.put("dfw_action_type", "ANSWER_DETAIL");
+        // result.put("dfw_action_dttm", now);
+        // if (result.get("dfw_created_dttm") == null) {
+        //     result.put("dfw_created_dttm", now);
+        // }
+        result.put("dfw_created_dttm", originalEvent.get("createdDttm").toString());
+        result.put("dfw_readed_dttm", originalEvent.get("readedDttm").toString());
         result.put("dfw_action_dttm", now);
-        if (result.get("dfw_created_dttm") == null) {
-            result.put("dfw_created_dttm", now);
-        }
-
         return result;
     }
 

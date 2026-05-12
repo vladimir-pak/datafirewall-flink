@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
@@ -186,6 +187,9 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
                 int messageLength = msg.getMessageLength();
                 int dataLength = msg.getDataLength();
 
+                Long createdDttm = extractMqPutTimestamp(msg);
+                Long readedDttm = currentTimestampMs();
+
                 log.debug(
                         "MQ message props: ccsid={} encoding={} format={} dataLength={} msgLength={}",
                         msg.characterSet,
@@ -224,7 +228,7 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
                 }
 
                 synchronized (ctx.getCheckpointLock()) {
-                    ctx.collect(MessageRecord.fromMq(msgIdBytes, body));
+                    ctx.collect(MessageRecord.fromMq(msgIdBytes, body, createdDttm, readedDttm));
                 }
 
             } catch (MQException mqe) {
@@ -360,5 +364,22 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
             sb.append(String.format(Locale.ROOT, "%02X", b));
         }
         return sb.toString();
+    }
+
+    private Long extractMqPutTimestamp(MQMessage msg) {
+        if (msg == null || msg.putDateTime == null) {
+            return null;
+        }
+
+        try {
+            return msg.putDateTime.getTimeInMillis();
+        } catch (Exception e) {
+            log.warn("Failed to extract IBM MQ putDateTime", e);
+            return null;
+        }
+    }
+
+    private Long currentTimestampMs() {
+        return Instant.now().toEpochMilli();
     }
 }

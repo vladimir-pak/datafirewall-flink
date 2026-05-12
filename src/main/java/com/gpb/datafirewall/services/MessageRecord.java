@@ -24,21 +24,42 @@ public final class MessageRecord implements Serializable {
      */
     public String payload;
 
+    Long createdDttm; // Дата создания сообщения
+    Long readedDttm; // Дата начала обработки
+
     public MessageRecord() {
     }
 
-    private MessageRecord(byte[] mqMessageId, String jmsMessageId, String payload) {
+    private MessageRecord(
+        byte[] mqMessageId, 
+        String jmsMessageId, 
+        String payload, 
+        Long createdDttm,
+        Long readedDttm
+    ) {
         this.mqMessageId = mqMessageId;
         this.jmsMessageId = jmsMessageId;
         this.payload = payload;
+        this.createdDttm = createdDttm;
+        this.readedDttm = readedDttm;
     }
 
-    public static MessageRecord fromMq(byte[] mqMessageId, String payload) {
-        return new MessageRecord(normalizeMqId(mqMessageId), null, payload);
+    public static MessageRecord fromMq(
+        byte[] mqMessageId, 
+        String payload, 
+        Long createdDttm,
+        Long readedDttm
+    ) {
+        return new MessageRecord(normalizeMqId(mqMessageId), null, payload, createdDttm, readedDttm);
     }
 
-    public static MessageRecord fromJms(String jmsMessageId, String payload) {
-        return new MessageRecord(null, jmsMessageId, payload);
+    public static MessageRecord fromJms(
+        String jmsMessageId, 
+        String payload, 
+        Long createdDttm,
+        Long readedDttm
+    ) {
+        return new MessageRecord(null, jmsMessageId, payload, createdDttm, readedDttm);
     }
 
     public boolean isMq() {

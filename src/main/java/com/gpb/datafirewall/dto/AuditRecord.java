@@ -1,7 +1,6 @@
 package com.gpb.datafirewall.dto;
 
 import java.io.Serializable;
-import java.time.Instant;
 
 public class AuditRecord implements Serializable {
 
@@ -9,7 +8,7 @@ public class AuditRecord implements Serializable {
     private String requestJson;
     private String shortAnswerJson;
     private String detailAnswerJson;
-    private String timestamp;
+    private String actionDttm;
     private String status;
 
     public AuditRecord() {
@@ -20,13 +19,14 @@ public class AuditRecord implements Serializable {
             String requestJson,
             String shortAnswerJson,
             String detailAnswerJson,
+            String actionDttm,
             String status
     ) {
         this.eventId = eventId;
         this.requestJson = requestJson;
         this.shortAnswerJson = shortAnswerJson;
         this.detailAnswerJson = detailAnswerJson;
-        this.timestamp = Instant.now().toString();
+        this.actionDttm = actionDttm;
         this.status = status != null ? status : "SUCCESS";
     }
 
@@ -62,12 +62,12 @@ public class AuditRecord implements Serializable {
         this.detailAnswerJson = detailAnswerJson;
     }
 
-    public String getTimestamp() {
-        return timestamp;
+    public String getActionDttm() {
+        return actionDttm;
     }
 
-    public void setTimestamp(String timestamp) {
-        this.timestamp = timestamp;
+    public void setActionDttm(String actionDttm) {
+        this.actionDttm = actionDttm;
     }
 
     public String getStatus() {

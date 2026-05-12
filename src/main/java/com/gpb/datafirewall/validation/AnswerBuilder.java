@@ -32,13 +32,16 @@ public final class AnswerBuilder {
         out.put("dfw_action_type", "ANSWER");
 
         String now = Instant.now().toString();
-        out.put("dfw_readed_buf_dttm", now);
-        out.put("dfw_sending_to_mq_dttm", now);
-        out.put("dfw_action_dttm", now);
+        // out.put("dfw_readed_buf_dttm", now);
+        // out.put("dfw_sending_to_mq_dttm", now);
+        // out.put("dfw_action_dttm", now);
 
-        if (out.get("dfw_created_dttm") == null) {
-            out.put("dfw_created_dttm", now);
-        }
+        // if (out.get("dfw_created_dttm") == null) {
+        //     out.put("dfw_created_dttm", now);
+        // }
+        out.put("dfw_created_dttm", originalEvent.get("createdDttm").toString());
+        out.put("dfw_readed_dttm", originalEvent.get("readedDttm").toString());
+        out.put("dfw_action_dttm", now);
 
         String processStatus = (validation == null || validation.processStatus() == null)
                 ? "ERROR"

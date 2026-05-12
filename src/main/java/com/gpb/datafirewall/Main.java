@@ -36,6 +36,7 @@ import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.services.MessageReply;
 import com.gpb.datafirewall.services.RulesReloadBroadcastProcessFunction;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -406,6 +407,7 @@ public class Main {
                                         result.getOriginalJson(),
                                         shortJson,
                                         result.getDetailJson(),
+                                        Instant.now().toString(),
                                         "PROCESSED"
                                 );
 

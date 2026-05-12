@@ -17,6 +17,7 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 public class ArtemisSource extends RichSourceFunction<MessageRecord> {
 
@@ -103,19 +104,18 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
                 throw e;
             }
 
+            Long readedDttm = Instant.now().toEpochMilli();
+
             if (message == null) {
                 continue;
             }
-//            String readedFromMQDttm = Instant.now()
-//                    .atOffset(ZoneOffset.UTC)
-//                    .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+
             String payload = extractPayload(message);
             String msgId = extractMessageId(message);
-//            String createdDttm = extractIngressTimestamp(message);
+            Long jmsTimestamp = extractJmsTimestamp(message);
 
             synchronized (ctx.getCheckpointLock()) {
-//                ctx.collect(new MessageRecord(msgId, payload, createdDttm, readedFromMQDttm));
-                ctx.collect(MessageRecord.fromJms(msgId, payload));
+                ctx.collect(MessageRecord.fromJms(msgId, payload, jmsTimestamp, readedDttm));
             }
         }
     }
@@ -190,5 +190,10 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
         return url
                 .replaceAll("(?i)(trustStorePassword=)[^&]*", "$1***")
                 .replaceAll("(?i)(keyStorePassword=)[^&]*", "$1***");
+    }
+
+    private Long extractJmsTimestamp(Message message) throws JMSException {
+        long ts = message.getJMSTimestamp();
+        return ts > 0 ? ts : null;
     }
 }
