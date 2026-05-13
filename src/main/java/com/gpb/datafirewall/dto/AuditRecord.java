@@ -2,12 +2,14 @@ package com.gpb.datafirewall.dto;
 
 import java.io.Serializable;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 public class AuditRecord implements Serializable {
 
     private String eventId;
-    private String requestJson;
-    private String shortAnswerJson;
-    private String detailAnswerJson;
+    private JsonNode requestJson;
+    private JsonNode shortAnswerJson;
+    private JsonNode detailAnswerJson;
     private String actionDttm;
     private String status;
 
@@ -16,9 +18,9 @@ public class AuditRecord implements Serializable {
 
     public AuditRecord(
             String eventId,
-            String requestJson,
-            String shortAnswerJson,
-            String detailAnswerJson,
+            JsonNode requestJson,
+            JsonNode shortAnswerJson,
+            JsonNode detailAnswerJson,
             String actionDttm,
             String status
     ) {
@@ -38,27 +40,27 @@ public class AuditRecord implements Serializable {
         this.eventId = eventId;
     }
 
-    public String getRequestJson() {
+    public JsonNode getRequestJson() {
         return requestJson;
     }
 
-    public void setRequestJson(String requestJson) {
+    public void setRequestJson(JsonNode requestJson) {
         this.requestJson = requestJson;
     }
 
-    public String getShortAnswerJson() {
+    public JsonNode getShortAnswerJson() {
         return shortAnswerJson;
     }
 
-    public void setShortAnswerJson(String shortAnswerJson) {
+    public void setShortAnswerJson(JsonNode shortAnswerJson) {
         this.shortAnswerJson = shortAnswerJson;
     }
 
-    public String getDetailAnswerJson() {
+    public JsonNode getDetailAnswerJson() {
         return detailAnswerJson;
     }
 
-    public void setDetailAnswerJson(String detailAnswerJson) {
+    public void setDetailAnswerJson(JsonNode detailAnswerJson) {
         this.detailAnswerJson = detailAnswerJson;
     }
 

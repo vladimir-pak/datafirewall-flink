@@ -21,6 +21,7 @@ import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.artemis.ArtemisConnectionUrlBuilder;
 import com.gpb.datafirewall.artemis.ArtemisSink;
@@ -396,17 +397,16 @@ public class Main {
                                 return;
                             }
 
-                            String shortJson = result.getShortJson();
-                            if (shortJson == null || shortJson.isBlank()) {
-                                return;
-                            }
-
                             try {
+                                JsonNode requestNode = safeReadTree(mapper, result.getOriginalJson());
+                                JsonNode shortNode = safeReadTree(mapper, result.getShortJson());
+                                JsonNode detailNode = safeReadTree(mapper, result.getDetailJson());
+
                                 AuditRecord audit = new AuditRecord(
                                         result.getEventId(),
-                                        result.getOriginalJson(),
-                                        shortJson,
-                                        result.getDetailJson(),
+                                        requestNode,
+                                        shortNode,
+                                        detailNode,
                                         Instant.now().toString(),
                                         "PROCESSED"
                                 );
@@ -603,5 +603,17 @@ public class Main {
 
         // Важно: параметры из CLI должны иметь приоритет над файлом
         return fileParams.mergeWith(cliParams);
+    }
+
+    private static JsonNode safeReadTree(ObjectMapper mapper, String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+
+        try {
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            return mapper.getNodeFactory().textNode(json);
+        }
     }
 }

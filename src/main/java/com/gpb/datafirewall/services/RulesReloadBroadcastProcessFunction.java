@@ -216,7 +216,10 @@ public class RulesReloadBroadcastProcessFunction
         try {
             JsonNode originalEvent = mapper.readTree(raw);
             // String qid = originalEvent.path("dfw_query_id").asText("no-qid");
-            String qid = in.jmsMessageId == null ? in.mqMessageId.toString() : in.jmsMessageId;
+            String qid = originalEvent.path("dfw_query_id").asText(null);
+            if (qid == null || qid.isBlank()) {
+                qid = eventId;
+            }
 
             ReadOnlyBroadcastState<String, CacheUpdateEvent> st =
                     ctx.getBroadcastState(rulesBroadcastDesc);
