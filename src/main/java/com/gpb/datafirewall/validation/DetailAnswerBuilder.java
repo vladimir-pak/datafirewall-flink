@@ -73,7 +73,7 @@ public final class DetailAnswerBuilder {
         }
 
         Map<String, Map<String, String>> mainFiltered = removeFields(general, excludedFromMain);
-        detailResults.set(mainDataset, buildBucket(mainFiltered));
+        // detailResults.set(mainDataset, buildBucket(mainFiltered));
 
         if (byDataset.containsKey(homeDs)) {
             detailResults.set(homeDs, buildBucket(homeBucketMap));
@@ -99,8 +99,10 @@ public final class DetailAnswerBuilder {
             if (datasetCode.equals(homeDs) || datasetCode.equals(regDs)) {
                 continue;
             }
-            detailResults.set(datasetCode, buildBucket(e.getValue()));
+            mainFiltered.putAll(e.getValue());
+            // detailResults.set(datasetCode, buildBucket(e.getValue()));
         }
+        detailResults.set(mainDataset, buildBucket(mainFiltered));
 
         result.set("detail_results", detailResults);
 
