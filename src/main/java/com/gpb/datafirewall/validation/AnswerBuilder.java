@@ -65,11 +65,6 @@ public final class AnswerBuilder {
     private ObjectNode buildShortDetails(JsonNode originalEvent, ValidationResult validation) {
         ObjectNode details = mapper.createObjectNode();
 
-        String all = (validation == null || validation.allResult() == null)
-                ? "ERROR"
-                : validation.allResult();
-        details.put("ALL_RESULT", all);
-
         Map<String, Map<String, String>> general =
                 (validation == null || validation.detailByField() == null)
                         ? Map.of()
@@ -81,6 +76,8 @@ public final class AnswerBuilder {
                         : validation.detailByDataset();
 
         JsonNode data = (originalEvent == null) ? null : originalEvent.get("data");
+
+        details.put("ALL_RESULT", resolveAllResult(data, general, byDataset));
 
         JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress", "addressRegistration", "registrationAddress");
         JsonNode registrationAddressNode = data == null ? null : firstExisting(data, "registrationAddress", "addressRegistration");
@@ -303,7 +300,7 @@ public final class AnswerBuilder {
                 continue;
             }
 
-            String status = statusByMappingFlexibleOrNull(sourceNode, key, datasetCode, general, byDataset);
+            String status = statusByMappingFlexibleOrSuccess(sourceNode, key, datasetCode, general, byDataset);
             if (status != null) {
                 result.put(localFieldName, status);
             }
@@ -484,21 +481,25 @@ public final class AnswerBuilder {
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
-        String status = statusByMappingFlexibleOrNull(node, mappingKey, datasetCode, general, byDataset);
+        String status = statusByMappingFlexibleOrSuccess(node, mappingKey, datasetCode, general, byDataset);
         if (status != null) {
             target.put(responseFieldName, status);
         }
     }
 
-    private String statusByMappingFlexibleOrNull(
+    private String statusByMappingFlexibleOrSuccess(
             JsonNode node,
             String mappingKey,
             String datasetCode,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
+        if (!hasMappingKey(node, mappingKey)) {
+            return null;
+        }
+
         Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, general, byDataset);
-        return rules == null ? null : aggregateFieldStatus(rules);
+        return rules == null ? "SUCCESS" : aggregateFieldStatus(rules);
     }
 
     private String statusByMappingFlexible(
@@ -519,28 +520,22 @@ public final class AnswerBuilder {
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
-        String logical = text(node, mappingKey, null);
-        if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
+        if (!hasMappingKey(node, mappingKey)) {
             return null;
         }
+
+        String logical = text(node, mappingKey, null);
+        String localFieldName = localFieldName(mappingKey);
 
         Map<String, String> rules = null;
 
         if (datasetCode != null && byDataset != null && !byDataset.isEmpty()) {
             Map<String, Map<String, String>> datasetDetail = byDataset.get(datasetCode);
-            if (datasetDetail != null) {
-                rules = datasetDetail.get(logical);
-                if (rules == null) {
-                    rules = datasetDetail.get(logical.replace('.', ','));
-                }
-            }
+            rules = findRulesInDetail(datasetDetail, logical, localFieldName, mappingKey);
         }
 
         if (rules == null && general != null && !general.isEmpty()) {
-            rules = general.get(logical);
-            if (rules == null) {
-                rules = general.get(logical.replace('.', ','));
-            }
+            rules = findRulesInDetail(general, logical, localFieldName, mappingKey);
         }
 
         return rules;
@@ -574,6 +569,133 @@ public final class AnswerBuilder {
             }
         }
         return "SUCCESS";
+    }
+
+
+    private String resolveAllResult(
+            JsonNode data,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        if (byDataset != null && !byDataset.isEmpty()) {
+            for (Map<String, Map<String, String>> datasetDetail : byDataset.values()) {
+                if (containsErrorInDatasetDetail(datasetDetail)) {
+                    return "ERROR";
+                }
+            }
+            return "SUCCESS";
+        }
+
+        if (containsErrorInOriginalMappings(data, general)) {
+            return "ERROR";
+        }
+
+        return "SUCCESS";
+    }
+
+    private boolean containsErrorInDatasetDetail(Map<String, Map<String, String>> datasetDetail) {
+        if (datasetDetail == null || datasetDetail.isEmpty()) {
+            return false;
+        }
+
+        for (Map<String, String> rules : datasetDetail.values()) {
+            if ("ERROR".equals(aggregateFieldStatus(rules))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean containsErrorInOriginalMappings(
+            JsonNode node,
+            Map<String, Map<String, String>> general
+    ) {
+        if (node == null || general == null || general.isEmpty()) {
+            return false;
+        }
+
+        if (node.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                String key = field.getKey();
+                JsonNode value = field.getValue();
+
+                if (key != null && key.startsWith("mapping.")) {
+                    String logical = value == null || value.isNull() ? null : value.asText(null);
+                    Map<String, String> rules = findRulesInDetail(general, logical, localFieldName(key), key);
+                    if ("ERROR".equals(aggregateFieldStatusOrSuccess(rules))) {
+                        return true;
+                    }
+                }
+
+                if (containsErrorInOriginalMappings(value, general)) {
+                    return true;
+                }
+            }
+        }
+
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (containsErrorInOriginalMappings(item, general)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private Map<String, String> findRulesInDetail(
+            Map<String, Map<String, String>> detail,
+            String logical,
+            String localFieldName,
+            String mappingKey
+    ) {
+        if (detail == null || detail.isEmpty()) {
+            return null;
+        }
+
+        Map<String, String> rules = findRulesByKey(detail, logical);
+        if (rules != null) {
+            return rules;
+        }
+
+        rules = findRulesByKey(detail, localFieldName);
+        if (rules != null) {
+            return rules;
+        }
+
+        return findRulesByKey(detail, mappingKey);
+    }
+
+    private Map<String, String> findRulesByKey(Map<String, Map<String, String>> detail, String key) {
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+
+        Map<String, String> rules = detail.get(key);
+        if (rules != null) {
+            return rules;
+        }
+
+        return detail.get(key.replace('.', ','));
+    }
+
+    private boolean hasMappingKey(JsonNode node, String mappingKey) {
+        return node != null && mappingKey != null && node.has(mappingKey);
+    }
+
+    private String localFieldName(String mappingKey) {
+        if (mappingKey == null || !mappingKey.startsWith("mapping.")) {
+            return mappingKey;
+        }
+        return mappingKey.substring("mapping.".length()).trim();
+    }
+
+    private String aggregateFieldStatusOrSuccess(Map<String, String> rules) {
+        return rules == null ? "SUCCESS" : aggregateFieldStatus(rules);
     }
 
     private static void copyIfExists(JsonNode src, ObjectNode dst, List<String> fields) {
