@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class AnswerBuilder {
 
@@ -101,20 +102,13 @@ public final class AnswerBuilder {
                 byDataset
         ));
 
-        details.set("contactInfo", buildContactShortNode(
-                data == null ? null : data.get("contactInfo"),
-                general
-        ));
-
-        details.set("baseInfo", buildBaseInfoShortNode(
-                data == null ? null : data.get("baseInfo"),
-                general
-        ));
-
-        details.set("documents", buildDocumentsShortNode(
-                data == null ? null : data.get("documents"),
-                general
-        ));
+        appendDynamicShortDetails(
+                details,
+                data,
+                general,
+                byDataset,
+                Set.of("homeAddress", "registrationAddress", "addressRegistration")
+        );
 
         return details;
     }
@@ -222,6 +216,149 @@ public final class AnswerBuilder {
         return result;
     }
 
+    private void appendDynamicShortDetails(
+            ObjectNode details,
+            JsonNode data,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset,
+            Set<String> excludedBlocks
+    ) {
+        if (details == null || data == null || !data.isObject()) {
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> blocks = data.fields();
+        while (blocks.hasNext()) {
+            Map.Entry<String, JsonNode> blockEntry = blocks.next();
+            String blockName = blockEntry.getKey();
+            JsonNode blockNode = blockEntry.getValue();
+
+            if (blockName == null || blockNode == null || !blockNode.isObject()) {
+                continue;
+            }
+            if (excludedBlocks != null && excludedBlocks.contains(blockName)) {
+                continue;
+            }
+
+            details.set(blockName, buildGenericShortNode(blockNode, general, byDataset));
+        }
+    }
+
+    private ObjectNode buildGenericShortNode(
+            JsonNode sourceNode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        ObjectNode result = mapper.createObjectNode();
+        if (sourceNode == null || !sourceNode.isObject()) {
+            return result;
+        }
+
+        String datasetCode = text(sourceNode, "dataset_code", null);
+        if (datasetCode != null) {
+            result.put("dataset_code", datasetCode);
+        }
+
+        appendMappedFieldStatuses(result, sourceNode, datasetCode, general, byDataset);
+        appendNestedShortNodes(result, sourceNode, general, byDataset);
+
+        return result;
+    }
+
+    private void appendMappedFieldStatuses(
+            ObjectNode result,
+            JsonNode sourceNode,
+            String datasetCode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        Iterator<Map.Entry<String, JsonNode>> fields = sourceNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> fieldEntry = fields.next();
+            String key = fieldEntry.getKey();
+
+            if (key == null || !key.startsWith("mapping.")) {
+                continue;
+            }
+
+            String localFieldName = key.substring("mapping.".length()).trim();
+            if (localFieldName.isEmpty()) {
+                continue;
+            }
+
+            result.put(
+                    localFieldName,
+                    statusByMappingFlexible(sourceNode, key, datasetCode, general, byDataset)
+            );
+        }
+    }
+
+    private void appendNestedShortNodes(
+            ObjectNode result,
+            JsonNode sourceNode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        Iterator<Map.Entry<String, JsonNode>> fields = sourceNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> fieldEntry = fields.next();
+            String key = fieldEntry.getKey();
+            JsonNode value = fieldEntry.getValue();
+
+            if (key == null || key.startsWith("mapping.") || "dataset_code".equals(key)) {
+                continue;
+            }
+            if (value == null || value.isNull()) {
+                continue;
+            }
+
+            if (value.isObject()) {
+                ObjectNode child = buildGenericShortNode(value, general, byDataset);
+                if (child.size() > 0) {
+                    result.set(key, child);
+                }
+                continue;
+            }
+
+            if (value.isArray()) {
+                ArrayNode children = buildGenericShortArray(value, general, byDataset);
+                if (children.size() > 0) {
+                    result.set(key, children);
+                }
+            }
+        }
+    }
+
+    private ArrayNode buildGenericShortArray(
+            JsonNode arrayNode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        ArrayNode result = mapper.createArrayNode();
+        if (arrayNode == null || !arrayNode.isArray()) {
+            return result;
+        }
+
+        for (JsonNode item : arrayNode) {
+            if (item == null || !item.isObject()) {
+                continue;
+            }
+
+            ObjectNode child = buildGenericShortNode(item, general, byDataset);
+
+            String elemId = text(item, "elemId", null);
+            if (elemId != null && !child.has("elemId")) {
+                child.put("elemId", elemId);
+            }
+
+            if (child.size() > 0) {
+                result.add(child);
+            }
+        }
+
+        return result;
+    }
+
     private List<String> findErrorsByLogicalField(Map<String, List<String>> errorsByField, String logicalField) {
         if (logicalField == null || logicalField.isBlank() || errorsByField == null || errorsByField.isEmpty()) {
             return null;
@@ -261,59 +398,59 @@ public final class AnswerBuilder {
         return o;
     }
 
-    private ObjectNode buildContactShortNode(JsonNode contact, Map<String, Map<String, String>> detailByField) {
-        ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", text(contact, "dataset_code", "УС.ЛИК.Контакты клиента"));
+    // private ObjectNode buildContactShortNode(JsonNode contact, Map<String, Map<String, String>> detailByField) {
+    //     ObjectNode o = mapper.createObjectNode();
+    //     o.put("dataset_code", text(contact, "dataset_code", "УС.ЛИК.Контакты клиента"));
 
-        o.put("mobilePhone", statusByMappingFlexibleOld(contact, "mapping.mobilePhone", detailByField));
-        o.put("emailValue", statusByMappingFlexibleOld(contact, "mapping.emailValue", detailByField));
+    //     o.put("mobilePhone", statusByMappingFlexibleOld(contact, "mapping.mobilePhone", detailByField));
+    //     o.put("emailValue", statusByMappingFlexibleOld(contact, "mapping.emailValue", detailByField));
 
-        return o;
-    }
+    //     return o;
+    // }
 
-    private ObjectNode buildBaseInfoShortNode(JsonNode base, Map<String, Map<String, String>> detailByField) {
-        ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", text(base, "dataset_code", "УС.ЛиК.Данные клиента"));
+    // private ObjectNode buildBaseInfoShortNode(JsonNode base, Map<String, Map<String, String>> detailByField) {
+    //     ObjectNode o = mapper.createObjectNode();
+    //     o.put("dataset_code", text(base, "dataset_code", "УС.ЛиК.Данные клиента"));
 
-        o.put("citizenship", statusByMappingFlexibleOld(base, "mapping.citizenship", detailByField));
-        o.put("birthPlace", statusByMappingFlexibleOld(base, "mapping.birthPlace", detailByField));
-        o.put("surname", statusByMappingFlexibleOld(base, "mapping.surname", detailByField));
-        o.put("name", statusByMappingFlexibleOld(base, "mapping.name", detailByField));
-        o.put("gender", statusByMappingFlexibleOld(base, "mapping.gender", detailByField));
-        o.put("fullName", statusByMappingFlexibleOld(base, "mapping.fullName", detailByField));
-        o.put("birthdate", statusByMappingFlexibleOld(base, "mapping.birthdate", detailByField));
-        o.put("patronymic", statusByMappingFlexibleOld(base, "mapping.patronymic", detailByField));
+    //     o.put("citizenship", statusByMappingFlexibleOld(base, "mapping.citizenship", detailByField));
+    //     o.put("birthPlace", statusByMappingFlexibleOld(base, "mapping.birthPlace", detailByField));
+    //     o.put("surname", statusByMappingFlexibleOld(base, "mapping.surname", detailByField));
+    //     o.put("name", statusByMappingFlexibleOld(base, "mapping.name", detailByField));
+    //     o.put("gender", statusByMappingFlexibleOld(base, "mapping.gender", detailByField));
+    //     o.put("fullName", statusByMappingFlexibleOld(base, "mapping.fullName", detailByField));
+    //     o.put("birthdate", statusByMappingFlexibleOld(base, "mapping.birthdate", detailByField));
+    //     o.put("patronymic", statusByMappingFlexibleOld(base, "mapping.patronymic", detailByField));
 
-        return o;
-    }
+    //     return o;
+    // }
 
-    private ObjectNode buildDocumentsShortNode(JsonNode docs, Map<String, Map<String, String>> detailByField) {
-        ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", text(docs, "dataset_code", "УС.ЛиК.Документы клиента"));
+    // private ObjectNode buildDocumentsShortNode(JsonNode docs, Map<String, Map<String, String>> detailByField) {
+    //     ObjectNode o = mapper.createObjectNode();
+    //     o.put("dataset_code", text(docs, "dataset_code", "УС.ЛиК.Документы клиента"));
 
-        o.put("clientInn", statusByMappingFlexibleOld(docs, "mapping.clientInn", detailByField));
-        o.put("clientSnils", statusByMappingFlexibleOld(docs, "mapping.clientSnils", detailByField));
+    //     o.put("clientInn", statusByMappingFlexibleOld(docs, "mapping.clientInn", detailByField));
+    //     o.put("clientSnils", statusByMappingFlexibleOld(docs, "mapping.clientSnils", detailByField));
 
-        ArrayNode arr = mapper.createArrayNode();
-        JsonNode cards = docs == null ? null : docs.get("clientIdCard");
-        if (cards != null && cards.isArray() && cards.size() > 0) {
-            JsonNode card0 = cards.get(0);
-            ObjectNode c = mapper.createObjectNode();
+    //     ArrayNode arr = mapper.createArrayNode();
+    //     JsonNode cards = docs == null ? null : docs.get("clientIdCard");
+    //     if (cards != null && cards.isArray() && cards.size() > 0) {
+    //         JsonNode card0 = cards.get(0);
+    //         ObjectNode c = mapper.createObjectNode();
 
-            c.put("elemId", text(card0, "elemId", text(card0, "type", "UNKNOWN")));
+    //         c.put("elemId", text(card0, "elemId", text(card0, "type", "UNKNOWN")));
 
-            c.put("issueAuthority", statusByMappingFlexibleOld(card0, "mapping.issueAuthority", detailByField));
-            c.put("number", statusByMappingFlexibleOld(card0, "mapping.number", detailByField));
-            c.put("issueDate", statusByMappingFlexibleOld(card0, "mapping.issueDate", detailByField));
-            c.put("departmentCode", statusByMappingFlexibleOld(card0, "mapping.departmentCode", detailByField));
-            c.put("series", statusByMappingFlexibleOld(card0, "mapping.series", detailByField));
+    //         c.put("issueAuthority", statusByMappingFlexibleOld(card0, "mapping.issueAuthority", detailByField));
+    //         c.put("number", statusByMappingFlexibleOld(card0, "mapping.number", detailByField));
+    //         c.put("issueDate", statusByMappingFlexibleOld(card0, "mapping.issueDate", detailByField));
+    //         c.put("departmentCode", statusByMappingFlexibleOld(card0, "mapping.departmentCode", detailByField));
+    //         c.put("series", statusByMappingFlexibleOld(card0, "mapping.series", detailByField));
 
-            arr.add(c);
-        }
-        o.set("clientIdCard", arr);
+    //         arr.add(c);
+    //     }
+    //     o.set("clientIdCard", arr);
 
-        return o;
-    }
+    //     return o;
+    // }
 
     private String statusByMappingFlexible(
             JsonNode node,
@@ -329,15 +466,17 @@ public final class AnswerBuilder {
 
         Map<String, String> rules = null;
 
-        Map<String, Map<String, String>> datasetDetail = byDataset.get(datasetCode);
-        if (datasetDetail != null) {
-            rules = datasetDetail.get(logical);
-            if (rules == null) {
-                rules = datasetDetail.get(logical.replace('.', ','));
+        if (datasetCode != null && byDataset != null && !byDataset.isEmpty()) {
+            Map<String, Map<String, String>> datasetDetail = byDataset.get(datasetCode);
+            if (datasetDetail != null) {
+                rules = datasetDetail.get(logical);
+                if (rules == null) {
+                    rules = datasetDetail.get(logical.replace('.', ','));
+                }
             }
         }
 
-        if (rules == null) {
+        if (rules == null && general != null && !general.isEmpty()) {
             rules = general.get(logical);
             if (rules == null) {
                 rules = general.get(logical.replace('.', ','));
@@ -347,23 +486,23 @@ public final class AnswerBuilder {
         return aggregateFieldStatus(rules);
     }
 
-    private String statusByMappingFlexibleOld(
-            JsonNode node,
-            String mappingKey,
-            Map<String, Map<String, String>> detailByField
-    ) {
-        String logical = text(node, mappingKey, null);
-        if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
-            return "ERROR";
-        }
+    // private String statusByMappingFlexibleOld(
+    //         JsonNode node,
+    //         String mappingKey,
+    //         Map<String, Map<String, String>> detailByField
+    // ) {
+    //     String logical = text(node, mappingKey, null);
+    //     if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
+    //         return "ERROR";
+    //     }
 
-        Map<String, String> rules = detailByField.get(logical);
-        if (rules == null) {
-            rules = detailByField.get(logical.replace('.', ','));
-        }
+    //     Map<String, String> rules = detailByField.get(logical);
+    //     if (rules == null) {
+    //         rules = detailByField.get(logical.replace('.', ','));
+    //     }
 
-        return aggregateFieldStatus(rules);
-    }
+    //     return aggregateFieldStatus(rules);
+    // }
 
     private String aggregateFieldStatus(Map<String, String> rules) {
         if (rules == null || rules.isEmpty()) {
