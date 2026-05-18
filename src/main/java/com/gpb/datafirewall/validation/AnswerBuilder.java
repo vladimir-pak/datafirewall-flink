@@ -88,19 +88,25 @@ public final class AnswerBuilder {
         String homeDatasetCode = text(homeAddressNode, "dataset_code", "УС.ЛиК.Адрес проживания");
         String regDatasetCode = text(registrationAddressNode, "dataset_code", "УС.ЛиК.Адрес регистрации");
 
-        details.set("homeAddress", buildAddressShortNode(
+        ObjectNode homeAddressShortNode = buildAddressShortNode(
                 homeAddressNode,
                 homeDatasetCode,
                 general,
                 byDataset
-        ));
+        );
+        if (homeAddressShortNode.size() > 0) {
+            details.set("homeAddress", homeAddressShortNode);
+        }
 
-        details.set("registrationAddress", buildAddressShortNode(
+        ObjectNode registrationAddressShortNode = buildAddressShortNode(
                 registrationAddressNode,
                 regDatasetCode,
                 general,
                 byDataset
-        ));
+        );
+        if (registrationAddressShortNode.size() > 0) {
+            details.set("registrationAddress", registrationAddressShortNode);
+        }
 
         appendDynamicShortDetails(
                 details,
@@ -240,7 +246,10 @@ public final class AnswerBuilder {
                 continue;
             }
 
-            details.set(blockName, buildGenericShortNode(blockNode, general, byDataset));
+            ObjectNode blockShortNode = buildGenericShortNode(blockNode, general, byDataset);
+            if (blockShortNode.size() > 0) {
+                details.set(blockName, blockShortNode);
+            }
         }
     }
 
@@ -255,14 +264,22 @@ public final class AnswerBuilder {
         }
 
         String datasetCode = text(sourceNode, "dataset_code", null);
-        if (datasetCode != null) {
-            result.put("dataset_code", datasetCode);
-        }
 
         appendMappedFieldStatuses(result, sourceNode, datasetCode, general, byDataset);
         appendNestedShortNodes(result, sourceNode, general, byDataset);
 
-        return result;
+        if (result.size() == 0) {
+            return result;
+        }
+
+        if (datasetCode == null) {
+            return result;
+        }
+
+        ObjectNode withDatasetCode = mapper.createObjectNode();
+        withDatasetCode.put("dataset_code", datasetCode);
+        withDatasetCode.setAll(result);
+        return withDatasetCode;
     }
 
     private void appendMappedFieldStatuses(
@@ -286,10 +303,10 @@ public final class AnswerBuilder {
                 continue;
             }
 
-            result.put(
-                    localFieldName,
-                    statusByMappingFlexible(sourceNode, key, datasetCode, general, byDataset)
-            );
+            String status = statusByMappingFlexibleOrNull(sourceNode, key, datasetCode, general, byDataset);
+            if (status != null) {
+                result.put(localFieldName, status);
+            }
         }
     }
 
@@ -345,15 +362,16 @@ public final class AnswerBuilder {
             }
 
             ObjectNode child = buildGenericShortNode(item, general, byDataset);
+            if (child.size() == 0) {
+                continue;
+            }
 
             String elemId = text(item, "elemId", null);
             if (elemId != null && !child.has("elemId")) {
                 child.put("elemId", elemId);
             }
 
-            if (child.size() > 0) {
-                result.add(child);
-            }
+            result.add(child);
         }
 
         return result;
@@ -384,17 +402,22 @@ public final class AnswerBuilder {
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
+        ObjectNode fields = mapper.createObjectNode();
+        putStatusIfPresent(fields, "city", addr, "mapping.city", datasetCode, general, byDataset);
+        putStatusIfPresent(fields, "countryCode", addr, "mapping.countryCode", datasetCode, general, byDataset);
+        putStatusIfPresent(fields, "postalCode", addr, "mapping.postalCode", datasetCode, general, byDataset);
+        putStatusIfPresent(fields, "street", addr, "mapping.street", datasetCode, general, byDataset);
+        putStatusIfPresent(fields, "area", addr, "mapping.area", datasetCode, general, byDataset);
+        putStatusIfPresent(fields, "countryName", addr, "mapping.countryName", datasetCode, general, byDataset);
+        putStatusIfPresent(fields, "settlement", addr, "mapping.settlement", datasetCode, general, byDataset);
+
+        if (fields.size() == 0) {
+            return fields;
+        }
+
         ObjectNode o = mapper.createObjectNode();
         o.put("dataset_code", datasetCode);
-
-        o.put("city", statusByMappingFlexible(addr, "mapping.city", datasetCode, general, byDataset));
-        o.put("countryCode", statusByMappingFlexible(addr, "mapping.countryCode", datasetCode, general, byDataset));
-        o.put("postalCode", statusByMappingFlexible(addr, "mapping.postalCode", datasetCode, general, byDataset));
-        o.put("street", statusByMappingFlexible(addr, "mapping.street", datasetCode, general, byDataset));
-        o.put("area", statusByMappingFlexible(addr, "mapping.area", datasetCode, general, byDataset));
-        o.put("countryName", statusByMappingFlexible(addr, "mapping.countryName", datasetCode, general, byDataset));
-        o.put("settlement", statusByMappingFlexible(addr, "mapping.settlement", datasetCode, general, byDataset));
-
+        o.setAll(fields);
         return o;
     }
 
@@ -452,7 +475,44 @@ public final class AnswerBuilder {
     //     return o;
     // }
 
+    private void putStatusIfPresent(
+            ObjectNode target,
+            String responseFieldName,
+            JsonNode node,
+            String mappingKey,
+            String datasetCode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        String status = statusByMappingFlexibleOrNull(node, mappingKey, datasetCode, general, byDataset);
+        if (status != null) {
+            target.put(responseFieldName, status);
+        }
+    }
+
+    private String statusByMappingFlexibleOrNull(
+            JsonNode node,
+            String mappingKey,
+            String datasetCode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, general, byDataset);
+        return rules == null ? null : aggregateFieldStatus(rules);
+    }
+
     private String statusByMappingFlexible(
+            JsonNode node,
+            String mappingKey,
+            String datasetCode,
+            Map<String, Map<String, String>> general,
+            Map<String, Map<String, Map<String, String>>> byDataset
+    ) {
+        Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, general, byDataset);
+        return aggregateFieldStatus(rules);
+    }
+
+    private Map<String, String> findRulesByMapping(
             JsonNode node,
             String mappingKey,
             String datasetCode,
@@ -461,7 +521,7 @@ public final class AnswerBuilder {
     ) {
         String logical = text(node, mappingKey, null);
         if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
-            return "ERROR";
+            return null;
         }
 
         Map<String, String> rules = null;
@@ -483,7 +543,7 @@ public final class AnswerBuilder {
             }
         }
 
-        return aggregateFieldStatus(rules);
+        return rules;
     }
 
     // private String statusByMappingFlexibleOld(
