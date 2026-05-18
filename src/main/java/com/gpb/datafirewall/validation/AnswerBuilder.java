@@ -77,7 +77,10 @@ public final class AnswerBuilder {
 
         JsonNode data = (originalEvent == null) ? null : originalEvent.get("data");
 
-        details.put("ALL_RESULT", resolveAllResult(data, general, byDataset));
+        String all = (validation == null || validation.allResult() == null)
+                ? "ERROR"
+                : validation.allResult();
+        details.put("ALL_RESULT", all);
 
         JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress", "addressRegistration", "registrationAddress");
         JsonNode registrationAddressNode = data == null ? null : firstExisting(data, "registrationAddress", "addressRegistration");
@@ -300,7 +303,7 @@ public final class AnswerBuilder {
                 continue;
             }
 
-            String status = statusByMappingFlexibleOrSuccess(sourceNode, key, datasetCode, general, byDataset);
+            String status = statusByMappingFlexibleOrNull(sourceNode, key, datasetCode, general, byDataset);
             if (status != null) {
                 result.put(localFieldName, status);
             }
@@ -418,60 +421,6 @@ public final class AnswerBuilder {
         return o;
     }
 
-    // private ObjectNode buildContactShortNode(JsonNode contact, Map<String, Map<String, String>> detailByField) {
-    //     ObjectNode o = mapper.createObjectNode();
-    //     o.put("dataset_code", text(contact, "dataset_code", "УС.ЛИК.Контакты клиента"));
-
-    //     o.put("mobilePhone", statusByMappingFlexibleOld(contact, "mapping.mobilePhone", detailByField));
-    //     o.put("emailValue", statusByMappingFlexibleOld(contact, "mapping.emailValue", detailByField));
-
-    //     return o;
-    // }
-
-    // private ObjectNode buildBaseInfoShortNode(JsonNode base, Map<String, Map<String, String>> detailByField) {
-    //     ObjectNode o = mapper.createObjectNode();
-    //     o.put("dataset_code", text(base, "dataset_code", "УС.ЛиК.Данные клиента"));
-
-    //     o.put("citizenship", statusByMappingFlexibleOld(base, "mapping.citizenship", detailByField));
-    //     o.put("birthPlace", statusByMappingFlexibleOld(base, "mapping.birthPlace", detailByField));
-    //     o.put("surname", statusByMappingFlexibleOld(base, "mapping.surname", detailByField));
-    //     o.put("name", statusByMappingFlexibleOld(base, "mapping.name", detailByField));
-    //     o.put("gender", statusByMappingFlexibleOld(base, "mapping.gender", detailByField));
-    //     o.put("fullName", statusByMappingFlexibleOld(base, "mapping.fullName", detailByField));
-    //     o.put("birthdate", statusByMappingFlexibleOld(base, "mapping.birthdate", detailByField));
-    //     o.put("patronymic", statusByMappingFlexibleOld(base, "mapping.patronymic", detailByField));
-
-    //     return o;
-    // }
-
-    // private ObjectNode buildDocumentsShortNode(JsonNode docs, Map<String, Map<String, String>> detailByField) {
-    //     ObjectNode o = mapper.createObjectNode();
-    //     o.put("dataset_code", text(docs, "dataset_code", "УС.ЛиК.Документы клиента"));
-
-    //     o.put("clientInn", statusByMappingFlexibleOld(docs, "mapping.clientInn", detailByField));
-    //     o.put("clientSnils", statusByMappingFlexibleOld(docs, "mapping.clientSnils", detailByField));
-
-    //     ArrayNode arr = mapper.createArrayNode();
-    //     JsonNode cards = docs == null ? null : docs.get("clientIdCard");
-    //     if (cards != null && cards.isArray() && cards.size() > 0) {
-    //         JsonNode card0 = cards.get(0);
-    //         ObjectNode c = mapper.createObjectNode();
-
-    //         c.put("elemId", text(card0, "elemId", text(card0, "type", "UNKNOWN")));
-
-    //         c.put("issueAuthority", statusByMappingFlexibleOld(card0, "mapping.issueAuthority", detailByField));
-    //         c.put("number", statusByMappingFlexibleOld(card0, "mapping.number", detailByField));
-    //         c.put("issueDate", statusByMappingFlexibleOld(card0, "mapping.issueDate", detailByField));
-    //         c.put("departmentCode", statusByMappingFlexibleOld(card0, "mapping.departmentCode", detailByField));
-    //         c.put("series", statusByMappingFlexibleOld(card0, "mapping.series", detailByField));
-
-    //         arr.add(c);
-    //     }
-    //     o.set("clientIdCard", arr);
-
-    //     return o;
-    // }
-
     private void putStatusIfPresent(
             ObjectNode target,
             String responseFieldName,
@@ -481,28 +430,13 @@ public final class AnswerBuilder {
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
-        String status = statusByMappingFlexibleOrSuccess(node, mappingKey, datasetCode, general, byDataset);
+        String status = statusByMappingFlexibleOrNull(node, mappingKey, datasetCode, general, byDataset);
         if (status != null) {
             target.put(responseFieldName, status);
         }
     }
 
-    private String statusByMappingFlexibleOrSuccess(
-            JsonNode node,
-            String mappingKey,
-            String datasetCode,
-            Map<String, Map<String, String>> general,
-            Map<String, Map<String, Map<String, String>>> byDataset
-    ) {
-        if (!hasMappingKey(node, mappingKey)) {
-            return null;
-        }
-
-        Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, general, byDataset);
-        return rules == null ? "SUCCESS" : aggregateFieldStatus(rules);
-    }
-
-    private String statusByMappingFlexible(
+    private String statusByMappingFlexibleOrNull(
             JsonNode node,
             String mappingKey,
             String datasetCode,
@@ -510,7 +444,7 @@ public final class AnswerBuilder {
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
         Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, general, byDataset);
-        return aggregateFieldStatus(rules);
+        return rules == null ? null : aggregateFieldStatus(rules);
     }
 
     private Map<String, String> findRulesByMapping(
@@ -541,24 +475,6 @@ public final class AnswerBuilder {
         return rules;
     }
 
-    // private String statusByMappingFlexibleOld(
-    //         JsonNode node,
-    //         String mappingKey,
-    //         Map<String, Map<String, String>> detailByField
-    // ) {
-    //     String logical = text(node, mappingKey, null);
-    //     if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
-    //         return "ERROR";
-    //     }
-
-    //     Map<String, String> rules = detailByField.get(logical);
-    //     if (rules == null) {
-    //         rules = detailByField.get(logical.replace('.', ','));
-    //     }
-
-    //     return aggregateFieldStatus(rules);
-    // }
-
     private String aggregateFieldStatus(Map<String, String> rules) {
         if (rules == null || rules.isEmpty()) {
             return "ERROR";
@@ -572,79 +488,31 @@ public final class AnswerBuilder {
     }
 
 
-    private String resolveAllResult(
-            JsonNode data,
-            Map<String, Map<String, String>> general,
-            Map<String, Map<String, Map<String, String>>> byDataset
-    ) {
-        if (byDataset != null && !byDataset.isEmpty()) {
-            for (Map<String, Map<String, String>> datasetDetail : byDataset.values()) {
-                if (containsErrorInDatasetDetail(datasetDetail)) {
-                    return "ERROR";
-                }
-            }
-            return "SUCCESS";
+    private static void copyIfExists(JsonNode src, ObjectNode dst, List<String> fields) {
+        if (src == null || dst == null || fields == null) return;
+        for (String f : fields) {
+            if (f == null) continue;
+            JsonNode v = src.get(f);
+            if (v != null && !v.isNull()) dst.set(f, v);
         }
-
-        if (containsErrorInOriginalMappings(data, general)) {
-            return "ERROR";
-        }
-
-        return "SUCCESS";
     }
 
-    private boolean containsErrorInDatasetDetail(Map<String, Map<String, String>> datasetDetail) {
-        if (datasetDetail == null || datasetDetail.isEmpty()) {
-            return false;
-        }
-
-        for (Map<String, String> rules : datasetDetail.values()) {
-            if ("ERROR".equals(aggregateFieldStatus(rules))) {
-                return true;
-            }
-        }
-
-        return false;
+    private static String text(JsonNode node, String field, String def) {
+        if (node == null || field == null) return def;
+        JsonNode v = node.get(field);
+        return (v == null || v.isNull()) ? def : v.asText(def);
     }
 
-    private boolean containsErrorInOriginalMappings(
-            JsonNode node,
-            Map<String, Map<String, String>> general
-    ) {
-        if (node == null || general == null || general.isEmpty()) {
-            return false;
-        }
-
-        if (node.isObject()) {
-            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                String key = field.getKey();
-                JsonNode value = field.getValue();
-
-                if (key != null && key.startsWith("mapping.")) {
-                    String logical = value == null || value.isNull() ? null : value.asText(null);
-                    Map<String, String> rules = findRulesInDetail(general, logical, localFieldName(key), key);
-                    if ("ERROR".equals(aggregateFieldStatusOrSuccess(rules))) {
-                        return true;
-                    }
-                }
-
-                if (containsErrorInOriginalMappings(value, general)) {
-                    return true;
-                }
+    private static JsonNode firstExisting(JsonNode node, String... names) {
+        if (node == null || names == null) return null;
+        for (String name : names) {
+            if (name == null) continue;
+            JsonNode found = node.get(name);
+            if (found != null && !found.isNull()) {
+                return found;
             }
         }
-
-        if (node.isArray()) {
-            for (JsonNode item : node) {
-                if (containsErrorInOriginalMappings(item, general)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return null;
     }
 
     private Map<String, String> findRulesInDetail(
@@ -692,36 +560,5 @@ public final class AnswerBuilder {
             return mappingKey;
         }
         return mappingKey.substring("mapping.".length()).trim();
-    }
-
-    private String aggregateFieldStatusOrSuccess(Map<String, String> rules) {
-        return rules == null ? "SUCCESS" : aggregateFieldStatus(rules);
-    }
-
-    private static void copyIfExists(JsonNode src, ObjectNode dst, List<String> fields) {
-        if (src == null || dst == null || fields == null) return;
-        for (String f : fields) {
-            if (f == null) continue;
-            JsonNode v = src.get(f);
-            if (v != null && !v.isNull()) dst.set(f, v);
-        }
-    }
-
-    private static String text(JsonNode node, String field, String def) {
-        if (node == null || field == null) return def;
-        JsonNode v = node.get(field);
-        return (v == null || v.isNull()) ? def : v.asText(def);
-    }
-
-    private static JsonNode firstExisting(JsonNode node, String... names) {
-        if (node == null || names == null) return null;
-        for (String name : names) {
-            if (name == null) continue;
-            JsonNode found = node.get(name);
-            if (found != null && !found.isNull()) {
-                return found;
-            }
-        }
-        return null;
     }
 }
