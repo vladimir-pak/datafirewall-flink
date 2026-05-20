@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.validation.DetailAnswerBuilder;
 import com.gpb.datafirewall.validation.ValidationResult;
 
+import java.util.Set;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,7 +28,8 @@ public final class DetailAnswerService {
         ValidationResult validation,
         String qid,
         Long createdDttm,
-        Long readedDttm
+        Long readedDttm,
+        Set<String> excludedBlocks
     ) {
         if (originalEvent == null || validation == null) return null;
 
@@ -36,7 +39,8 @@ public final class DetailAnswerService {
                 validation,
                 qid,
                 createdDttm,
-                readedDttm
+                readedDttm,
+                excludedBlocks
             );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {

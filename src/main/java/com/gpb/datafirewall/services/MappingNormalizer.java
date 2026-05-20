@@ -43,7 +43,7 @@ public final class MappingNormalizer {
             while (it.hasNext()) {
                 Map.Entry<String, JsonNode> e = it.next();
                 JsonNode v = e.getValue();
-                if (v == null || v.isNull()) continue;
+                // if (v == null || v.isNull()) continue;
                 if (v.isObject() || v.isArray()) {
                     walk(v, out);
                 }
@@ -72,7 +72,7 @@ public final class MappingNormalizer {
             if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) continue;
 
             JsonNode valueNode = obj.get(rawField);
-            if (valueNode == null || valueNode.isNull()) continue;
+            // if (valueNode == null || valueNode.isNull()) continue;
 
             String value = toFlatString(valueNode);
 

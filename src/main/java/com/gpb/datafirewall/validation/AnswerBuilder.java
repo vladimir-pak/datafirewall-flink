@@ -9,7 +9,6 @@ import java.time.Instant;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 public final class AnswerBuilder {
 
@@ -82,38 +81,11 @@ public final class AnswerBuilder {
                 : validation.allResult();
         details.put("ALL_RESULT", all);
 
-        JsonNode homeAddressNode = data == null ? null : firstExisting(data, "homeAddress", "addressRegistration", "registrationAddress");
-        JsonNode registrationAddressNode = data == null ? null : firstExisting(data, "registrationAddress", "addressRegistration");
-
-        String homeDatasetCode = text(homeAddressNode, "dataset_code", "УС.ЛиК.Адрес проживания");
-        String regDatasetCode = text(registrationAddressNode, "dataset_code", "УС.ЛиК.Адрес регистрации");
-
-        ObjectNode homeAddressShortNode = buildAddressShortNode(
-                homeAddressNode,
-                homeDatasetCode,
-                general,
-                byDataset
-        );
-        if (homeAddressShortNode.size() > 0) {
-            details.set("homeAddress", homeAddressShortNode);
-        }
-
-        ObjectNode registrationAddressShortNode = buildAddressShortNode(
-                registrationAddressNode,
-                regDatasetCode,
-                general,
-                byDataset
-        );
-        if (registrationAddressShortNode.size() > 0) {
-            details.set("registrationAddress", registrationAddressShortNode);
-        }
-
         appendDynamicShortDetails(
                 details,
                 data,
                 general,
-                byDataset,
-                Set.of("homeAddress", "registrationAddress", "addressRegistration")
+                byDataset
         );
 
         return details;
@@ -226,8 +198,7 @@ public final class AnswerBuilder {
             ObjectNode details,
             JsonNode data,
             Map<String, Map<String, String>> general,
-            Map<String, Map<String, Map<String, String>>> byDataset,
-            Set<String> excludedBlocks
+            Map<String, Map<String, Map<String, String>>> byDataset
     ) {
         if (details == null || data == null || !data.isObject()) {
             return;
@@ -240,9 +211,6 @@ public final class AnswerBuilder {
             JsonNode blockNode = blockEntry.getValue();
 
             if (blockName == null || blockNode == null || !blockNode.isObject()) {
-                continue;
-            }
-            if (excludedBlocks != null && excludedBlocks.contains(blockName)) {
                 continue;
             }
 
@@ -396,46 +364,6 @@ public final class AnswerBuilder {
         return null;
     }
 
-    private ObjectNode buildAddressShortNode(
-            JsonNode addr,
-            String datasetCode,
-            Map<String, Map<String, String>> general,
-            Map<String, Map<String, Map<String, String>>> byDataset
-    ) {
-        ObjectNode fields = mapper.createObjectNode();
-        putStatusIfPresent(fields, "city", addr, "mapping.city", datasetCode, general, byDataset);
-        putStatusIfPresent(fields, "countryCode", addr, "mapping.countryCode", datasetCode, general, byDataset);
-        putStatusIfPresent(fields, "postalCode", addr, "mapping.postalCode", datasetCode, general, byDataset);
-        putStatusIfPresent(fields, "street", addr, "mapping.street", datasetCode, general, byDataset);
-        putStatusIfPresent(fields, "area", addr, "mapping.area", datasetCode, general, byDataset);
-        putStatusIfPresent(fields, "countryName", addr, "mapping.countryName", datasetCode, general, byDataset);
-        putStatusIfPresent(fields, "settlement", addr, "mapping.settlement", datasetCode, general, byDataset);
-
-        if (fields.size() == 0) {
-            return fields;
-        }
-
-        ObjectNode o = mapper.createObjectNode();
-        o.put("dataset_code", datasetCode);
-        o.setAll(fields);
-        return o;
-    }
-
-    private void putStatusIfPresent(
-            ObjectNode target,
-            String responseFieldName,
-            JsonNode node,
-            String mappingKey,
-            String datasetCode,
-            Map<String, Map<String, String>> general,
-            Map<String, Map<String, Map<String, String>>> byDataset
-    ) {
-        String status = statusByMappingFlexibleOrNull(node, mappingKey, datasetCode, general, byDataset);
-        if (status != null) {
-            target.put(responseFieldName, status);
-        }
-    }
-
     private String statusByMappingFlexibleOrNull(
             JsonNode node,
             String mappingKey,
@@ -501,18 +429,6 @@ public final class AnswerBuilder {
         if (node == null || field == null) return def;
         JsonNode v = node.get(field);
         return (v == null || v.isNull()) ? def : v.asText(def);
-    }
-
-    private static JsonNode firstExisting(JsonNode node, String... names) {
-        if (node == null || names == null) return null;
-        for (String name : names) {
-            if (name == null) continue;
-            JsonNode found = node.get(name);
-            if (found != null && !found.isNull()) {
-                return found;
-            }
-        }
-        return null;
     }
 
     private Map<String, String> findRulesInDetail(

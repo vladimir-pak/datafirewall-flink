@@ -419,7 +419,7 @@ public class RulesReloadBroadcastProcessFunction
                 log.info("[PIPE][{}] 3) ANSWER_SHORT:\n{}", qid, maskJsonPretty(shortJson));
             }
 
-            String detailJson = detailAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm);
+            String detailJson = detailAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm, excludedBlocks);
             if (detailJson != null) {
                 if (logPayloads && log.isInfoEnabled()) {
                     log.info("[PIPE][{}] 4) ANSWER_DETAIL:\n{}", qid, maskJsonPretty(detailJson));
