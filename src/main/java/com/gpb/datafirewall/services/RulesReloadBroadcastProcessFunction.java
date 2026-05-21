@@ -20,6 +20,7 @@ import com.gpb.datafirewall.kafka.CacheUpdateEvent;
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.rule.RulesReloader;
 import com.gpb.datafirewall.validation.ValidationResult;
+import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RuntimeContext;
@@ -67,6 +68,7 @@ public class RulesReloadBroadcastProcessFunction
             "politics_filter_flag";
 
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
+    private final VaultSecretsDto vaultSecrets;
 
     private transient ObjectMapper mapper;
 
@@ -91,9 +93,11 @@ public class RulesReloadBroadcastProcessFunction
     private transient int logPreviewLen;
 
     public RulesReloadBroadcastProcessFunction(
-            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc
+            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
+            VaultSecretsDto vaultSecrets
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
+        this.vaultSecrets = vaultSecrets;
     }
 
     @Override
@@ -124,7 +128,7 @@ public class RulesReloadBroadcastProcessFunction
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
 
         String igniteApiTrustStorePath = pt.get("ignite.api.tls.truststore.path", null);
-        String igniteApiTrustStorePassword = pt.get("ignite.api.tls.truststore.password", null);
+        String igniteApiTrustStorePassword = vaultSecrets.truststorePassword();
         String igniteApiTrustStoreType = pt.get("ignite.api.tls.truststore.type", "JKS");
 
         this.igniteApiClient = new IgniteRulesApiClient(

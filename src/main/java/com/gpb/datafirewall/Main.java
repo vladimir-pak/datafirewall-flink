@@ -36,6 +36,9 @@ import com.gpb.datafirewall.mq.MqSource;
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.services.MessageReply;
 import com.gpb.datafirewall.services.RulesReloadBroadcastProcessFunction;
+import com.gpb.datafirewall.vault.VaultClient;
+import com.gpb.datafirewall.vault.VaultClientConfig;
+import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -66,6 +69,10 @@ public class Main {
     @SuppressWarnings("deprecation")
     public static void main(String[] args) throws Exception {
         ParameterTool pt = loadParameters(args);
+
+        VaultSecretsDto vaultSecrets = VaultClient.loadSecrets(
+                VaultClientConfig.fromArgs(pt)
+        );
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.getConfig().setGlobalJobParameters(pt);
@@ -106,26 +113,15 @@ public class Main {
         }
 
         String backend = pt.get("messaging.backend", DEFAULT_MESSAGING_BACKEND).trim().toLowerCase();
-        JobConfig cfg = JobConfig.fromArgs(pt);
+        JobConfig cfg = JobConfig.fromArgs(pt, vaultSecrets);
 
         String kafkaBootstrap = pt.get("kafka.bootstrap", DEFAULT_KAFKA_BOOTSTRAP);
         String kafkaTopic = pt.get("kafka.topic", DEFAULT_KAFKA_TOPIC);
         String kafkaGroup = pt.get("kafka.group", DEFAULT_KAFKA_GROUP);
 
-        // String detailKafkaBootstrap = pt.get("detail.kafka.bootstrap", kafkaBootstrap);
-        // String detailKafkaTopic = pt.get("detail.kafka.topic", DEFAULT_DETAIL_KAFKA_TOPIC);
+        String artemisUser = vaultSecrets.mqUser();
+        String artemisPassword = vaultSecrets.mqPassword();
 
-        // String artemisBrokerUrl = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
-        String artemisUser = firstNonBlank(
-                System.getenv("ARTEMIS_USER"),
-                pt.get("artemis.user", null),
-                ""
-        );
-        String artemisPassword = firstNonBlank(
-                System.getenv("ARTEMIS_PASSWORD"),
-                pt.get("artemis.password", null),
-                ""
-        );
         String artemisInQueue = pt.get("artemis.in.queue", DEFAULT_ARTEMIS_IN_QUEUE);
         String artemisOutQueue = pt.get("artemis.out.queue", DEFAULT_ARTEMIS_OUT_QUEUE);
         long artemisReceiveTimeoutMs = pt.getLong(
@@ -136,13 +132,13 @@ public class Main {
         boolean mqTlsEnabled = pt.getBoolean("mq.tls.enabled", false);
         String mqTlsCipherSuite = pt.get("mq.tls.cipherSuite", null);
         String mqTrustStore = pt.get("mq.ssl.truststore.location", null);
-        String mqTrustStorePassword = pt.get("mq.ssl.truststore.password", null);
+        String mqTrustStorePassword = vaultSecrets.truststorePassword();
 
         boolean artemisTlsEnabled = pt.getBoolean("artemis.tls.enabled", false);
         String artemisTrustStore = pt.get("artemis.ssl.truststore.location", null);
-        String artemisTrustStorePassword = pt.get("artemis.ssl.truststore.password", null);
+        String artemisTrustStorePassword = vaultSecrets.truststorePassword();
         String artemisKeyStore = pt.get("artemis.ssl.keystore.location", null);
-        String artemisKeyStorePassword = pt.get("artemis.ssl.keystore.password", null);
+        String artemisKeyStorePassword = vaultSecrets.keystorePassword();
         String artemisCipherSuites = pt.get("artemis.ssl.enabled.cipher.suites", null);
 
         String artemisBrokerUrlRaw = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
@@ -169,8 +165,8 @@ public class Main {
         String auditKafkaTopic = pt.get("audit.kafka.topic", "audit-datafirewall");
 
         if ("artemis".equals(backend)) {
-            requireNotBlank(artemisUser, "artemis.user or ENV ARTEMIS_USER");
-            requireNotBlank(artemisPassword, "artemis.password or ENV ARTEMIS_PASSWORD");
+            requireNotBlank(artemisUser, "mqUser in vault");
+            requireNotBlank(artemisPassword, "mqPassword in vault");
         }
 
         validateMinimalTls(
@@ -262,8 +258,8 @@ public class Main {
             );
         }
 
-        Properties kafkaClientProps = buildKafkaClientProperties(pt, "kafka");
-        Properties auditKafkaClientProps = buildKafkaClientProperties(pt, "audit.kafka");
+        Properties kafkaClientProps = buildKafkaClientProperties(pt, "kafka", vaultSecrets);
+        Properties auditKafkaClientProps = buildKafkaClientProperties(pt, "audit.kafka", vaultSecrets);
 
         KafkaSource<CacheUpdateEvent> kafkaSource = KafkaSource.<CacheUpdateEvent>builder()
                 .setBootstrapServers(kafkaBootstrap)
@@ -291,7 +287,7 @@ public class Main {
 
         DataStream<ProcessingResult> processed = inputStream
                 .connect(bcUpdates)
-                .process(new RulesReloadBroadcastProcessFunction(bcDesc))
+                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets))
                 .name("process-with-rules-reload")
                 .uid("process-with-rules-reload");
 
@@ -447,27 +443,27 @@ public class Main {
     ) {
         if (pt.getBoolean("kafka.tls.enabled", false)) {
             requireNotBlank(pt.get("kafka.ssl.truststore.location", null), "kafka.ssl.truststore.location");
-            requireNotBlank(pt.get("kafka.ssl.truststore.password", null), "kafka.ssl.truststore.password");
+            // requireNotBlank(pt.get("kafka.ssl.truststore.password", null), "kafka.ssl.truststore.password");
         }
 
         if (auditKafkaEnabled && pt.getBoolean("audit.kafka.tls.enabled", false)) {
             requireNotBlank(pt.get("audit.kafka.ssl.truststore.location", null), "audit.kafka.ssl.truststore.location");
-            requireNotBlank(pt.get("audit.kafka.ssl.truststore.password", null), "audit.kafka.ssl.truststore.password");
+            // requireNotBlank(pt.get("audit.kafka.ssl.truststore.password", null), "audit.kafka.ssl.truststore.password");
         }
 
         if ("mq".equals(backend) && mqTlsEnabled) {
             requireNotBlank(mqTlsCipherSuite, "mq.tls.cipherSuite");
             requireNotBlank(mqTrustStore, "mq.ssl.truststore.location");
-            requireNotBlank(mqTrustStorePassword, "mq.ssl.truststore.password");
+            // requireNotBlank(mqTrustStorePassword, "mq.ssl.truststore.password");
         }
 
         if ("artemis".equals(backend) && artemisTlsEnabled) {
             requireNotBlank(artemisTrustStore, "artemis.ssl.truststore.location");
-            requireNotBlank(artemisTrustStorePassword, "artemis.ssl.truststore.password");
+            // requireNotBlank(artemisTrustStorePassword, "artemis.ssl.truststore.password");
         }
     }
 
-    private static Properties buildKafkaClientProperties(ParameterTool pt, String prefix) {
+    private static Properties buildKafkaClientProperties(ParameterTool pt, String prefix, VaultSecretsDto vaultSecrets) {
         Properties props = new Properties();
 
         boolean tlsEnabled = pt.getBoolean(prefix + ".tls.enabled", false);
@@ -477,7 +473,7 @@ public class Main {
 
         putIfNotBlank(props, "security.protocol", pt.get(prefix + ".security.protocol", "SSL"));
         putIfNotBlank(props, "ssl.truststore.location", pt.get(prefix + ".ssl.truststore.location", null));
-        putIfNotBlank(props, "ssl.truststore.password", pt.get(prefix + ".ssl.truststore.password", null));
+        putIfNotBlank(props, "ssl.truststore.password", vaultSecrets.truststorePassword());
         putIfNotBlank(
                 props,
                 "ssl.endpoint.identification.algorithm",
@@ -497,18 +493,6 @@ public class Main {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(name + " must be provided");
         }
-    }
-
-    private static String firstNonBlank(String... values) {
-        if (values == null) {
-            return null;
-        }
-        for (String value : values) {
-            if (value != null && !value.isBlank()) {
-                return value;
-            }
-        }
-        return null;
     }
 
     private static void logStartupConfig(

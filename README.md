@@ -84,6 +84,8 @@ CACHE
 ############################
 --rules.loader=http
 --ignite.apiUrl=http://127.0.0.1:8080
+--ignite.api.tls.truststore.path /opt/flink/certs/truststore.jks
+--ignite.api.tls.truststore.type JKS
 --cache.bootstrap.enabled=true
 --politics.bootstrap.enabled=false
 --test.politic.caches.enabled=true
@@ -111,7 +113,6 @@ TLS
 --kafka.tls.enabled=false
 --kafka.security.protocol=SSL
 --kafka.ssl.truststore.location=
---kafka.ssl.truststore.password=
 ############################
 #
 KAFKA
@@ -124,14 +125,11 @@ ANSWER)
 --audit.kafka.tls.enabled=false
 --audit.kafka.security.protocol=SSL
 --audit.kafka.ssl.truststore.location=
---audit.kafka.ssl.truststore.password=
 ############################
 #
 ARTEMIS
 ############################
 --artemis.broker.url=tcp://localhost:61616
---artemis.user=admin
---artemis.password=admin
 --artemis.in.queue=IN.Q
 --artemis.out.queue=OUT.Q
 --artemis.receive.timeout.ms=1000
@@ -139,9 +137,7 @@ ARTEMIS
 TLS
 --artemis.tls.enabled=false
 --artemis.ssl.truststore.location=
---artemis.ssl.truststore.password=
 --artemis.ssl.keystore.location=
---artemis.ssl.keystore.password=
 --artemis.ssl.enabled.cipher.suites=
 ############################
 #
@@ -154,14 +150,20 @@ MQ
 --mq.qmgr=QM1
 --mq.inQueue=IN.Q
 --mq.outQueue=OUT.Q
---mq.user=admin
---mq.password=admin123
 --mq.wait.interval.ms=1000
 #
 TLS
 --mq.tls.enabled=false
 --mq.tls.cipherSuite=
 --mq.ssl.truststore.location=
---mq.ssl.truststore.password=
+
+
+#
+Vault
+--vault.url=https://vault.company.ru:8200
+--vault.approle.conf=/opt/flink/secrets/secret.conf
+--vault.auth.mount=approle
+--vault.kv.mount=secret
+--vault.secret.path=datafirewall/flink/prod
 
 

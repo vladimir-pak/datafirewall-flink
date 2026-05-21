@@ -2,6 +2,8 @@ package com.gpb.datafirewall.config;
 
 import org.apache.flink.api.java.utils.ParameterTool;
 
+import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
+
 import java.util.Map;
 
 public record JobConfig(
@@ -15,7 +17,7 @@ public record JobConfig(
         String mqPassword
 ) {
 
-    public static JobConfig fromArgs(ParameterTool pt) {
+    public static JobConfig fromArgs(ParameterTool pt, VaultSecretsDto vaultSecrets) {
         ParameterTool params = pt == null
                 ? ParameterTool.fromMap(Map.of())
                 : pt;
@@ -29,26 +31,16 @@ public record JobConfig(
         String inQueue = params.get("mq.inQueue", "IN.Q");
         String outQueue = params.get("mq.outQueue", "OUT.Q");
 
-        String user = params.get("mq.user", null);
-        String password = params.get("mq.password", null);
-
-        String envUser = System.getenv("MQ_USER");
-        String envPassword = System.getenv("MQ_PASSWORD");
-
-        if (envUser != null && !envUser.isBlank()) {
-            user = envUser;
-        }
-        if (envPassword != null && !envPassword.isBlank()) {
-            password = envPassword;
-        }
+        String user = vaultSecrets.mqUser();
+        String password = vaultSecrets.mqPassword();
 
         if ("mq".equalsIgnoreCase(backend)) {
             if (user == null || user.isBlank()) {
-                throw new IllegalArgumentException("mq.user must be provided (param or ENV MQ_USER)");
+                throw new IllegalArgumentException("mqUser must be provided in vault");
             }
 
             if (password == null || password.isBlank()) {
-                throw new IllegalArgumentException("mq.password must be provided (param or ENV MQ_PASSWORD)");
+                throw new IllegalArgumentException("mqPassword must be provided in vault");
             }
         }
 
