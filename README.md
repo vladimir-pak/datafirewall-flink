@@ -84,8 +84,7 @@ CACHE
 ############################
 --rules.loader=http
 --ignite.apiUrl=http://127.0.0.1:8080
---ignite.api.tls.truststore.path /opt/flink/certs/truststore.jks
---ignite.api.tls.truststore.type JKS
+--ignite.api.tls.ca.pem=/opt/flink/certs/ca.pem
 --cache.bootstrap.enabled=true
 --politics.bootstrap.enabled=false
 --test.politic.caches.enabled=true

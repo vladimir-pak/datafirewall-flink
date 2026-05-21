@@ -29,38 +29,28 @@ public final class IgniteRulesApiClient {
     private final HttpClient http;
 
     /**
-     * Старый конструктор.
-     * Работает для http:// или https:// с дефолтным JVM truststore.
+     * Работает для:
+     * - http:// без TLS
+     * - https:// с дефолтным JVM truststore
      */
     public IgniteRulesApiClient(String baseUrl) {
-        this(baseUrl, null, null, null);
+        this(baseUrl, null);
     }
 
     /**
-     * Новый конструктор с truststore.
-     *
-     * @param baseUrl              например https://ignite-api-host:8443
-     * @param trustStorePath       путь до truststore, например /opt/flink/certs/truststore.jks
-     * @param trustStorePassword   пароль truststore
-     * @param trustStoreType       JKS или PKCS12. Если null/blank, будет JKS.
+     * @param baseUrl например https://ignite-api-host:9200
+     * @param caPemPath путь до PEM-файла с CA/server chain, например /opt/flink/certs/ca.pem
      */
-    public IgniteRulesApiClient(
-            String baseUrl,
-            String trustStorePath,
-            String trustStorePassword,
-            String trustStoreType
-    ) {
+    public IgniteRulesApiClient(String baseUrl, String caPemPath) {
         this.baseUrl = normalizeBaseUrl(baseUrl);
 
         HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3));
 
-        if (isNotBlank(trustStorePath)) {
-            builder.sslContext(buildSslContext(
-                    trustStorePath,
-                    trustStorePassword,
-                    isNotBlank(trustStoreType) ? trustStoreType : "JKS"
-            ));
+        if (isNotBlank(caPemPath)) {
+            builder.sslContext(buildSslContextFromPem(caPemPath));
+        } else if (this.baseUrl.startsWith("https://")) {
+            System.out.println("WARN: Ignite API uses HTTPS but PEM trust config is not set. JVM default truststore will be used.");
         }
 
         this.http = builder.build();
@@ -140,23 +130,12 @@ public final class IgniteRulesApiClient {
         }
     }
 
-    private static SSLContext buildSslContext(
-            String trustStorePath,
-            String trustStorePassword,
-            String trustStoreType
-    ) {
+    private static SSLContext buildSslContextFromPem(String caPemPath) {
         try {
-            KeyStore trustStore;
+            KeyStore trustStore = loadPemTrustStore(caPemPath);
 
-            if ("PEM".equalsIgnoreCase(trustStoreType)) {
-                trustStore = loadPemTrustStore(trustStorePath);
-            } else {
-                trustStore = loadKeyStoreTrustStore(
-                        trustStorePath,
-                        trustStorePassword,
-                        trustStoreType
-                );
-            }
+            System.out.println("Ignite API PEM truststore loaded. path=" + caPemPath
+                    + ", size=" + trustStore.size());
 
             TrustManagerFactory tmf = TrustManagerFactory.getInstance(
                     TrustManagerFactory.getDefaultAlgorithm()
@@ -169,29 +148,10 @@ public final class IgniteRulesApiClient {
             return sslContext;
         } catch (Exception e) {
             throw new RuntimeException(
-                    "Failed to build SSLContext for Ignite API. trustStorePath=" + trustStorePath +
-                            ", trustStoreType=" + trustStoreType,
+                    "Failed to build SSLContext from PEM for Ignite API. caPemPath=" + caPemPath,
                     e
             );
         }
-    }
-
-    private static KeyStore loadKeyStoreTrustStore(
-            String trustStorePath,
-            String trustStorePassword,
-            String trustStoreType
-    ) throws Exception {
-        KeyStore trustStore = KeyStore.getInstance(trustStoreType);
-
-        char[] password = trustStorePassword == null
-                ? new char[0]
-                : trustStorePassword.toCharArray();
-
-        try (InputStream in = new FileInputStream(trustStorePath)) {
-            trustStore.load(in, password);
-        }
-
-        return trustStore;
     }
 
     private static KeyStore loadPemTrustStore(String pemPath) throws Exception {
