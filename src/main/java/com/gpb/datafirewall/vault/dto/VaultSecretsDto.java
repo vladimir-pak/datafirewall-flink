@@ -7,7 +7,9 @@ public record VaultSecretsDto(
         String keystorePassword,
         String truststorePassword,
         String mqUser,
-        String mqPassword
+        String mqPassword,
+        String mqKeystorePassword,
+        String mqTruststorePassword
 ) implements Serializable {
 
     @Serial
@@ -18,6 +20,8 @@ public record VaultSecretsDto(
         requireNotBlank(truststorePassword, "truststorePassword");
         requireNotBlank(mqUser, "mqUser");
         requireNotBlank(mqPassword, "mqPassword");
+        requireNotBlank(mqPassword, "mqKeystorePassword");
+        requireNotBlank(mqPassword, "mqTruststorePassword");
     }
 
     private static void requireNotBlank(String value, String name) {

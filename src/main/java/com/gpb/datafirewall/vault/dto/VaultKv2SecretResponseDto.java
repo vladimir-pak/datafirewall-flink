@@ -18,7 +18,9 @@ public record VaultKv2SecretResponseDto(
             String keystorePassword,
             String truststorePassword,
             String mqUser,
-            String mqPassword
+            String mqPassword,
+            String mqKeystorePassword,
+            String mqTrustStorePassword
     ) {
     }
 
@@ -31,7 +33,9 @@ public record VaultKv2SecretResponseDto(
                 data.data.keystorePassword(),
                 data.data.truststorePassword(),
                 data.data.mqUser(),
-                data.data.mqPassword()
+                data.data.mqPassword(),
+                data.data.mqKeystorePassword(),
+                data.data.mqTrustStorePassword()
         );
     }
 }

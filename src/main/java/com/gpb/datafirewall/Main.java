@@ -132,13 +132,13 @@ public class Main {
         boolean mqTlsEnabled = pt.getBoolean("mq.tls.enabled", false);
         String mqTlsCipherSuite = pt.get("mq.tls.cipherSuite", null);
         String mqTrustStore = pt.get("mq.ssl.truststore.location", null);
-        String mqTrustStorePassword = vaultSecrets.truststorePassword();
+        String mqTrustStorePassword = vaultSecrets.mqTruststorePassword();
 
         boolean artemisTlsEnabled = pt.getBoolean("artemis.tls.enabled", false);
         String artemisTrustStore = pt.get("artemis.ssl.truststore.location", null);
-        String artemisTrustStorePassword = vaultSecrets.truststorePassword();
+        String artemisTrustStorePassword = vaultSecrets.mqTruststorePassword();
         String artemisKeyStore = pt.get("artemis.ssl.keystore.location", null);
-        String artemisKeyStorePassword = vaultSecrets.keystorePassword();
+        String artemisKeyStorePassword = vaultSecrets.mqKeystorePassword();
         String artemisCipherSuites = pt.get("artemis.ssl.enabled.cipher.suites", null);
 
         String artemisBrokerUrlRaw = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
