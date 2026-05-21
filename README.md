@@ -165,5 +165,6 @@ Vault
 --vault.auth.mount=approle
 --vault.kv.mount=secret
 --vault.secret.path=datafirewall/flink/prod
+--vault.ssl.ca-cert.pem=/opt/flink/certs/vault-ca.pem
 
 

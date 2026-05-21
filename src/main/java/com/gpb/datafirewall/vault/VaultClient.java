@@ -9,6 +9,7 @@ import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -16,8 +17,17 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Properties;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.nio.file.Files;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+
+
 
 public final class VaultClient {
 
@@ -30,18 +40,17 @@ public final class VaultClient {
 
     public static VaultSecretsDto loadSecrets(VaultClientConfig config) {
         try {
-            HttpClient httpClient = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofMillis(config.connectTimeoutMs()))
-                    .build();
+            HttpClient httpClient = buildHttpClient(config);
 
             AppRoleCredentials credentials = readAppRoleCredentials(config);
             String clientToken = loginByAppRole(config, httpClient, credentials);
             VaultSecretsDto secrets = readKv2Secret(config, httpClient, clientToken);
 
             log.info(
-                    "[VAULT] Secret successfully loaded once. kvMount={}, secretPath={}",
+                    "[VAULT] Secret successfully loaded once. kvMount={}, secretPath={}, customCaPem={}",
                     config.kvMount(),
-                    config.secretPath()
+                    config.secretPath(),
+                    config.hasCustomCaCertPem()
             );
 
             return secrets;
@@ -199,6 +208,57 @@ public final class VaultClient {
             return "<null>";
         }
         return config.kvMount() + "/" + config.secretPath();
+    }
+
+    private static HttpClient buildHttpClient(VaultClientConfig config) throws Exception {
+        HttpClient.Builder builder = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(config.connectTimeoutMs()));
+
+        if (config.hasCustomCaCertPem()) {
+            builder.sslContext(buildSslContextFromPem(config));
+        }
+
+        return builder.build();
+    }
+
+    private static SSLContext buildSslContextFromPem(VaultClientConfig config) throws Exception {
+        byte[] pemBytes = Files.readAllBytes(config.caCertPemPath());
+
+        CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
+
+        Collection<? extends Certificate> certificates;
+        try (ByteArrayInputStream in = new ByteArrayInputStream(pemBytes)) {
+            certificates = certificateFactory.generateCertificates(in);
+        }
+
+        if (certificates == null || certificates.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "PEM file does not contain X.509 certificates: " + config.caCertPemPath()
+            );
+        }
+
+        KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        trustStore.load(null, null);
+
+        int index = 0;
+        for (Certificate certificate : certificates) {
+            trustStore.setCertificateEntry("vault-ca-" + index, certificate);
+            index++;
+        }
+
+        TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm()
+        );
+        trustManagerFactory.init(trustStore);
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(
+                null,
+                trustManagerFactory.getTrustManagers(),
+                null
+        );
+
+        return sslContext;
     }
 
     private record AppRoleCredentials(

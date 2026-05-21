@@ -12,7 +12,9 @@ public record VaultClientConfig(
         String secretPath,
         String namespace,
         int connectTimeoutMs,
-        int requestTimeoutMs
+        int requestTimeoutMs,
+
+        Path caCertPemPath
 ) {
 
     public static VaultClientConfig fromArgs(ParameterTool pt) {
@@ -28,6 +30,8 @@ public record VaultClientConfig(
         int connectTimeoutMs = pt.getInt("vault.connect.timeout.ms", 3000);
         int requestTimeoutMs = pt.getInt("vault.request.timeout.ms", 5000);
 
+        String caCertPem = blankToNull(pt.get("vault.ssl.ca-cert.pem", null));
+
         return new VaultClientConfig(
                 trimTrailingSlash(url),
                 Path.of(appRoleConf),
@@ -36,8 +40,13 @@ public record VaultClientConfig(
                 secretPath,
                 namespace,
                 connectTimeoutMs,
-                requestTimeoutMs
+                requestTimeoutMs,
+                caCertPem == null ? null : Path.of(caCertPem)
         );
+    }
+
+    public boolean hasCustomCaCertPem() {
+        return caCertPemPath != null;
     }
 
     private static String require(String value, String name) {
