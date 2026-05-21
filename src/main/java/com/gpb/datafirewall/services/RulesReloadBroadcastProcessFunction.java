@@ -122,7 +122,17 @@ public class RulesReloadBroadcastProcessFunction
         initRulesLoaderAndLoad(pt);
 
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
-        this.igniteApiClient = new IgniteRulesApiClient(igniteApiUrl);
+
+        String igniteApiTrustStorePath = pt.get("ignite.api.tls.truststore.path", null);
+        String igniteApiTrustStorePassword = pt.get("ignite.api.tls.truststore.password", null);
+        String igniteApiTrustStoreType = pt.get("ignite.api.tls.truststore.type", "JKS");
+
+        this.igniteApiClient = new IgniteRulesApiClient(
+                igniteApiUrl,
+                igniteApiTrustStorePath,
+                igniteApiTrustStorePassword,
+                igniteApiTrustStoreType
+        );
 
         boolean bootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);
         boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
