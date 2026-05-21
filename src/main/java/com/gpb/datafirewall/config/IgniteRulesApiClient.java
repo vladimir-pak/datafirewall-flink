@@ -15,7 +15,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.time.Duration;
+import java.util.Collection;
 
 public final class IgniteRulesApiClient {
 
@@ -143,14 +146,16 @@ public final class IgniteRulesApiClient {
             String trustStoreType
     ) {
         try {
-            KeyStore trustStore = KeyStore.getInstance(trustStoreType);
+            KeyStore trustStore;
 
-            char[] password = trustStorePassword == null
-                    ? new char[0]
-                    : trustStorePassword.toCharArray();
-
-            try (InputStream in = new FileInputStream(trustStorePath)) {
-                trustStore.load(in, password);
+            if ("PEM".equalsIgnoreCase(trustStoreType)) {
+                trustStore = loadPemTrustStore(trustStorePath);
+            } else {
+                trustStore = loadKeyStoreTrustStore(
+                        trustStorePath,
+                        trustStorePassword,
+                        trustStoreType
+                );
             }
 
             TrustManagerFactory tmf = TrustManagerFactory.getInstance(
@@ -169,6 +174,48 @@ public final class IgniteRulesApiClient {
                     e
             );
         }
+    }
+
+    private static KeyStore loadKeyStoreTrustStore(
+            String trustStorePath,
+            String trustStorePassword,
+            String trustStoreType
+    ) throws Exception {
+        KeyStore trustStore = KeyStore.getInstance(trustStoreType);
+
+        char[] password = trustStorePassword == null
+                ? new char[0]
+                : trustStorePassword.toCharArray();
+
+        try (InputStream in = new FileInputStream(trustStorePath)) {
+            trustStore.load(in, password);
+        }
+
+        return trustStore;
+    }
+
+    private static KeyStore loadPemTrustStore(String pemPath) throws Exception {
+        CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
+
+        KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        trustStore.load(null, null);
+
+        try (InputStream in = new FileInputStream(pemPath)) {
+            Collection<? extends Certificate> certificates =
+                    certificateFactory.generateCertificates(in);
+
+            int i = 0;
+            for (Certificate certificate : certificates) {
+                trustStore.setCertificateEntry("pem-cert-" + i, certificate);
+                i++;
+            }
+
+            if (i == 0) {
+                throw new IllegalArgumentException("No certificates found in PEM file: " + pemPath);
+            }
+        }
+
+        return trustStore;
     }
 
     private static String normalizeBaseUrl(String baseUrl) {
