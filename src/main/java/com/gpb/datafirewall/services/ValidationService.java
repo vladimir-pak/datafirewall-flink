@@ -9,14 +9,23 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 
+import com.gpb.datafirewall.enums.DocType;
+import com.gpb.datafirewall.enums.Gender;
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.validation.ValidationResult;
 
 public final class ValidationService {
+
+    private static final Map<String, Function<String, String>> mappingAttributes = Map.of(
+            "ОСНОВНЫЕ СВЕДЕНИЯ.Пол", Gender::map,
+            "ДУЛ.Паспорт РФ.Тип ДУЛ", DocType::map
+    );
 
     public ValidationResult validate(
             Map<String, Rule> compiledRules,
@@ -73,6 +82,8 @@ public final class ValidationService {
             List<String> sortedRuleNames = new ArrayList<>(ruleNames);
             sortedRuleNames.sort(Comparator.naturalOrder());
 
+            Map<String, String> ruleInput = mapLogicalFieldValueIfRequired(logicalField, normalizedMap);
+
             for (String ruleName : sortedRuleNames) {
                 if (ruleName == null || ruleName.isBlank()) {
                     continue;
@@ -83,7 +94,7 @@ public final class ValidationService {
                 boolean triggered;
                 try {
                     // true = правило сработало = ошибка найдена
-                    triggered = rule != null && rule.apply(normalizedMap);
+                    triggered = rule != null && rule.apply(ruleInput);
                 } catch (Exception ex) {
                     triggered = false;
                     anyException = true;
@@ -121,6 +132,39 @@ public final class ValidationService {
                 Collections.emptyMap(),
                 Collections.unmodifiableMap(errorsByField)
         );
+    }
+
+    private Map<String, String> mapLogicalFieldValueIfRequired(
+            String logicalField,
+            Map<String, String> normalizedMap
+    ) {
+        if (logicalField == null || logicalField.isBlank() || normalizedMap == null || normalizedMap.isEmpty()) {
+            return normalizedMap;
+        }
+
+        Function<String, String> mapper = mappingAttributes.get(logicalField);
+        if (mapper == null || !normalizedMap.containsKey(logicalField)) {
+            return normalizedMap;
+        }
+
+        String currentValue = normalizedMap.get(logicalField);
+        if (currentValue == null || currentValue.isBlank()) {
+            return normalizedMap;
+        }
+
+        String normalizedValue = currentValue.trim();
+        String mappedValue = mapper.apply(normalizedValue);
+        if (mappedValue == null) {
+            mappedValue = mapper.apply(normalizedValue.toUpperCase(Locale.ROOT));
+        }
+
+        if (mappedValue == null || mappedValue.equals(currentValue)) {
+            return normalizedMap;
+        }
+
+        Map<String, String> mapped = new LinkedHashMap<>(normalizedMap);
+        mapped.put(logicalField, mappedValue);
+        return Collections.unmodifiableMap(mapped);
     }
 
     private String resolveErrorMessage(

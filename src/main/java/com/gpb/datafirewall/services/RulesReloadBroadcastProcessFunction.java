@@ -185,7 +185,9 @@ public class RulesReloadBroadcastProcessFunction
 
         if ("http".equals(mode)) {
             String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
-            IgniteRulesApiClient apiClient = new IgniteRulesApiClient(igniteApiUrl);
+            String igniteApiCaPem = pt.get("ignite.api.tls.ca.pem", null);
+
+            IgniteRulesApiClient apiClient = new IgniteRulesApiClient(igniteApiUrl, igniteApiCaPem);
             rawSource = new HttpBytecodeSource(apiClient);
             this.closeable = null;
 
