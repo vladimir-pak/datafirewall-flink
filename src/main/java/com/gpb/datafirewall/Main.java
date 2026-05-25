@@ -287,7 +287,7 @@ public class Main {
 
         DataStream<ProcessingResult> processed = inputStream
                 .connect(bcUpdates)
-                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets))
+                .process(new RulesReloadBroadcastProcessFunction(bcDesc))
                 .name("process-with-rules-reload")
                 .uid("process-with-rules-reload");
 

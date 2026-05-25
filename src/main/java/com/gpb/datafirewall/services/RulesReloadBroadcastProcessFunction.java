@@ -21,7 +21,6 @@ import com.gpb.datafirewall.kafka.CacheUpdateEvent;
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.rule.RulesReloader;
 import com.gpb.datafirewall.validation.ValidationResult;
-import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RuntimeContext;
@@ -67,6 +66,12 @@ public class RulesReloadBroadcastProcessFunction
     private static final String CACHE_POLITICS_FILTER_FLAG =
             "politics_filter_flag";
 
+    private static final String RESULT_ERROR = "ERROR";
+    private static final String RESULT_WARNING = "WARNING";
+    private static final String RESULT_SUCCESS = "SUCCESS";
+    private static final String PROCESS_RULE_EXCEPTION = "RULE_EXCEPTION";
+    private static final String PROCESS_OK = "OK";
+
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
 
     private transient ObjectMapper mapper;
@@ -89,13 +94,11 @@ public class RulesReloadBroadcastProcessFunction
     private transient MappingNormalizer normalizer;
 
     private transient boolean logPayloads;
-    private transient int logPreviewLen;
 
     private transient CachePayloadConverter cachePayloadConverter;
 
     public RulesReloadBroadcastProcessFunction(
-            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
-            VaultSecretsDto vaultSecrets
+            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
     }
@@ -112,7 +115,6 @@ public class RulesReloadBroadcastProcessFunction
                 : ParameterTool.fromMap(globalParams.toMap());
 
         this.logPayloads = pt.getBoolean("log.payloads", false);
-        this.logPreviewLen = pt.getInt("log.preview.len", 600);
 
         this.mapper = new ObjectMapper();
         this.cachePayloadConverter = new CachePayloadConverter(mapper);
@@ -285,7 +287,12 @@ public class RulesReloadBroadcastProcessFunction
                     qid, eventId, datasetCode, controlArea, allFieldToRules.keySet());
 
             Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
-            Map<String, Map<String, String>> errorMessagesByRule = getErrorMessagesSnapshot();
+            Map<String, Map<String, String>> errorMessagesByRule =
+                    politicsErrorMessagesCache == null ? Map.of() : politicsErrorMessagesCache.snapshot();
+
+            if (errorMessagesByRule == null) {
+                errorMessagesByRule = Map.of();
+            }
 
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}",
@@ -332,10 +339,10 @@ public class RulesReloadBroadcastProcessFunction
             }
 
             Map<String, String> mainNormalizedMap =
-                    removeLogicalFields(normalizedMap, excludedLogicalFields);
+                    removeKeys(normalizedMap, excludedLogicalFields);
 
             Map<String, Set<String>> mainFieldToRules =
-                    removeLogicalFieldsFromFieldToRules(allFieldToRules, excludedLogicalFields);
+                    removeKeys(allFieldToRules, excludedLogicalFields);
 
             Map<String, String> mainEffectiveNormalizedMap =
                     buildEffectiveNormalizedMap(controlArea, mainNormalizedMap, mainFieldToRules);
@@ -361,8 +368,9 @@ public class RulesReloadBroadcastProcessFunction
             Map<String, Map<String, Map<String, String>>> mergedDetailByDataset = new LinkedHashMap<>();
             mergedDetailByDataset.put(datasetCode, safeFieldMap(mainValidation.detailByField()));
 
-            boolean anyError = "ERROR".equalsIgnoreCase(mainValidation.allResult());
-            boolean anyRuleException = "RULE_EXCEPTION".equalsIgnoreCase(mainValidation.processStatus());
+            boolean anyError = RESULT_ERROR.equalsIgnoreCase(mainValidation.allResult());
+            boolean anyWarning = RESULT_WARNING.equalsIgnoreCase(mainValidation.allResult());
+            boolean anyRuleException = PROCESS_RULE_EXCEPTION.equalsIgnoreCase(mainValidation.processStatus());
 
             for (String blockName : excludedBlocks) {
                 JsonNode blockNode = blockNodes.get(blockName);
@@ -405,18 +413,21 @@ public class RulesReloadBroadcastProcessFunction
 
                 mergedDetailByDataset.put(blockDatasetCode, safeFieldMap(blockValidation.detailByField()));
 
-                if ("ERROR".equalsIgnoreCase(blockValidation.allResult())) {
+                if (RESULT_ERROR.equalsIgnoreCase(blockValidation.allResult())) {
                     anyError = true;
+                } else if (RESULT_WARNING.equalsIgnoreCase(blockValidation.allResult())) {
+                    anyWarning = true;
                 }
-                if ("RULE_EXCEPTION".equalsIgnoreCase(blockValidation.processStatus())) {
+
+                if (PROCESS_RULE_EXCEPTION.equalsIgnoreCase(blockValidation.processStatus())) {
                     anyRuleException = true;
                 }
             }
 
             ValidationResult finalValidation = new ValidationResult(
                     null,
-                    anyError ? "ERROR" : "SUCCESS",
-                    anyRuleException ? "RULE_EXCEPTION" : "OK",
+                    resolveAllResult(anyError, anyWarning),
+                    anyRuleException ? PROCESS_RULE_EXCEPTION : PROCESS_OK,
                     Map.copyOf(mergedDetailByField),
                     Map.copyOf(mergedDetailByDataset),
                     freezeErrors(mergedErrorsByField)
@@ -469,6 +480,16 @@ public class RulesReloadBroadcastProcessFunction
         } catch (Exception e) {
             log.error("[PIPE][eventId={}] Failed to build answers.", eventId, e);
         }
+    }
+
+    private static String resolveAllResult(boolean anyError, boolean anyWarning) {
+        if (anyError) {
+            return RESULT_ERROR;
+        }
+        if (anyWarning) {
+            return RESULT_WARNING;
+        }
+        return RESULT_SUCCESS;
     }
 
     @Override
@@ -664,43 +685,26 @@ public class RulesReloadBroadcastProcessFunction
         return out;
     }
 
-    private Map<String, String> removeLogicalFields(
-            Map<String, String> source,
-            Set<String> toRemove
+    private <V> Map<String, V> removeKeys(
+            Map<String, V> source,
+            Set<String> keysToRemove
     ) {
         if (source == null || source.isEmpty()) {
             return new LinkedHashMap<>();
         }
-        if (toRemove == null || toRemove.isEmpty()) {
+
+        if (keysToRemove == null || keysToRemove.isEmpty()) {
             return new LinkedHashMap<>(source);
         }
 
-        Map<String, String> result = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : source.entrySet()) {
-            if (!toRemove.contains(entry.getKey())) {
+        Map<String, V> result = new LinkedHashMap<>();
+
+        for (Map.Entry<String, V> entry : source.entrySet()) {
+            if (!keysToRemove.contains(entry.getKey())) {
                 result.put(entry.getKey(), entry.getValue());
             }
         }
-        return result;
-    }
 
-    private Map<String, Set<String>> removeLogicalFieldsFromFieldToRules(
-            Map<String, Set<String>> fieldToRules,
-            Set<String> toRemove
-    ) {
-        if (fieldToRules == null || fieldToRules.isEmpty()) {
-            return new LinkedHashMap<>();
-        }
-        if (toRemove == null || toRemove.isEmpty()) {
-            return new LinkedHashMap<>(fieldToRules);
-        }
-
-        Map<String, Set<String>> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
-            if (!toRemove.contains(entry.getKey())) {
-                result.put(entry.getKey(), entry.getValue());
-            }
-        }
         return result;
     }
 
@@ -854,20 +858,6 @@ public class RulesReloadBroadcastProcessFunction
             result.put(entry.getKey(), List.copyOf(messages));
         }
         return Map.copyOf(result);
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Map<String, String>> getErrorMessagesSnapshot() {
-        if (politicsErrorMessagesCache == null) {
-            return Map.of();
-        }
-
-        Map<String, Map<String, String>> snapshot = politicsErrorMessagesCache.snapshot();
-        if (snapshot == null || snapshot.isEmpty()) {
-            return Map.of();
-        }
-
-        return snapshot;
     }
 
     @Override
