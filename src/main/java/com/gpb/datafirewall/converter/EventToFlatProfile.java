@@ -29,6 +29,10 @@ import java.util.Map;
 
 public final class EventToFlatProfile {
 
+    private static final String DATA = "data";
+    private static final String MAPPING_PREFIX = "mapping.";
+    private static final int MAPPING_PREFIX_LEN = MAPPING_PREFIX.length();
+
     private final ObjectMapper mapper;
 
     public EventToFlatProfile(ObjectMapper mapper) {
@@ -38,8 +42,12 @@ public final class EventToFlatProfile {
     public ObjectNode convert(JsonNode eventJson) {
         ObjectNode out = mapper.createObjectNode();
 
-        JsonNode data = eventJson.path("data");
-        if (data.isMissingNode() || data.isNull() || !data.isObject()) {
+        if (eventJson == null || eventJson.isNull()) {
+            return out;
+        }
+
+        JsonNode data = eventJson.get(DATA);
+        if (data == null || data.isNull() || !data.isObject()) {
             return out;
         }
 
@@ -54,15 +62,12 @@ public final class EventToFlatProfile {
                 continue;
             }
 
-            // применяем mapping для любого блока
             projectSection(section, out);
 
             // специальная логика для документов (clientIdCard)
+            // обрабатываем все элементы массива, а не только primary
             if ("documents".equals(blockName)) {
-                JsonNode card = pickPrimary(section.path("clientIdCard"));
-                if (card != null) {
-                    projectSection(card, out);
-                }
+                projectArray(section.get("clientIdCard"), out);
             }
         }
 
@@ -70,52 +75,93 @@ public final class EventToFlatProfile {
     }
 
     public FlatProfileDto convertToProfile(JsonNode eventJson) {
-        ObjectNode out = convert(eventJson);
-        return new FlatProfileDto(out);
-    }
-
-    private boolean isValidMapping(String mapping) {
-        if (mapping == null) return false;
-        String m = mapping.trim().toLowerCase(java.util.Locale.ROOT);
-        return !(m.isEmpty() || m.equals("none") || m.equals("null"));
+        return new FlatProfileDto(convert(eventJson));
     }
 
     private void projectSection(JsonNode section, ObjectNode out) {
-        if (section == null || section.isMissingNode() || section.isNull() || !section.isObject()) return;
+        if (section == null || !section.isObject()) {
+            return;
+        }
 
         Iterator<Map.Entry<String, JsonNode>> fields = section.fields();
+
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> e = fields.next();
+
             String key = e.getKey();
-            if (!key.startsWith("mapping.")) continue;
-
-            String logical = key.substring("mapping.".length()).trim();
-            JsonNode mappingNode = e.getValue();
-            if (mappingNode == null || mappingNode.isNull()) continue;
-
-            String targetKeyRaw = mappingNode.asText();
-            if (!isValidMapping(targetKeyRaw)) continue;
-
-            String targetKey = targetKeyRaw.trim();
-
-            JsonNode valueNode = section.get(logical);
-
-            if (!out.has(targetKey)) {
-                out.set(targetKey, valueNode == null ? mapper.nullNode() : valueNode);
+            if (key == null || !key.startsWith(MAPPING_PREFIX)) {
+                continue;
             }
+
+            JsonNode mappingNode = e.getValue();
+            if (!isValidMappingNode(mappingNode)) {
+                continue;
+            }
+
+            String sourceFieldName = key.substring(MAPPING_PREFIX_LEN).trim();
+            if (sourceFieldName.isEmpty()) {
+                continue;
+            }
+
+            String targetKey = mappingNode.asText().trim();
+
+            if (out.get(targetKey) != null) {
+                continue;
+            }
+
+            JsonNode valueNode = section.get(sourceFieldName);
+            out.set(targetKey, normalizeValue(valueNode));
         }
     }
 
-
-    private JsonNode pickPrimary(JsonNode cards) {
-        if (cards == null || !cards.isArray() || cards.isEmpty()) return null;
-
-        for (JsonNode card : cards) {
-            JsonNode primary = card.get("primary");
-            if (primary != null && primary.isBoolean() && primary.booleanValue()) {
-                return card;
-            }
+    private boolean isValidMappingNode(JsonNode mappingNode) {
+        if (mappingNode == null || mappingNode.isNull() || !mappingNode.isValueNode()) {
+            return false;
         }
-        return cards.get(0);
+
+        String value = mappingNode.asText();
+        if (value == null) {
+            return false;
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            return false;
+        }
+
+        return !isNoneOrNullLiteral(trimmed);
+    }
+
+    private boolean isNoneOrNullLiteral(String value) {
+        return value.length() == 4 && value.equalsIgnoreCase("none")
+                || value.length() == 4 && value.equalsIgnoreCase("null");
+    }
+
+    private JsonNode normalizeValue(JsonNode valueNode) {
+        if (valueNode == null || valueNode.isMissingNode() || valueNode.isNull()) {
+            return mapper.nullNode();
+        }
+
+        // Сохраняем объекты, массивы, числа, boolean как есть.
+        // Пустую строку превращаем в JSON null.
+        if (valueNode.isTextual() && valueNode.asText().isEmpty()) {
+            return mapper.nullNode();
+        }
+
+        return valueNode;
+    }
+
+    private void projectArray(JsonNode arrayNode, ObjectNode out) {
+        if (arrayNode == null || !arrayNode.isArray() || arrayNode.isEmpty()) {
+            return;
+        }
+
+        for (JsonNode item : arrayNode) {
+            if (item == null || item.isNull() || !item.isObject()) {
+                continue;
+            }
+
+            projectSection(item, out);
+        }
     }
 }
