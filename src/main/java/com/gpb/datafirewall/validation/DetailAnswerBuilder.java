@@ -18,6 +18,10 @@ public final class DetailAnswerBuilder {
 
     private static final Pattern RULE_NUM = Pattern.compile("(?i)^Rule(\\d+)$");
 
+    private static final String ERROR = "ERROR";
+    private static final String WARNING = "WARNING";
+    private static final String SUCCESS = "SUCCESS";
+
     private final ObjectMapper mapper;
 
     public DetailAnswerBuilder(ObjectMapper mapper) {
@@ -161,7 +165,9 @@ public final class DetailAnswerBuilder {
         }
 
         ObjectNode bucket = mapper.createObjectNode();
+
         boolean hasError = false;
+        boolean hasWarning = false;
 
         Map<String, Map<String, String>> sortedFields =
                 (detailByField instanceof TreeMap<?, ?>)
@@ -183,31 +189,45 @@ public final class DetailAnswerBuilder {
                             ? ruleMap
                             : new TreeMap<>(ruleMap);
 
-            boolean fieldHasError = false;
+            boolean fieldHasResult = false;
+
             for (Map.Entry<String, String> ruleEntry : sortedRules.entrySet()) {
                 String ruleName = ruleEntry.getKey();
                 String status = ruleEntry.getValue();
-                if (ruleName == null || ruleName.isBlank() || status == null) {
+
+                if (ruleName == null || ruleName.isBlank() || status == null || status.isBlank()) {
                     continue;
                 }
 
                 String normRuleKey = normalizeRuleKey(ruleName);
                 rulesNode.put(normRuleKey, status);
 
-                if ("ERROR".equalsIgnoreCase(status)) {
-                    fieldHasError = true;
+                fieldHasResult = true;
+
+                if (ERROR.equalsIgnoreCase(status)) {
+                    hasError = true;
+                } else if (WARNING.equalsIgnoreCase(status)) {
+                    hasWarning = true;
                 }
             }
 
-            if (fieldHasError) {
-                hasError = true;
+            if (fieldHasResult) {
+                bucket.set(logicalField, rulesNode);
             }
-
-            bucket.set(logicalField, rulesNode);
         }
 
-        bucket.put("ALL_RESULT", hasError ? "ERROR" : "SUCCESS");
+        bucket.put("ALL_RESULT", resolveAllResult(hasError, hasWarning));
         return bucket;
+    }
+
+    private static String resolveAllResult(boolean hasError, boolean hasWarning) {
+        if (hasError) {
+            return ERROR;
+        }
+        if (hasWarning) {
+            return WARNING;
+        }
+        return SUCCESS;
     }
 
     private static String normalizeRuleKey(String ruleName) {

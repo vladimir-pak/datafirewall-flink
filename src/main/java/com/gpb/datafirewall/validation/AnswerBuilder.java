@@ -407,12 +407,24 @@ public final class AnswerBuilder {
         if (rules == null || rules.isEmpty()) {
             return "ERROR";
         }
+
+        boolean hasWarning = false;
+
         for (String v : rules.values()) {
-            if (v != null && "ERROR".equalsIgnoreCase(v)) {
+            if (v == null || v.isBlank()) {
+                continue;
+            }
+
+            if ("ERROR".equalsIgnoreCase(v)) {
                 return "ERROR";
             }
+
+            if ("WARNING".equalsIgnoreCase(v)) {
+                hasWarning = true;
+            }
         }
-        return "SUCCESS";
+
+        return hasWarning ? "WARNING" : "SUCCESS";
     }
 
 

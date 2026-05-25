@@ -9,6 +9,7 @@ import com.gpb.datafirewall.cache.PoliticsDatasetExclusionCache;
 import com.gpb.datafirewall.cache.PoliticsErrorMessagesCache;
 import com.gpb.datafirewall.cache.PoliticsFilterFlagCache;
 import com.gpb.datafirewall.config.IgniteRulesApiClient;
+import com.gpb.datafirewall.converter.CachePayloadConverter;
 import com.gpb.datafirewall.dto.CacheResponseDto;
 import com.gpb.datafirewall.dto.HttpBytecodeSource;
 import com.gpb.datafirewall.dto.IgniteBytecodeSource;
@@ -34,7 +35,6 @@ import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -68,7 +68,6 @@ public class RulesReloadBroadcastProcessFunction
             "politics_filter_flag";
 
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
-    private final VaultSecretsDto vaultSecrets;
 
     private transient ObjectMapper mapper;
 
@@ -92,12 +91,13 @@ public class RulesReloadBroadcastProcessFunction
     private transient boolean logPayloads;
     private transient int logPreviewLen;
 
+    private transient CachePayloadConverter cachePayloadConverter;
+
     public RulesReloadBroadcastProcessFunction(
             MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
             VaultSecretsDto vaultSecrets
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
-        this.vaultSecrets = vaultSecrets;
     }
 
     @Override
@@ -115,6 +115,7 @@ public class RulesReloadBroadcastProcessFunction
         this.logPreviewLen = pt.getInt("log.preview.len", 600);
 
         this.mapper = new ObjectMapper();
+        this.cachePayloadConverter = new CachePayloadConverter(mapper);
 
         this.rulesRegistry = new CompiledRulesRegistry();
         this.politicsDataset2ControlAreaCache = new PoliticsDatasetControlAreaCache();
@@ -226,6 +227,7 @@ public class RulesReloadBroadcastProcessFunction
 
         try {
             JsonNode originalEvent = mapper.readTree(raw);
+            normalizeEmptyStringsToNull(originalEvent);
             // String qid = originalEvent.path("dfw_query_id").asText("no-qid");
             String qid = originalEvent.path("dfw_query_id").asText(null);
             if (qid == null || qid.isBlank()) {
@@ -283,7 +285,7 @@ public class RulesReloadBroadcastProcessFunction
                     qid, eventId, datasetCode, controlArea, allFieldToRules.keySet());
 
             Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
-            Map<String, String> errorMessagesByRule = getErrorMessagesSnapshot();
+            Map<String, Map<String, String>> errorMessagesByRule = getErrorMessagesSnapshot();
 
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}",
@@ -557,19 +559,19 @@ public class RulesReloadBroadcastProcessFunction
                 igniteApiClient.getVersionedCache(filterFlagName);
 
         Map<String, String> dataset2ControlArea =
-                toStringMap(dataset2ControlAreaResponse.getCache(), dataset2ControlAreaName);
+                cachePayloadConverter.toStringMap(dataset2ControlAreaResponse.getCache(), dataset2ControlAreaName);
 
         Map<String, Map<String, Set<String>>> controlAreaRules =
-                toNestedRulesMap(controlAreaRulesResponse.getCache(), controlAreaRulesName);
+                cachePayloadConverter.toNestedRulesMap(controlAreaRulesResponse.getCache(), controlAreaRulesName);
 
-        Map<String, String> errorMessages =
-                toStringMap(errorMessagesResponse.getCache(), errorMessagesName);
+        Map<String, Map<String, String>> errorMessages =
+                cachePayloadConverter.toNestedStringMap(errorMessagesResponse.getCache(), errorMessagesName);
 
         Map<String, Set<String>> datasetExclusion =
-                toSetMap(datasetExclusionResponse.getCache(), datasetExclusionName);
+                cachePayloadConverter.toSetMap(datasetExclusionResponse.getCache(), datasetExclusionName);
 
         Map<String, Boolean> filterFlags =
-                toBooleanMap(filterFlagResponse.getCache(), filterFlagName);
+                cachePayloadConverter.toBooleanMap(filterFlagResponse.getCache(), filterFlagName);
 
         politicsDataset2ControlAreaCache.replaceAll(dataset2ControlArea, versionStr);
         politicsControlAreaRulesCache.replaceAll(controlAreaRules, versionStr);
@@ -652,7 +654,7 @@ public class RulesReloadBroadcastProcessFunction
                 continue;
             }
 
-            String logical = value.asText(null);
+            String logical = value.isTextual() && value.asText().isEmpty() ? null : value.asText(null);
             if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
                 continue;
             }
@@ -855,129 +857,17 @@ public class RulesReloadBroadcastProcessFunction
     }
 
     @SuppressWarnings("unchecked")
-    private Map<String, String> getErrorMessagesSnapshot() {
+    private Map<String, Map<String, String>> getErrorMessagesSnapshot() {
         if (politicsErrorMessagesCache == null) {
             return Map.of();
         }
 
-        try {
-            for (String methodName : List.of("snapshot", "asMap", "getAll")) {
-                try {
-                    Method m = politicsErrorMessagesCache.getClass().getMethod(methodName);
-                    Object value = m.invoke(politicsErrorMessagesCache);
-                    if (value instanceof Map<?, ?> raw) {
-                        Map<String, String> result = new LinkedHashMap<>();
-                        for (Map.Entry<?, ?> e : raw.entrySet()) {
-                            if (e.getKey() != null && e.getValue() != null) {
-                                result.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
-                            }
-                        }
-                        return result;
-                    }
-                } catch (NoSuchMethodException ignored) {
-                }
-            }
-        } catch (Exception e) {
-            log.warn("[CACHE] failed to read politics error messages snapshot, using empty map", e);
+        Map<String, Map<String, String>> snapshot = politicsErrorMessagesCache.snapshot();
+        if (snapshot == null || snapshot.isEmpty()) {
+            return Map.of();
         }
 
-        return Map.of();
-    }
-
-    private Map<String, String> toStringMap(Map<String, Object> payload, String cacheName) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        Map<String, String> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-            if (entry.getValue() == null) {
-                throw new IllegalStateException(
-                        "Null value for key '" + entry.getKey() + "' in cache " + cacheName
-                );
-            }
-
-            result.put(entry.getKey(), String.valueOf(entry.getValue()));
-        }
-        return result;
-    }
-
-    private Map<String, Boolean> toBooleanMap(Map<String, Object> payload, String cacheName) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        Map<String, Boolean> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-            if (entry.getValue() == null) {
-                throw new IllegalStateException(
-                        "Null value for key '" + entry.getKey() + "' in cache " + cacheName
-                );
-            }
-
-            Boolean value = mapper.convertValue(entry.getValue(), Boolean.class);
-            result.put(entry.getKey(), value);
-        }
-        return result;
-    }
-
-    private Map<String, Set<String>> toSetMap(Map<String, Object> payload, String cacheName) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        Map<String, Set<String>> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-
-            Set<String> value = mapper.convertValue(
-                    entry.getValue(),
-                    mapper.getTypeFactory().constructCollectionType(Set.class, String.class)
-            );
-
-            result.put(entry.getKey(), value);
-        }
-        return result;
-    }
-
-    private Map<String, Map<String, Set<String>>> toNestedRulesMap(
-            Map<String, Object> payload,
-            String cacheName
-    ) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        var typeFactory = mapper.getTypeFactory();
-        var setType = typeFactory.constructCollectionType(Set.class, String.class);
-        var innerMapType = typeFactory.constructMapType(
-                LinkedHashMap.class,
-                typeFactory.constructType(String.class),
-                setType
-        );
-
-        Map<String, Map<String, Set<String>>> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-
-            Map<String, Set<String>> value = mapper.convertValue(
-                    entry.getValue(),
-                    innerMapType
-            );
-
-            result.put(entry.getKey(), value);
-        }
-        return result;
+        return snapshot;
     }
 
     @Override
@@ -1228,5 +1118,42 @@ public class RulesReloadBroadcastProcessFunction
         }
 
         return "unknown";
+    }
+
+    private void normalizeEmptyStringsToNull(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return;
+        }
+
+        if (node.isObject()) {
+            com.fasterxml.jackson.databind.node.ObjectNode objectNode =
+                    (com.fasterxml.jackson.databind.node.ObjectNode) node;
+
+            Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
+            List<String> fieldsToNull = new ArrayList<>();
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                JsonNode child = entry.getValue();
+
+                if (child != null && child.isTextual() && child.asText().isEmpty()) {
+                    fieldsToNull.add(entry.getKey());
+                } else {
+                    normalizeEmptyStringsToNull(child);
+                }
+            }
+
+            for (String fieldName : fieldsToNull) {
+                objectNode.set(fieldName, mapper.nullNode());
+            }
+
+            return;
+        }
+
+        if (node.isArray()) {
+            for (JsonNode child : node) {
+                normalizeEmptyStringsToNull(child);
+            }
+        }
     }
 }

@@ -10,10 +10,10 @@ import com.gpb.datafirewall.cache.PoliticsDatasetExclusionCache;
 import com.gpb.datafirewall.cache.PoliticsErrorMessagesCache;
 import com.gpb.datafirewall.cache.PoliticsFilterFlagCache;
 import com.gpb.datafirewall.config.IgniteRulesApiClient;
+import com.gpb.datafirewall.converter.CachePayloadConverter;
 import com.gpb.datafirewall.dto.CacheResponseDto;
 import com.gpb.datafirewall.rule.RulesReloader;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -37,6 +37,8 @@ public class CacheBootstrapService {
     private final PoliticsDatasetExclusionCache politicsDatasetExclusionCache;
     private final PoliticsFilterFlagCache politicsFilterFlagCache;
 
+    private final CachePayloadConverter cachePayloadConverter;
+
     private final boolean politicsBootstrapEnabled;
 
     public CacheBootstrapService(
@@ -59,6 +61,8 @@ public class CacheBootstrapService {
         this.politicsDatasetExclusionCache = politicsDatasetExclusionCache;
         this.politicsFilterFlagCache = politicsFilterFlagCache;
         this.politicsBootstrapEnabled = politicsBootstrapEnabled;
+
+        this.cachePayloadConverter = new CachePayloadConverter(new com.fasterxml.jackson.databind.ObjectMapper());
     }
 
     public void initializeAll() {
@@ -131,19 +135,19 @@ public class CacheBootstrapService {
         );
 
         Map<String, String> dataset2ControlArea =
-                toStringMap(dataset2ControlAreaResponse.getCache(), CACHE_POLITICS_DATASET2CONTROL_AREA);
+                cachePayloadConverter.toStringMap(dataset2ControlAreaResponse.getCache(), CACHE_POLITICS_DATASET2CONTROL_AREA);
 
         Map<String, Map<String, Set<String>>> controlAreaRules =
-                toNestedRulesMap(controlAreaRulesResponse.getCache(), CACHE_POLITICS_CONTROL_AREA_RULES);
+                cachePayloadConverter.toNestedRulesMap(controlAreaRulesResponse.getCache(), CACHE_POLITICS_CONTROL_AREA_RULES);
 
-        Map<String, String> errorMessages =
-                toStringMap(errorMessagesResponse.getCache(), CACHE_POLITICS_ERROR_MESSAGES);
+        Map<String, Map<String, String>> errorMessages =
+                cachePayloadConverter.toNestedStringMap(errorMessagesResponse.getCache(), CACHE_POLITICS_ERROR_MESSAGES);
 
         Map<String, Set<String>> datasetExclusion =
-                toSetMap(datasetExclusionResponse.getCache(), CACHE_POLITICS_DATASET_EXCLUSION);
+                cachePayloadConverter.toSetMap(datasetExclusionResponse.getCache(), CACHE_POLITICS_DATASET_EXCLUSION);
 
         Map<String, Boolean> filterFlags =
-                toBooleanMap(filterFlagResponse.getCache(), CACHE_POLITICS_FILTER_FLAG);
+                cachePayloadConverter.toBooleanMap(filterFlagResponse.getCache(), CACHE_POLITICS_FILTER_FLAG);
 
         politicsDatasetControlAreaCache.replaceAll(dataset2ControlArea, datasetVersion);
         politicsControlAreaRulesCache.replaceAll(controlAreaRules, datasetVersion);
@@ -197,103 +201,5 @@ public class CacheBootstrapService {
         }
 
         return fullCacheName.substring(idx + 1).trim();
-    }
-
-    private Map<String, String> toStringMap(Map<String, Object> payload, String cacheName) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        Map<String, String> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-            if (entry.getValue() == null) {
-                throw new IllegalStateException(
-                        "Null value for key '" + entry.getKey() + "' in cache " + cacheName
-                );
-            }
-
-            result.put(entry.getKey(), String.valueOf(entry.getValue()));
-        }
-        return result;
-    }
-
-    private Map<String, Set<String>> toSetMap(Map<String, Object> payload, String cacheName) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        Map<String, Set<String>> result = new LinkedHashMap<>();
-        var setType = com.fasterxml.jackson.databind.json.JsonMapper.builder().build()
-                .getTypeFactory()
-                .constructCollectionType(Set.class, String.class);
-
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-
-            Set<String> value = mapper.convertValue(entry.getValue(), setType);
-            result.put(entry.getKey(), value);
-        }
-        return result;
-    }
-
-    private Map<String, Map<String, Set<String>>> toNestedRulesMap(
-            Map<String, Object> payload,
-            String cacheName
-    ) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        var tf = mapper.getTypeFactory();
-        var setType = tf.constructCollectionType(Set.class, String.class);
-        var innerMapType = tf.constructMapType(
-                LinkedHashMap.class,
-                tf.constructType(String.class),
-                setType
-        );
-
-        Map<String, Map<String, Set<String>>> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-
-            Map<String, Set<String>> value = mapper.convertValue(entry.getValue(), innerMapType);
-            result.put(entry.getKey(), value);
-        }
-        return result;
-    }
-
-    private Map<String, Boolean> toBooleanMap(Map<String, Object> payload, String cacheName) {
-        if (payload == null) {
-            throw new IllegalStateException("Payload is null for cache " + cacheName);
-        }
-
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        Map<String, Boolean> result = new LinkedHashMap<>();
-
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalStateException("Null key in cache " + cacheName);
-            }
-            if (entry.getValue() == null) {
-                throw new IllegalStateException(
-                        "Null value for key '" + entry.getKey() + "' in cache " + cacheName
-                );
-            }
-
-            Boolean value = mapper.convertValue(entry.getValue(), Boolean.class);
-            result.put(entry.getKey(), value);
-        }
-
-        return result;
     }
 }

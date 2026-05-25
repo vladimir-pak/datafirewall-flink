@@ -8,7 +8,7 @@ public class TestCachesConfigDto {
     private String version;
     private Map<String, String> dataset2ControlArea;
     private Map<String, Map<String, List<String>>> controlAreaRules;
-    private Map<String, String> errorMessages;
+    private Map<String, Map<String, String>> errorMessages;
     private Map<String, List<String>> datasetExclusion;
     private Map<String, Boolean> filterFlag;
 
@@ -36,11 +36,11 @@ public class TestCachesConfigDto {
         this.controlAreaRules = controlAreaRules;
     }
 
-    public Map<String, String> getErrorMessages() {
+    public Map<String, Map<String, String>> getErrorMessages() {
         return errorMessages;
     }
 
-    public void setErrorMessages(Map<String, String> errorMessages) {
+    public void setErrorMessages(Map<String, Map<String, String>> errorMessages) {
         this.errorMessages = errorMessages;
     }
 

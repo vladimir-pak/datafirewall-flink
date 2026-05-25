@@ -27,6 +27,13 @@ public final class ValidationService {
             "ДУЛ.Паспорт РФ.Тип ДУЛ", DocType::map
     );
 
+    private static final String WARNING = "WARNING";
+
+    private static final String CLASSIFICATION = "classification";
+    private static final String CLASSIFICATION_INFORM = "INFORM";
+
+    private static final String ERROR_DESCRIPTION = "errorDescription";
+
     public ValidationResult validate(
             Map<String, Rule> compiledRules,
             Map<String, String> normalizedMap,
@@ -36,10 +43,10 @@ public final class ValidationService {
     }
 
     public ValidationResult validate(
-            Map<String, Rule> compiledRules,
-            Map<String, String> normalizedMap,
-            Map<String, Set<String>> fieldToRuleIds,
-            Map<String, String> errorMessagesByRule
+        Map<String, Rule> compiledRules,
+        Map<String, String> normalizedMap,
+        Map<String, Set<String>> fieldToRuleIds,
+        Map<String, Map<String, String>> errorMessagesByRule
     ) {
         if (compiledRules == null) {
             compiledRules = Map.of();
@@ -55,6 +62,7 @@ public final class ValidationService {
         }
 
         boolean anyError = false;
+        boolean anyWarning = false;
         boolean anyException = false;
 
         // logicalField -> (ruleName -> status)
@@ -100,9 +108,17 @@ public final class ValidationService {
                     anyException = true;
                 }
 
-                String status = triggered ? ERROR : SUCCESS;
+                String status = SUCCESS;
+
                 if (triggered) {
-                    anyError = true;
+                    status = resolveTriggeredStatus(ruleName, errorMessagesByRule);
+
+                    if (ERROR.equals(status)) {
+                        anyError = true;
+                    } else if (WARNING.equals(status)) {
+                        anyWarning = true;
+                    }
+
                     perFieldErrors.add(resolveErrorMessage(ruleName, errorMessagesByRule));
                 }
 
@@ -121,7 +137,7 @@ public final class ValidationService {
             }
         }
 
-        String all = anyError ? ERROR : SUCCESS;
+        String all = anyError ? ERROR : (anyWarning ? WARNING : SUCCESS);
         String processStatus = anyException ? "RULE_EXCEPTION" : "OK";
 
         return new ValidationResult(
@@ -169,32 +185,27 @@ public final class ValidationService {
 
     private String resolveErrorMessage(
             String ruleName,
-            Map<String, String> errorMessagesByRule
+            Map<String, Map<String, String>> errorMessagesByRule
     ) {
         if (ruleName == null || ruleName.isBlank()) {
             return "Не найден текст ошибки для неизвестного правила";
         }
 
-        String direct = errorMessagesByRule.get(ruleName);
-        if (direct != null && !direct.isBlank()) {
-            return direct;
-        }
-
-        if (!ruleName.startsWith("Rule")) {
-            String prefixed = errorMessagesByRule.get("Rule" + ruleName);
-            if (prefixed != null && !prefixed.isBlank()) {
-                return prefixed;
-            }
-        }
-
-        if (ruleName.startsWith("Rule") && ruleName.length() > 4) {
-            String plain = errorMessagesByRule.get(ruleName.substring(4));
-            if (plain != null && !plain.isBlank()) {
-                return plain;
-            }
+        String errorDescr = extractErrorDescr(resolveErrorInfo(ruleName, errorMessagesByRule));
+        if (errorDescr != null && !errorDescr.isBlank()) {
+            return errorDescr;
         }
 
         return "Не найден текст ошибки для " + ruleName;
+    }
+
+    private String extractErrorDescr(Map<String, String> errorInfo) {
+        if (errorInfo == null || errorInfo.isEmpty()) {
+            return null;
+        }
+
+        String value = errorInfo.get(ERROR_DESCRIPTION);
+        return value == null || value.isBlank() ? null : value;
     }
 
     private Rule resolveRule(Map<String, Rule> compiledRules, String ruleName) {
@@ -215,5 +226,50 @@ public final class ValidationService {
         }
 
         return null;
+    }
+
+    private Map<String, String> resolveErrorInfo(
+            String ruleName,
+            Map<String, Map<String, String>> errorMessagesByRule
+    ) {
+        if (ruleName == null || ruleName.isBlank() || errorMessagesByRule == null || errorMessagesByRule.isEmpty()) {
+            return null;
+        }
+
+        Map<String, String> direct = errorMessagesByRule.get(ruleName);
+        if (direct != null && !direct.isEmpty()) {
+            return direct;
+        }
+
+        if (!ruleName.startsWith("Rule")) {
+            Map<String, String> prefixed = errorMessagesByRule.get("Rule" + ruleName);
+            if (prefixed != null && !prefixed.isEmpty()) {
+                return prefixed;
+            }
+        }
+
+        if (ruleName.startsWith("Rule") && ruleName.length() > 4) {
+            Map<String, String> plain = errorMessagesByRule.get(ruleName.substring(4));
+            if (plain != null && !plain.isEmpty()) {
+                return plain;
+            }
+        }
+
+        return null;
+    }
+
+    private String resolveTriggeredStatus(
+            String ruleName,
+            Map<String, Map<String, String>> errorMessagesByRule
+    ) {
+        Map<String, String> errorInfo = resolveErrorInfo(ruleName, errorMessagesByRule);
+
+        String classification = errorInfo == null ? null : errorInfo.get(CLASSIFICATION);
+
+        if (classification != null && CLASSIFICATION_INFORM.equalsIgnoreCase(classification.trim())) {
+            return WARNING;
+        }
+
+        return ERROR;
     }
 }
