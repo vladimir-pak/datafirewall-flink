@@ -675,7 +675,8 @@ public class RulesReloadBroadcastProcessFunction
                 continue;
             }
 
-            String logical = value.isTextual() && value.asText().isEmpty() ? null : value.asText(null);
+            String logical = value.isTextual() && (value.asText().isEmpty() || value.asText() == "none") 
+                    ? null : value.asText(null);
             if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
                 continue;
             }
