@@ -675,7 +675,7 @@ public class RulesReloadBroadcastProcessFunction
                 continue;
             }
 
-            String logical = value.isTextual() && (value.asText().isEmpty() || value.asText() == "none") 
+            String logical = value.isTextual() && (value.asText().isEmpty() || "none".equalsIgnoreCase(value.asText())) 
                     ? null : value.asText(null);
             if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) {
                 continue;
@@ -1127,7 +1127,7 @@ public class RulesReloadBroadcastProcessFunction
                 Map.Entry<String, JsonNode> entry = fields.next();
                 JsonNode child = entry.getValue();
 
-                if (child != null && child.isTextual() && child.asText().isEmpty()) {
+                if (child != null && child.isTextual() && (child.asText().isEmpty() || "none".equalsIgnoreCase(child.asText()))) {
                     fieldsToNull.add(entry.getKey());
                 } else {
                     normalizeEmptyStringsToNull(child);

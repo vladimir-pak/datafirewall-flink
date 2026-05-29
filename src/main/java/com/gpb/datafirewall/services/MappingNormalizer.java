@@ -44,7 +44,7 @@ public final class MappingNormalizer {
                 Map.Entry<String, JsonNode> e = it.next();
                 JsonNode v = e.getValue();
                 // if (v == null || v.isNull()) continue;
-                v = v.isTextual() && (v.asText().isEmpty() || v.asText() == "none") 
+                v = v.isTextual() && (v.asText().isEmpty() || "none".equalsIgnoreCase(v.asText())) 
                         ? mapper.nullNode() : v;
                 
                 if (v.isObject() || v.isArray()) {

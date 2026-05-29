@@ -144,7 +144,7 @@ public final class EventToFlatProfile {
 
         // Сохраняем объекты, массивы, числа, boolean как есть.
         // Пустую строку превращаем в JSON null.
-        if (valueNode.isTextual() && (valueNode.asText().isEmpty() || valueNode.asText() == "none")) {
+        if (valueNode.isTextual() && (valueNode.asText().isEmpty() || "none".equalsIgnoreCase(valueNode.asText()))) {
             return mapper.nullNode();
         }
 
