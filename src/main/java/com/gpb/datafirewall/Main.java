@@ -18,12 +18,18 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.util.Collector;
+import org.apache.kafka.clients.admin.AdminClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.artemis.ArtemisConnectionUrlBuilder;
+import com.gpb.datafirewall.audit.AuditConfig;
+import com.gpb.datafirewall.audit.AuditEventType;
+import com.gpb.datafirewall.audit.AuditPropertiesUtil;
+import com.gpb.datafirewall.audit.CefAuditEvent;
+import com.gpb.datafirewall.audit.CefAuditPublisher;
 import com.gpb.datafirewall.artemis.ArtemisSink;
 import com.gpb.datafirewall.artemis.ArtemisSource;
 import com.gpb.datafirewall.config.JobConfig;
@@ -41,6 +47,8 @@ import com.gpb.datafirewall.vault.VaultClientConfig;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 
 import java.time.Instant;
+import java.nio.file.Path;
+import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -119,6 +127,18 @@ public class Main {
         String kafkaTopic = pt.get("kafka.topic", DEFAULT_KAFKA_TOPIC);
         String kafkaGroup = pt.get("kafka.group", DEFAULT_KAFKA_GROUP);
 
+        AuditConfig cefAuditConfig = AuditConfig.from(pt, vaultSecrets, kafkaBootstrap);
+        try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
+            publishJobPropertiesAudit(pt, cefAuditConfig, jobAuditPublisher);
+            jobAuditPublisher.publish(
+                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_SUBMITTED))
+                            .put("argsCount", args == null ? 0 : args.length)
+                            .put("cefFilePath", Path.of(cefAuditConfig.cefFilePath()).toAbsolutePath().normalize().toString())
+                            .put("auditKafkaTopic", cefAuditConfig.kafkaTopic())
+                            .build()
+            );
+        }
+
         String artemisUser = vaultSecrets.mqUser();
         String artemisPassword = vaultSecrets.mqPassword();
 
@@ -162,7 +182,7 @@ public class Main {
 
         boolean auditKafkaEnabled = pt.getBoolean("audit.kafka.enabled", true);
         String auditKafkaBootstrap = pt.get("audit.kafka.bootstrap", kafkaBootstrap);
-        String auditKafkaTopic = pt.get("audit.kafka.topic", "audit-datafirewall");
+        String auditKafkaTopic = pt.get("audit.kafka.topic", "datafirewall.processing.audit");
 
         if ("artemis".equals(backend)) {
             requireNotBlank(artemisUser, "mqUser in vault");
@@ -226,7 +246,8 @@ public class Main {
                                         mqTlsEnabled,
                                         mqTlsCipherSuite,
                                         mqTrustStore,
-                                        mqTrustStorePassword
+                                        mqTrustStorePassword,
+                                        cefAuditConfig
                                 ),
                                 "mq-source"
                         )
@@ -244,7 +265,8 @@ public class Main {
                                         artemisUser,
                                         artemisPassword,
                                         artemisInQueue,
-                                        artemisReceiveTimeoutMs
+                                        artemisReceiveTimeoutMs,
+                                        cefAuditConfig
                                 ),
                                 "artemis-source"
                         )
@@ -260,6 +282,20 @@ public class Main {
 
         Properties kafkaClientProps = buildKafkaClientProperties(pt, "kafka", vaultSecrets);
         Properties auditKafkaClientProps = buildKafkaClientProperties(pt, "audit.kafka", vaultSecrets);
+
+        try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
+            publishKafkaConnectionCheck(jobAuditPublisher, cefAuditConfig, "rules-kafka", kafkaBootstrap, kafkaClientProps, vaultSecrets.kafkaUser());
+            publishKafkaConnectionCheck(jobAuditPublisher, cefAuditConfig, "cef-audit-kafka", cefAuditConfig.kafkaBootstrap(), cefAuditConfig.toKafkaProducerProperties(), vaultSecrets.kafkaUser());
+            jobAuditPublisher.publish(
+                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_RULES_SOURCE_CONFIGURED))
+                            .put("bootstrap", kafkaBootstrap)
+                            .put("protocol", String.valueOf(kafkaClientProps.getOrDefault("security.protocol", "TCP")))
+                            .put("connectionUser", vaultSecrets.kafkaUser())
+                            .put("topic", kafkaTopic)
+                            .put("groupId", kafkaGroup)
+                            .build()
+            );
+        }
 
         KafkaSource<CacheUpdateEvent> kafkaSource = KafkaSource.<CacheUpdateEvent>builder()
                 .setBootstrapServers(kafkaBootstrap)
@@ -324,7 +360,8 @@ public class Main {
                             mqTlsEnabled,
                             mqTlsCipherSuite,
                             mqTrustStore,
-                            mqTrustStorePassword
+                            mqTrustStorePassword,
+                            cefAuditConfig
                     ))
                     .name("mq-sink")
                     .uid("mq-sink");
@@ -356,7 +393,8 @@ public class Main {
                             artemisBrokerUrl,
                             artemisUser,
                             artemisPassword,
-                            artemisOutQueue
+                            artemisOutQueue,
+                            cefAuditConfig
                     ))
                     .name("artemis-sink")
                     .uid("artemis-sink");
@@ -426,7 +464,120 @@ public class Main {
             log.info("[MAIN] audit kafka sink is disabled.");
         }
 
-        env.execute("DataFirewall Flink Job");
+        try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
+            jobAuditPublisher.publish(
+                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_STARTED))
+                            .put("parallelism", parallelism)
+                            .put("messagingBackend", backend)
+                            .build()
+            );
+
+            env.execute(cefAuditConfig.jobName());
+
+            jobAuditPublisher.publish(
+                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_STOPPED))
+                            .put("result", "env.execute returned")
+                            .build()
+            );
+        } catch (Exception e) {
+            try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
+                jobAuditPublisher.publish(
+                        cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_FAILED))
+                                .status("FAILED")
+                                .put("errorClass", e.getClass().getName())
+                                .put("errorMessage", e.getMessage())
+                                .build()
+                );
+            }
+            throw e;
+        }
+    }
+
+
+    private static void publishJobPropertiesAudit(
+            ParameterTool pt,
+            AuditConfig auditConfig,
+            CefAuditPublisher publisher
+    ) {
+        String currentHash = AuditPropertiesUtil.sha256OfMaskedProperties(pt);
+        Map<String, String> masked = AuditPropertiesUtil.maskedProperties(pt);
+
+        String stateFile = pt.get(
+                "cef.audit.properties.hash.file",
+                auditConfig.cefFilePath() + ".properties.sha256"
+        );
+        String previousHash = AuditPropertiesUtil.detectPreviousHashAndStore(stateFile, currentHash);
+
+        publisher.publish(
+                auditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_PROPERTIES_LOADED))
+                        .put("configFile", pt.get("config.file", null))
+                        .put("propertiesHash", currentHash)
+                        .put("propertiesHashStateFile", Path.of(stateFile).toAbsolutePath().normalize().toString())
+                        .put("properties", masked)
+                        .build()
+        );
+
+        if (previousHash != null && !previousHash.equals(currentHash)) {
+            publisher.publish(
+                    auditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_PROPERTIES_CHANGED))
+                            .put("configFile", pt.get("config.file", null))
+                            .put("oldPropertiesHash", previousHash)
+                            .put("newPropertiesHash", currentHash)
+                            .put("propertiesHashStateFile", Path.of(stateFile).toAbsolutePath().normalize().toString())
+                            .put("properties", masked)
+                            .build()
+            );
+        }
+    }
+
+    private static void publishKafkaConnectionCheck(
+            CefAuditPublisher publisher,
+            AuditConfig auditConfig,
+            String connectionName,
+            String bootstrap,
+            Properties properties,
+            String connectionUser
+    ) {
+        Properties adminProps = new Properties();
+        if (properties != null) {
+            adminProps.putAll(properties);
+        }
+        adminProps.setProperty("bootstrap.servers", bootstrap);
+        adminProps.putIfAbsent("request.timeout.ms", "5000");
+        adminProps.putIfAbsent("default.api.timeout.ms", "5000");
+
+        long t0 = System.nanoTime();
+        try (AdminClient adminClient = AdminClient.create(adminProps)) {
+            String clusterId = adminClient.describeCluster()
+                    .clusterId()
+                    .get(5, java.util.concurrent.TimeUnit.SECONDS);
+            long durationMs = (System.nanoTime() - t0) / 1_000_000;
+
+            publisher.publish(
+                    auditConfig.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_CONNECTION_CHECK_OK))
+                            .put("connectionName", connectionName)
+                            .put("bootstrap", bootstrap)
+                            .put("protocol", String.valueOf(adminProps.getOrDefault("security.protocol", "TCP")))
+                            .put("connectionUser", connectionUser)
+                            .put("kafkaClusterId", clusterId)
+                            .put("durationMs", durationMs)
+                            .build()
+            );
+        } catch (Exception e) {
+            long durationMs = (System.nanoTime() - t0) / 1_000_000;
+            publisher.publish(
+                    auditConfig.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_CONNECTION_CHECK_FAILED))
+                            .status("FAILED")
+                            .put("connectionName", connectionName)
+                            .put("bootstrap", bootstrap)
+                            .put("protocol", String.valueOf(adminProps.getOrDefault("security.protocol", "TCP")))
+                            .put("connectionUser", connectionUser)
+                            .put("durationMs", durationMs)
+                            .put("errorClass", e.getClass().getName())
+                            .put("errorMessage", e.getMessage())
+                            .build()
+            );
+        }
     }
 
     private static void validateMinimalTls(
@@ -441,14 +592,10 @@ public class Main {
             String artemisTrustStore,
             String artemisTrustStorePassword
     ) {
-        if (pt.getBoolean("kafka.tls.enabled", false)) {
-            requireNotBlank(pt.get("kafka.ssl.truststore.location", null), "kafka.ssl.truststore.location");
-            // requireNotBlank(pt.get("kafka.ssl.truststore.password", null), "kafka.ssl.truststore.password");
-        }
+        validateKafkaSecurity(pt, "kafka", "Kafka rules source");
 
-        if (auditKafkaEnabled && pt.getBoolean("audit.kafka.tls.enabled", false)) {
-            requireNotBlank(pt.get("audit.kafka.ssl.truststore.location", null), "audit.kafka.ssl.truststore.location");
-            // requireNotBlank(pt.get("audit.kafka.ssl.truststore.password", null), "audit.kafka.ssl.truststore.password");
+        if (auditKafkaEnabled) {
+            validateKafkaSecurity(pt, "audit.kafka", "Kafka processing audit sink");
         }
 
         if ("mq".equals(backend) && mqTlsEnabled) {
@@ -463,24 +610,125 @@ public class Main {
         }
     }
 
+
+    private static void validateKafkaSecurity(ParameterTool pt, String prefix, String componentName) {
+        String securityProtocol = kafkaParam(pt, prefix, "security.protocol", null);
+        boolean tlsEnabled = kafkaBooleanParam(pt, prefix, "tls.enabled", false) || isSslProtocol(securityProtocol);
+        boolean saslEnabled = kafkaBooleanParam(pt, prefix, "sasl.enabled", false) || isSaslProtocol(securityProtocol);
+
+        if (tlsEnabled) {
+            requireNotBlank(kafkaParam(pt, prefix, "ssl.truststore.location", null), componentName + " ssl.truststore.location");
+            requireNotBlank(kafkaParam(pt, prefix, "ssl.keystore.location", null), componentName + " ssl.keystore.location");
+        }
+
+        if (saslEnabled) {
+            requireNotBlank(kafkaParam(pt, prefix, "sasl.mechanism", "SCRAM-SHA-512"), componentName + " sasl.mechanism");
+        }
+    }
+
     private static Properties buildKafkaClientProperties(ParameterTool pt, String prefix, VaultSecretsDto vaultSecrets) {
         Properties props = new Properties();
 
-        boolean tlsEnabled = pt.getBoolean(prefix + ".tls.enabled", false);
-        if (!tlsEnabled) {
-            return props;
+        String securityProtocol = kafkaParam(pt, prefix, "security.protocol", null);
+        boolean tlsEnabled = kafkaBooleanParam(pt, prefix, "tls.enabled", false)
+                || isSslProtocol(securityProtocol);
+        boolean saslEnabled = kafkaBooleanParam(pt, prefix, "sasl.enabled", false)
+                || isSaslProtocol(securityProtocol);
+
+        if (securityProtocol == null || securityProtocol.isBlank()) {
+            if (saslEnabled) {
+                securityProtocol = tlsEnabled ? "SASL_SSL" : "SASL_PLAINTEXT";
+            } else if (tlsEnabled) {
+                securityProtocol = "SSL";
+            }
         }
 
-        putIfNotBlank(props, "security.protocol", pt.get(prefix + ".security.protocol", "SSL"));
-        putIfNotBlank(props, "ssl.truststore.location", pt.get(prefix + ".ssl.truststore.location", null));
-        putIfNotBlank(props, "ssl.truststore.password", vaultSecrets.truststorePassword());
-        putIfNotBlank(
-                props,
-                "ssl.endpoint.identification.algorithm",
-                pt.get(prefix + ".ssl.endpoint.identification.algorithm", "https")
-        );
+        putIfNotBlank(props, "security.protocol", securityProtocol);
+
+        if (saslEnabled) {
+            String mechanism = kafkaParam(pt, prefix, "sasl.mechanism", "SCRAM-SHA-512");
+            putIfNotBlank(props, "sasl.mechanism", mechanism);
+            putIfNotBlank(props, "sasl.jaas.config", buildKafkaJaasConfig(mechanism, vaultSecrets));
+        }
+
+        if (tlsEnabled) {
+            putIfNotBlank(props, "ssl.truststore.location", kafkaParam(pt, prefix, "ssl.truststore.location", null));
+            putIfNotBlank(props, "ssl.truststore.type", kafkaParam(pt, prefix, "ssl.truststore.type", null));
+            putIfNotBlank(props, "ssl.truststore.password", vaultSecrets == null ? null : vaultSecrets.truststorePassword());
+
+            putIfNotBlank(props, "ssl.keystore.location", kafkaParam(pt, prefix, "ssl.keystore.location", null));
+            putIfNotBlank(props, "ssl.keystore.type", kafkaParam(pt, prefix, "ssl.keystore.type", null));
+            putIfNotBlank(props, "ssl.keystore.password", vaultSecrets == null ? null : vaultSecrets.keystorePassword());
+            putIfNotBlank(props, "ssl.key.password", kafkaParam(
+                    pt,
+                    prefix,
+                    "ssl.key.password",
+                    vaultSecrets == null ? null : vaultSecrets.keystorePassword()
+            ));
+
+            putIfNotBlank(
+                    props,
+                    "ssl.endpoint.identification.algorithm",
+                    kafkaParam(pt, prefix, "ssl.endpoint.identification.algorithm", "https")
+            );
+        }
+
+        copyKafkaClientOverride(pt, prefix, props, "client.id");
+        copyKafkaClientOverride(pt, prefix, props, "request.timeout.ms");
+        copyKafkaClientOverride(pt, prefix, props, "default.api.timeout.ms");
+        copyKafkaClientOverride(pt, prefix, props, "metadata.max.age.ms");
 
         return props;
+    }
+
+    private static String buildKafkaJaasConfig(String mechanism, VaultSecretsDto vaultSecrets) {
+        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaUser(), "kafkaUser in vault");
+        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), "kafkaPassword in vault");
+
+        String loginModule = "PLAIN".equalsIgnoreCase(mechanism)
+                ? "org.apache.kafka.common.security.plain.PlainLoginModule"
+                : "org.apache.kafka.common.security.scram.ScramLoginModule";
+
+        return loginModule
+                + " required username=\"" + escapeJaas(vaultSecrets.kafkaUser())
+                + "\" password=\"" + escapeJaas(vaultSecrets.kafkaPassword()) + "\";";
+    }
+
+    private static String escapeJaas(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static boolean isSslProtocol(String securityProtocol) {
+        return securityProtocol != null && securityProtocol.toUpperCase().contains("SSL");
+    }
+
+    private static boolean isSaslProtocol(String securityProtocol) {
+        return securityProtocol != null && securityProtocol.toUpperCase().startsWith("SASL_");
+    }
+
+    private static String kafkaParam(ParameterTool pt, String prefix, String suffix, String defaultValue) {
+        String value = pt.get(prefix + "." + suffix, null);
+        if (value != null && !value.isBlank()) {
+            return value;
+        }
+
+        if (!"kafka".equals(prefix)) {
+            value = pt.get("kafka." + suffix, null);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+
+        return defaultValue;
+    }
+
+    private static boolean kafkaBooleanParam(ParameterTool pt, String prefix, String suffix, boolean defaultValue) {
+        String value = kafkaParam(pt, prefix, suffix, null);
+        return value == null ? defaultValue : Boolean.parseBoolean(value);
+    }
+
+    private static void copyKafkaClientOverride(ParameterTool pt, String prefix, Properties props, String kafkaProperty) {
+        putIfNotBlank(props, kafkaProperty, kafkaParam(pt, prefix, kafkaProperty, null));
     }
 
     private static void putIfNotBlank(Properties props, String key, String value) {

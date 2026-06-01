@@ -1,6 +1,10 @@
 package com.gpb.datafirewall.mq;
 
 import com.gpb.datafirewall.services.MessageReply;
+import com.gpb.datafirewall.audit.AuditConfig;
+import com.gpb.datafirewall.audit.AuditEventType;
+import com.gpb.datafirewall.audit.CefAuditEvent;
+import com.gpb.datafirewall.audit.CefAuditPublisher;
 import com.ibm.mq.MQMessage;
 import com.ibm.mq.MQPutMessageOptions;
 import com.ibm.mq.MQQueue;
@@ -30,8 +34,10 @@ public class MqSink extends RichSinkFunction<MessageReply> {
     private final String tlsCipherSuite;
     private final String trustStore;
     private final String trustStorePassword;
+    private final AuditConfig auditConfig;
 
     private transient MQQueueManager qm;
+    private transient CefAuditPublisher auditPublisher;
     private transient MQQueue queue;
 
     public MqSink(
@@ -54,6 +60,7 @@ public class MqSink extends RichSinkFunction<MessageReply> {
                 false,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -71,6 +78,23 @@ public class MqSink extends RichSinkFunction<MessageReply> {
             String trustStore,
             String trustStorePassword
     ) {
+        this(host, port, channel, qmgr, outQueue, user, password, tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword, null);
+    }
+
+    public MqSink(
+            String host,
+            int port,
+            String channel,
+            String qmgr,
+            String outQueue,
+            String user,
+            String password,
+            boolean tlsEnabled,
+            String tlsCipherSuite,
+            String trustStore,
+            String trustStorePassword,
+            AuditConfig auditConfig
+    ) {
         this.host = host;
         this.port = port;
         this.channel = channel;
@@ -82,6 +106,7 @@ public class MqSink extends RichSinkFunction<MessageReply> {
         this.tlsCipherSuite = tlsCipherSuite;
         this.trustStore = trustStore;
         this.trustStorePassword = trustStorePassword;
+        this.auditConfig = auditConfig;
     }
 
     public MqSink(String host, int port, String channel, String qmgr, String outQueue) {
@@ -93,6 +118,8 @@ public class MqSink extends RichSinkFunction<MessageReply> {
         int subtask = getRuntimeContext().getIndexOfThisSubtask();
 
         try {
+            auditPublisher = new CefAuditPublisher(auditConfig);
+            publishAudit(AuditEventType.IBM_MQ_SINK_CONNECTING, "SUCCESS", null);
             log.info(
                     "MqSink connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={} tls={} cipherSuite={} trustStore={}",
                     subtask,
@@ -124,7 +151,9 @@ public class MqSink extends RichSinkFunction<MessageReply> {
             queue = qm.accessQueue(outQueue, openOptions);
 
             log.info("MqSink opened queue={} subtask={}", outQueue, subtask);
+            publishAudit(AuditEventType.IBM_MQ_SINK_CONNECTED, "SUCCESS", null);
         } catch (Exception e) {
+            publishAudit(AuditEventType.IBM_MQ_SINK_CONNECTION_FAILED, "FAILED", e);
             close();
             throw new RuntimeException(
                     "Failed to open MqSink. host=" + host +
@@ -169,6 +198,7 @@ public class MqSink extends RichSinkFunction<MessageReply> {
 
     @Override
     public void close() {
+        publishAudit(AuditEventType.IBM_MQ_SINK_DISCONNECTED, "SUCCESS", null);
         try {
             if (queue != null) {
                 queue.close();
@@ -188,5 +218,41 @@ public class MqSink extends RichSinkFunction<MessageReply> {
         } finally {
             qm = null;
         }
+
+        try {
+            if (auditPublisher != null) {
+                auditPublisher.close();
+            }
+        } catch (Exception e) {
+            log.warn("Failed to close BusinessAuditPublisher", e);
+        } finally {
+            auditPublisher = null;
+        }
     }
+    private void publishAudit(AuditEventType type, String status, Exception error) {
+        if (auditPublisher == null || auditConfig == null || !auditConfig.enabled()) {
+            return;
+        }
+        CefAuditEvent.Builder builder = auditConfig.enrich(CefAuditEvent.builder(type))
+                .status(status)
+                .subtaskIndex(getRuntimeContext().getIndexOfThisSubtask())
+                .parallelism(getRuntimeContext().getNumberOfParallelSubtasks())
+                .put("component", "MqSink")
+                .put("host", host)
+                .put("port", port)
+                .put("qmgr", qmgr)
+                .put("channel", channel)
+                .put("queue", outQueue)
+                .put("user", user == null || user.isBlank() ? "<empty>" : user)
+                .put("tlsEnabled", tlsEnabled)
+                .put("protocol", tlsEnabled ? "TLS" : "TCP")
+                .put("cipherSuite", tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite)
+                .put("trustStore", trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore);
+        if (error != null) {
+            builder.put("errorClass", error.getClass().getName())
+                    .put("errorMessage", error.getMessage());
+        }
+        auditPublisher.publish(builder.build());
+    }
+
 }

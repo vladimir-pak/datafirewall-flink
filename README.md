@@ -109,21 +109,33 @@ TLS
 только
 если
 надо)
---kafka.tls.enabled=false
---kafka.security.protocol=SSL
---kafka.ssl.truststore.location=
+--kafka.tls.enabled=true
+--kafka.security.protocol=SASL_SSL
+--kafka.sasl.mechanism=SCRAM-SHA-512
+--kafka.ssl.truststore.location=/opt/flink/certs/truststore.p12
+--kafka.ssl.truststore.type=PKCS12
+--kafka.ssl.keystore.location=/opt/flink/certs/keystore.p12
+--kafka.ssl.keystore.type=PKCS12
+--kafka.ssl.endpoint.identification.algorithm=https
+# kafkaUser/kafkaPassword, truststorePassword, keystorePassword берутся из VaultSecretsDto
 ############################
 #
 KAFKA
 (DETAIL
 ANSWER)
 ############################
---audit.kafka.enabled=false
---audit.kafka.bootstrap=localhost:9092
---audit.kafka.topic=detail-answer
---audit.kafka.tls.enabled=false
---audit.kafka.security.protocol=SSL
---audit.kafka.ssl.truststore.location=
+--audit.kafka.enabled=false - required
+--audit.kafka.bootstrap=localhost:9092 - required
+--audit.kafka.topic=detail-answer - required
+--audit.kafka.tls.enabled=true
+--audit.kafka.security.protocol=SASL_SSL
+--audit.kafka.sasl.mechanism=SCRAM-SHA-512
+--audit.kafka.ssl.truststore.location=/opt/flink/certs/truststore.p12
+--audit.kafka.ssl.truststore.type=PKCS12
+--audit.kafka.ssl.keystore.location=/opt/flink/certs/keystore.p12
+--audit.kafka.ssl.keystore.type=PKCS12
+--audit.kafka.ssl.endpoint.identification.algorithm=https
+# Если audit.kafka.* не задан, параметры подключения наследуются из kafka.*
 ############################
 #
 ARTEMIS
@@ -166,4 +178,34 @@ Vault
 --vault.secret.path=datafirewall/flink/prod
 --vault.ssl.ca-cert.pem=/opt/flink/certs/vault-ca.pem
 
+#
+CEF логирование
+############################
+cef.audit.enabled=true
+cef.audit.file.enabled=true
+cef.audit.kafka.enabled=true
+cef.audit.fail-on-error=false
 
+cef.audit.cef.path=/opt/datafirewall/logs/cef.log
+cef.audit.kafka.bootstrap=kafka-host:9092
+cef.audit.kafka.topic=datafirewall.audit
+
+cef.audit.app.name=datafirewall-flink - если не задан, берется из имени jar
+cef.audit.app.version=1.0.0 - если не задан, берется из имени jar
+
+cef.audit.source.port=8081 - порт, где работает flink
+cef.audit.src.ip=10.10.1.11 - не обязательно, будет искать InetAddress.getLocalHost().getHostAddress();
+cef.audit.host.name=flink-taskmanager-1
+
+Необязательные
+cef.audit.kafka.tls.enabled=true
+cef.audit.kafka.security.protocol=SASL_SSL
+cef.audit.kafka.sasl.mechanism=SCRAM-SHA-512
+cef.audit.kafka.ssl.truststore.location=/opt/flink/certs/truststore.p12
+cef.audit.kafka.ssl.truststore.type=PKCS12
+cef.audit.kafka.ssl.keystore.location=/opt/flink/certs/keystore.p12
+cef.audit.kafka.ssl.keystore.type=PKCS12
+cef.audit.kafka.ssl.endpoint.identification.algorithm=https
+# Для CEF-аудита приоритет такой: cef.audit.kafka.* -> audit.kafka.* -> kafka.*
+# Пароли и логин Kafka берутся из VaultSecretsDto: kafkaUser, kafkaPassword, truststorePassword, keystorePassword
+############################

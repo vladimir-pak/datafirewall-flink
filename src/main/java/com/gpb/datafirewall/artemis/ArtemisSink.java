@@ -7,6 +7,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.gpb.datafirewall.services.MessageReply;
+import com.gpb.datafirewall.audit.AuditConfig;
+import com.gpb.datafirewall.audit.AuditEventType;
+import com.gpb.datafirewall.audit.CefAuditEvent;
+import com.gpb.datafirewall.audit.CefAuditPublisher;
 
 import javax.jms.Connection;
 import javax.jms.MessageProducer;
@@ -22,8 +26,10 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
     private final String username;
     private final String password;
     private final String queueName;
+    private final AuditConfig auditConfig;
 
     private transient ActiveMQConnectionFactory connectionFactory;
+    private transient CefAuditPublisher auditPublisher;
     private transient Connection connection;
     private transient Session session;
     private transient MessageProducer producer;
@@ -34,15 +40,28 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
             String password,
             String queueName
     ) {
+        this(brokerUrl, username, password, queueName, null);
+    }
+
+    public ArtemisSink(
+            String brokerUrl,
+            String username,
+            String password,
+            String queueName,
+            AuditConfig auditConfig
+    ) {
         this.brokerUrl = brokerUrl;
         this.username = username;
         this.password = password;
         this.queueName = queueName;
+        this.auditConfig = auditConfig;
     }
 
     @Override
     public void open(Configuration parameters) throws Exception {
         try {
+            auditPublisher = new CefAuditPublisher(auditConfig);
+            publishAudit(AuditEventType.ARTEMIS_SINK_CONNECTING, "SUCCESS", null);
             log.info(
                     "ArtemisSink connecting: subtask={}, brokerUrl={}, queue={}, user={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
@@ -66,7 +85,9 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
                     maskBrokerUrl(brokerUrl),
                     queueName
             );
+            publishAudit(AuditEventType.ARTEMIS_SINK_CONNECTED, "SUCCESS", null);
         } catch (Exception e) {
+            publishAudit(AuditEventType.ARTEMIS_SINK_CONNECTION_FAILED, "FAILED", e);
             close();
             throw new RuntimeException(
                     "Failed to open ArtemisSink. brokerUrl=" + maskBrokerUrl(brokerUrl) +
@@ -94,6 +115,7 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
 
     @Override
     public void close() {
+        publishAudit(AuditEventType.ARTEMIS_SINK_DISCONNECTED, "SUCCESS", null);
         closeQuietly(producer, "Artemis MessageProducer");
         producer = null;
 
@@ -105,6 +127,9 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
 
         closeQuietly(connectionFactory, "Artemis ConnectionFactory");
         connectionFactory = null;
+
+        closeQuietly(auditPublisher, "BusinessAuditPublisher");
+        auditPublisher = null;
     }
 
     private void closeQuietly(AutoCloseable c, String resourceName) {
@@ -116,6 +141,25 @@ public class ArtemisSink extends RichSinkFunction<MessageReply> {
         } catch (Exception e) {
             log.warn("Failed to close {}", resourceName, e);
         }
+    }
+
+    private void publishAudit(AuditEventType type, String status, Exception error) {
+        if (auditPublisher == null || auditConfig == null || !auditConfig.enabled()) {
+            return;
+        }
+        CefAuditEvent.Builder builder = auditConfig.enrich(CefAuditEvent.builder(type))
+                .status(status)
+                .subtaskIndex(getRuntimeContext().getIndexOfThisSubtask())
+                .parallelism(getRuntimeContext().getNumberOfParallelSubtasks())
+                .put("component", "ArtemisSink")
+                .put("brokerUrl", maskBrokerUrl(brokerUrl))
+                .put("queue", queueName)
+                .put("user", username == null || username.isBlank() ? "<empty>" : username);
+        if (error != null) {
+            builder.put("errorClass", error.getClass().getName())
+                    .put("errorMessage", error.getMessage());
+        }
+        auditPublisher.publish(builder.build());
     }
 
     // Метод для маскирования паролей в trustStorePassword и keyStorePassword

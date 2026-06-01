@@ -20,7 +20,9 @@ public record VaultKv2SecretResponseDto(
             String mqUser,
             String mqPassword,
             String mqKeystorePassword,
-            String mqTrustStorePassword
+            String mqTrustStorePassword,
+            String kafkaUser,
+            String kafkaPassword
     ) {
     }
 
@@ -35,7 +37,9 @@ public record VaultKv2SecretResponseDto(
                 data.data.mqUser(),
                 data.data.mqPassword(),
                 data.data.mqKeystorePassword(),
-                data.data.mqTrustStorePassword()
+                data.data.mqTrustStorePassword(),
+                data.data.kafkaUser(),
+                data.data.kafkaPassword()
         );
     }
 }

@@ -1,6 +1,10 @@
 package com.gpb.datafirewall.mq;
 
 import com.gpb.datafirewall.services.MessageRecord;
+import com.gpb.datafirewall.audit.AuditConfig;
+import com.gpb.datafirewall.audit.AuditEventType;
+import com.gpb.datafirewall.audit.CefAuditEvent;
+import com.gpb.datafirewall.audit.CefAuditPublisher;
 import com.ibm.mq.MQException;
 import com.ibm.mq.MQGetMessageOptions;
 import com.ibm.mq.MQMessage;
@@ -50,8 +54,10 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
     private final String tlsCipherSuite;
     private final String trustStore;
     private final String trustStorePassword;
+    private final AuditConfig auditConfig;
 
     private transient volatile boolean running;
+    private transient CefAuditPublisher auditPublisher;
     private transient MQQueueManager qMgr;
     private transient MQQueue queue;
 
@@ -78,6 +84,7 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
                 false,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -98,6 +105,27 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
             String trustStore,
             String trustStorePassword
     ) {
+        this(host, port, channel, qmgr, queueName, user, password, logPayloads, logPreviewLen, waitIntervalMs,
+                tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword, null);
+    }
+
+    public MqSource(
+            String host,
+            int port,
+            String channel,
+            String qmgr,
+            String queueName,
+            String user,
+            String password,
+            boolean logPayloads,
+            int logPreviewLen,
+            int waitIntervalMs,
+            boolean tlsEnabled,
+            String tlsCipherSuite,
+            String trustStore,
+            String trustStorePassword,
+            AuditConfig auditConfig
+    ) {
         this.host = host;
         this.port = port;
         this.channel = channel;
@@ -112,6 +140,7 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
         this.tlsCipherSuite = tlsCipherSuite;
         this.trustStore = trustStore;
         this.trustStorePassword = trustStorePassword;
+        this.auditConfig = auditConfig;
     }
 
     @Override
@@ -121,6 +150,8 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
         int openOptions = MQConstants.MQOO_INPUT_SHARED | MQConstants.MQOO_FAIL_IF_QUIESCING;
 
         try {
+            auditPublisher = new CefAuditPublisher(auditConfig);
+            publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTING, "SUCCESS", null);
             log.info(
                     "MqSource connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={} tls={} cipherSuite={} trustStore={}",
                     getRuntimeContext().getIndexOfThisSubtask(),
@@ -158,7 +189,9 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
                     logPreviewLen,
                     waitIntervalMs
             );
+            publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTED, "SUCCESS", null);
         } catch (Exception e) {
+            publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTION_FAILED, "FAILED", e);
             close();
             throw new RuntimeException(
                     "Failed to open MqSource. host=" + host +
@@ -261,6 +294,7 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
 
     @Override
     public void close() {
+        publishAudit(AuditEventType.IBM_MQ_SOURCE_DISCONNECTED, "SUCCESS", null);
         try {
             if (queue != null) {
                 queue.close();
@@ -280,6 +314,42 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
         } finally {
             qMgr = null;
         }
+
+        try {
+            if (auditPublisher != null) {
+                auditPublisher.close();
+            }
+        } catch (Exception e) {
+            log.warn("Failed to close BusinessAuditPublisher", e);
+        } finally {
+            auditPublisher = null;
+        }
+    }
+
+    private void publishAudit(AuditEventType type, String status, Exception error) {
+        if (auditPublisher == null || auditConfig == null || !auditConfig.enabled()) {
+            return;
+        }
+        CefAuditEvent.Builder builder = auditConfig.enrich(CefAuditEvent.builder(type))
+                .status(status)
+                .subtaskIndex(getRuntimeContext().getIndexOfThisSubtask())
+                .parallelism(getRuntimeContext().getNumberOfParallelSubtasks())
+                .put("component", "MqSource")
+                .put("host", host)
+                .put("port", port)
+                .put("qmgr", qmgr)
+                .put("channel", channel)
+                .put("queue", queueName)
+                .put("user", user == null || user.isBlank() ? "<empty>" : user)
+                .put("tlsEnabled", tlsEnabled)
+                .put("protocol", tlsEnabled ? "TLS" : "TCP")
+                .put("cipherSuite", tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite)
+                .put("trustStore", trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore);
+        if (error != null) {
+            builder.put("errorClass", error.getClass().getName())
+                    .put("errorMessage", error.getMessage());
+        }
+        auditPublisher.publish(builder.build());
     }
 
     private Charset detectCharset(MQMessage msg) {

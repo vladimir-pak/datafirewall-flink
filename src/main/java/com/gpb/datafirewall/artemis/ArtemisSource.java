@@ -7,6 +7,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.gpb.datafirewall.services.MessageRecord;
+import com.gpb.datafirewall.audit.AuditConfig;
+import com.gpb.datafirewall.audit.AuditEventType;
+import com.gpb.datafirewall.audit.CefAuditEvent;
+import com.gpb.datafirewall.audit.CefAuditPublisher;
 
 import javax.jms.BytesMessage;
 import javax.jms.Connection;
@@ -28,8 +32,10 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
     private final String password;
     private final String queueName;
     private final long receiveTimeoutMs;
+    private final AuditConfig auditConfig;
 
     private transient volatile boolean running;
+    private transient CefAuditPublisher auditPublisher;
 
     private transient ActiveMQConnectionFactory connectionFactory;
     private transient Connection connection;
@@ -43,11 +49,23 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
             String queueName,
             long receiveTimeoutMs
     ) {
+        this(brokerUrl, username, password, queueName, receiveTimeoutMs, null);
+    }
+
+    public ArtemisSource(
+            String brokerUrl,
+            String username,
+            String password,
+            String queueName,
+            long receiveTimeoutMs,
+            AuditConfig auditConfig
+    ) {
         this.brokerUrl = brokerUrl;
         this.username = username;
         this.password = password;
         this.queueName = queueName;
         this.receiveTimeoutMs = receiveTimeoutMs;
+        this.auditConfig = auditConfig;
     }
 
     @Override
@@ -55,6 +73,8 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
         running = true;
 
         try {
+            auditPublisher = new CefAuditPublisher(auditConfig);
+            publishAudit(AuditEventType.ARTEMIS_SOURCE_CONNECTING, "SUCCESS", null);
 
             log.info(
                     "ArtemisSource connecting: subtask={}, brokerUrl={}, queue={}, user={}",
@@ -80,7 +100,9 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
                     queueName,
                     receiveTimeoutMs
             );
+            publishAudit(AuditEventType.ARTEMIS_SOURCE_CONNECTED, "SUCCESS", null);
         } catch (Exception e) {
+            publishAudit(AuditEventType.ARTEMIS_SOURCE_CONNECTION_FAILED, "FAILED", e);
             close();
             throw new RuntimeException(
                     "Failed to open ArtemisSource. brokerUrl=" + maskBrokerUrl(brokerUrl) +
@@ -128,6 +150,7 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
 
     @Override
     public void close() {
+        publishAudit(AuditEventType.ARTEMIS_SOURCE_DISCONNECTED, "SUCCESS", null);
         closeQuietly(consumer, "Artemis MessageConsumer");
         consumer = null;
 
@@ -139,6 +162,9 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
 
         closeQuietly(connectionFactory, "Artemis ConnectionFactory");
         connectionFactory = null;
+
+        closeQuietly(auditPublisher, "BusinessAuditPublisher");
+        auditPublisher = null;
     }
 
     private String extractPayload(Message message) throws JMSException {
@@ -179,6 +205,26 @@ public class ArtemisSource extends RichSourceFunction<MessageRecord> {
         } catch (Exception e) {
             log.warn("Failed to close {}", resourceName, e);
         }
+    }
+
+    private void publishAudit(AuditEventType type, String status, Exception error) {
+        if (auditPublisher == null || auditConfig == null || !auditConfig.enabled()) {
+            return;
+        }
+        CefAuditEvent.Builder builder = auditConfig.enrich(CefAuditEvent.builder(type))
+                .status(status)
+                .subtaskIndex(getRuntimeContext().getIndexOfThisSubtask())
+                .parallelism(getRuntimeContext().getNumberOfParallelSubtasks())
+                .put("component", "ArtemisSource")
+                .put("brokerUrl", maskBrokerUrl(brokerUrl))
+                .put("queue", queueName)
+                .put("receiveTimeoutMs", receiveTimeoutMs)
+                .put("user", username == null || username.isBlank() ? "<empty>" : username);
+        if (error != null) {
+            builder.put("errorClass", error.getClass().getName())
+                    .put("errorMessage", error.getMessage());
+        }
+        auditPublisher.publish(builder.build());
     }
 
     // Метод для маскирования паролей в trustStorePassword и keyStorePassword
