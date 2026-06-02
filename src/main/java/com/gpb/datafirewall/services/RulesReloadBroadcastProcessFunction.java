@@ -73,6 +73,7 @@ public class RulesReloadBroadcastProcessFunction
     private static final String PROCESS_OK = "OK";
 
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
+    private final String jwt;
 
     private transient ObjectMapper mapper;
 
@@ -98,9 +99,11 @@ public class RulesReloadBroadcastProcessFunction
     private transient CachePayloadConverter cachePayloadConverter;
 
     public RulesReloadBroadcastProcessFunction(
-            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc
+            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
+            String jwt
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
+        this.jwt = jwt;
     }
 
     @Override
@@ -133,7 +136,8 @@ public class RulesReloadBroadcastProcessFunction
 
         this.igniteApiClient = new IgniteRulesApiClient(
                 igniteApiUrl,
-                igniteApiCaPem
+                igniteApiCaPem,
+                jwt
         );
 
         boolean bootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);

@@ -27,6 +27,7 @@ public final class IgniteRulesApiClient {
 
     private final String baseUrl;
     private final HttpClient http;
+    private final String jwt;
 
     /**
      * Работает для:
@@ -34,15 +35,21 @@ public final class IgniteRulesApiClient {
      * - https:// с дефолтным JVM truststore
      */
     public IgniteRulesApiClient(String baseUrl) {
-        this(baseUrl, null);
+        this(baseUrl, null, null);
     }
 
     /**
      * @param baseUrl например https://ignite-api-host:9200
      * @param caPemPath путь до PEM-файла с CA/server chain, например /opt/flink/certs/ca.pem
+     * @param jwt jwt для авторизации в datafirewall-spring
      */
     public IgniteRulesApiClient(String baseUrl, String caPemPath) {
+        this(baseUrl, caPemPath, null);
+    }
+
+    public IgniteRulesApiClient(String baseUrl, String caPemPath, String jwt) {
         this.baseUrl = normalizeBaseUrl(baseUrl);
+        this.jwt = jwt;
 
         HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3));
@@ -60,11 +67,7 @@ public final class IgniteRulesApiClient {
         String url = String.format("%s/api/v1/cache/%s/latest",
                 baseUrl, URLEncoder.encode(cacheName, StandardCharsets.UTF_8));
 
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(20))
-                .GET()
-                .build();
+        HttpRequest req = requestBuilder(url).GET().build();
 
         try {
             HttpResponse<String> resp = http.send(
@@ -97,11 +100,7 @@ public final class IgniteRulesApiClient {
         String url = baseUrl + "/api/v1/cache/" +
                 URLEncoder.encode(fullCacheName, StandardCharsets.UTF_8);
 
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(20))
-                .GET()
-                .build();
+        HttpRequest req = requestBuilder(url).GET().build();
 
         try {
             HttpResponse<String> resp = http.send(
@@ -197,5 +196,17 @@ public final class IgniteRulesApiClient {
             return "";
         }
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    private HttpRequest.Builder requestBuilder(String url) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(20));
+
+        if (isNotBlank(jwt)) {
+            builder.header("Authorization", "Bearer " + jwt);
+        }
+
+        return builder;
     }
 }

@@ -11,7 +11,8 @@ public record VaultSecretsDto(
         String mqKeystorePassword,
         String mqTruststorePassword,
         String kafkaUser,
-        String kafkaPassword
+        String kafkaPassword,
+        String jwt
 ) implements Serializable {
 
     @Serial
@@ -26,6 +27,7 @@ public record VaultSecretsDto(
         requireNotBlank(mqTruststorePassword, "mqTruststorePassword");
         requireNotBlank(kafkaUser, "kafkaUser");
         requireNotBlank(kafkaPassword, "kafkaPassword");
+        requireNotBlank(jwt, "jwt");
     }
 
     private static void requireNotBlank(String value, String name) {
