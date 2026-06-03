@@ -77,6 +77,11 @@ mq
 |
 artemis
 ############################
+
+#
+handler=flink
+значения: flink | dotnet
+handler.default=flink
 #
 RULES
 /
@@ -209,3 +214,8 @@ cef.audit.kafka.ssl.endpoint.identification.algorithm=https
 # Для CEF-аудита приоритет такой: cef.audit.kafka.* -> audit.kafka.* -> kafka.*
 # Пароли и логин Kafka берутся из VaultSecretsDto: kafkaUser, kafkaPassword, truststorePassword, keystorePassword
 ############################
+
+#
+dotnet обработка
+handler.dotnet.url=http://dotnet-service:8080/api/v1/datafirewall/process
+handler.dotnet.timeout.ms=20000

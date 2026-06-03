@@ -19,14 +19,18 @@ public class CacheUpdateEventDeserializationSchema
 
             long version = n.path("version").asLong(-1);
             String cacheName = n.path("cacheName").asText(null);
+            String handler = n.path("handler").asText(null);
 
             if (cacheName != null) {
                 cacheName = cacheName.trim();
             }
+            if (handler != null) {
+                handler = handler.trim();
+            }
 
-            return new CacheUpdateEvent(version, cacheName);
+            return new CacheUpdateEvent(version, cacheName, handler);
         } catch (Exception e) {
-            return new CacheUpdateEvent(-1, null);
+            return new CacheUpdateEvent(-1, null, null);
         }
     }
 }
