@@ -70,10 +70,9 @@ public final class MessageProcessingService {
             }
 
             log.info(
-                    "[PIPE][{}][eventId={}] handler=flink rulesCount={}",
+                    "[PIPE][{}][eventId={}] handler=flink",
                     qid,
-                    eventId,
-                    cacheRuntime.rulesSize()
+                    eventId
             );
 
             if (logPayloads && log.isInfoEnabled()) {
@@ -98,9 +97,6 @@ public final class MessageProcessingService {
                         qid, eventId, controlArea, datasetCode);
                 return null;
             }
-
-            log.info("[PIPE][{}][eventId={}] datasetCode={} controlArea={} mappedFields={}",
-                    qid, eventId, datasetCode, controlArea, allFieldToRules.keySet());
 
             Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
             Map<String, Map<String, String>> errorMessagesByRule = cacheRuntime.errorMessagesSnapshot();

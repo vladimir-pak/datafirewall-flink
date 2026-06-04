@@ -126,18 +126,26 @@ public class RulesReloadBroadcastProcessFunction
         CacheUpdateEvent current = st.get(ev.cacheName);
 
         if (CACHE_HANDLER.equalsIgnoreCase(ev.cacheName)) {
-            if (current != null && ev.version <= current.version) {
-                log.info("[HANDLER][KAFKA] ignore handler event version={} current={}",
-                        ev.version, current.version);
+            if (current != null && current.handler != null && current.handler.equalsIgnoreCase(ev.handler)) {
+                log.info("[HANDLER][KAFKA] ignore handler event hadnler={} current={}",
+                        ev.handler, current.handler);
                 return;
             }
 
-            DynamicHandler newHandler = ev.handlerAsEnum(handlerRoutingState.currentHandler());
+            DynamicHandler newHandler = DynamicHandler.from(ev.handler, null);
+            if (newHandler == null) {
+                log.warn("[HANDLER][KAFKA] ignore handler event with invalid handler='{}'",
+                        ev.handler);
+                return;
+            }
+
+            DynamicHandler currentHandler = handlerRoutingState.currentHandler();
+
             handlerRoutingState.update(newHandler);
             st.put(ev.cacheName, ev);
 
-            log.info("[HANDLER][KAFKA] handler switched to {} by event version={}",
-                    newHandler.value(), ev.version);
+            log.info("[HANDLER][KAFKA] handler switched from {} to {} by event",
+                    currentHandler.value(), newHandler.value());
             return;
         }
 
