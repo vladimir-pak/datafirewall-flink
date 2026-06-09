@@ -153,6 +153,17 @@ public class Main {
         String mqTlsCipherSuite = pt.get("mq.tls.cipherSuite", null);
         String mqTrustStore = pt.get("mq.ssl.truststore.location", null);
         String mqTrustStorePassword = vaultSecrets.mqTruststorePassword();
+        String mqReplyXFrom = firstNotBlank(
+                pt.get("mq.reply.xFrom", null),
+                pt.get("mq.xFrom", null),
+                pt.get("X_From", null),
+                "MKD"
+        );
+        String mqReplyXServiceId = firstNotBlank(
+                pt.get("mq.reply.xServiceId", null),
+                pt.get("mq.xServiceId", null),
+                pt.get("X_ServiceID", null)
+        );
 
         boolean artemisTlsEnabled = pt.getBoolean("artemis.tls.enabled", false);
         String artemisTrustStore = pt.get("artemis.ssl.truststore.location", null);
@@ -187,6 +198,11 @@ public class Main {
         if ("artemis".equals(backend)) {
             requireNotBlank(artemisUser, "mqUser in vault");
             requireNotBlank(artemisPassword, "mqPassword in vault");
+        }
+
+        if ("mq".equals(backend)) {
+            requireNotBlank(cfg.mqQmgr(), "mq.qmgr/mq.queueManager");
+            requireNotBlank(mqReplyXServiceId, "mq.reply.xServiceId/mq.xServiceId/X_ServiceID");
         }
 
         validateMinimalTls(
@@ -361,6 +377,8 @@ public class Main {
                             mqTlsCipherSuite,
                             mqTrustStore,
                             mqTrustStorePassword,
+                            mqReplyXFrom,
+                            mqReplyXServiceId,
                             cefAuditConfig
                     ))
                     .name("mq-sink")
@@ -735,6 +753,18 @@ public class Main {
         if (value != null && !value.isBlank()) {
             props.setProperty(key, value);
         }
+    }
+
+    private static String firstNotBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return null;
     }
 
     private static void requireNotBlank(String value, String name) {

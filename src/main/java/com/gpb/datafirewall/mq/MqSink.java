@@ -17,10 +17,22 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 
 public class MqSink extends RichSinkFunction<MessageReply> {
 
     private static final Logger log = LoggerFactory.getLogger(MqSink.class);
+
+    private static final String HEADER_X_FROM = "X_From";
+    private static final String HEADER_X_SERVICE_ID = "X_ServiceID";
+    private static final String HEADER_X_CREATE_DATE_TIME = "X_CreateDateTime";
+
+    private static final DateTimeFormatter MQ_HEADER_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+                    .withZone(ZoneOffset.UTC);
 
     private final String host;
     private final int port;
@@ -34,6 +46,8 @@ public class MqSink extends RichSinkFunction<MessageReply> {
     private final String tlsCipherSuite;
     private final String trustStore;
     private final String trustStorePassword;
+    private final String xFrom;
+    private final String xServiceId;
     private final AuditConfig auditConfig;
 
     private transient MQQueueManager qm;
@@ -78,7 +92,7 @@ public class MqSink extends RichSinkFunction<MessageReply> {
             String trustStore,
             String trustStorePassword
     ) {
-        this(host, port, channel, qmgr, outQueue, user, password, tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword, null);
+        this(host, port, channel, qmgr, outQueue, user, password, tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword, null, null, null);
     }
 
     public MqSink(
@@ -95,6 +109,25 @@ public class MqSink extends RichSinkFunction<MessageReply> {
             String trustStorePassword,
             AuditConfig auditConfig
     ) {
+        this(host, port, channel, qmgr, outQueue, user, password, tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword, null, null, auditConfig);
+    }
+
+    public MqSink(
+            String host,
+            int port,
+            String channel,
+            String qmgr,
+            String outQueue,
+            String user,
+            String password,
+            boolean tlsEnabled,
+            String tlsCipherSuite,
+            String trustStore,
+            String trustStorePassword,
+            String xFrom,
+            String xServiceId,
+            AuditConfig auditConfig
+    ) {
         this.host = host;
         this.port = port;
         this.channel = channel;
@@ -106,6 +139,8 @@ public class MqSink extends RichSinkFunction<MessageReply> {
         this.tlsCipherSuite = tlsCipherSuite;
         this.trustStore = trustStore;
         this.trustStorePassword = trustStorePassword;
+        this.xFrom = normalizeHeaderValue(xFrom, "MKD");
+        this.xServiceId = normalizeHeaderValue(xServiceId, "");
         this.auditConfig = auditConfig;
     }
 
@@ -188,12 +223,28 @@ public class MqSink extends RichSinkFunction<MessageReply> {
         msg.characterSet = 1208;
         msg.correlationId = value.mqCorrelationId;
 
+        applyRequiredHeaders(msg);
+
         msg.write(body);
 
         MQPutMessageOptions pmo = new MQPutMessageOptions();
         pmo.options = MQConstants.MQPMO_NO_SYNCPOINT | MQConstants.MQPMO_FAIL_IF_QUIESCING;
 
         queue.put(msg, pmo);
+    }
+
+    private void applyRequiredHeaders(MQMessage msg) throws Exception {
+        msg.setStringProperty(HEADER_X_FROM, xFrom);
+        msg.setStringProperty(HEADER_X_SERVICE_ID, xServiceId);
+        msg.setStringProperty(HEADER_X_CREATE_DATE_TIME, currentMqHeaderTimestamp());
+    }
+
+    private static String currentMqHeaderTimestamp() {
+        return MQ_HEADER_TIME_FORMATTER.format(Instant.now().truncatedTo(ChronoUnit.MILLIS));
+    }
+
+    private static String normalizeHeaderValue(String value, String defaultValue) {
+        return value == null || value.isBlank() ? defaultValue : value.trim();
     }
 
     @Override
@@ -247,7 +298,9 @@ public class MqSink extends RichSinkFunction<MessageReply> {
                 .put("tlsEnabled", tlsEnabled)
                 .put("protocol", tlsEnabled ? "TLS" : "TCP")
                 .put("cipherSuite", tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite)
-                .put("trustStore", trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore);
+                .put("trustStore", trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore)
+                .put("xFrom", xFrom == null || xFrom.isBlank() ? "<empty>" : xFrom)
+                .put("xServiceId", xServiceId == null || xServiceId.isBlank() ? "<empty>" : xServiceId);
         if (error != null) {
             builder.put("errorClass", error.getClass().getName())
                     .put("errorMessage", error.getMessage());

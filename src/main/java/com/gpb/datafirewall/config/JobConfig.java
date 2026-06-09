@@ -27,7 +27,12 @@ public record JobConfig(
         String host = params.get("mq.host", "localhost");
         int port = params.getInt("mq.port", 1414);
         String channel = params.get("mq.channel", "DEV.APP.SVRCONN");
-        String qmgr = params.get("mq.qmgr", "QM1");
+        String qmgr = firstNotBlank(
+                params.get("mq.qmgr", null),
+                params.get("mq.queueManager", null),
+                params.get("mq.queue.manager", null),
+                "QM1"
+        );
         String inQueue = params.get("mq.inQueue", "IN.Q");
         String outQueue = params.get("mq.outQueue", "OUT.Q");
 
@@ -55,4 +60,19 @@ public record JobConfig(
                 password
         );
     }
+
+    private static String firstNotBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+
+        return null;
+    }
+
 }

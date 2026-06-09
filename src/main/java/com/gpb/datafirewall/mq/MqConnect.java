@@ -27,6 +27,10 @@ public final class MqConnect {
             String trustStorePassword
     ) throws Exception {
 
+        if (qmgr == null || qmgr.isBlank()) {
+            throw new IllegalArgumentException("IBM MQ queue manager name must be provided");
+        }
+
         if (tlsEnabled) {
             setSystemPropertyIfPresent("javax.net.ssl.trustStore", trustStore);
             setSystemPropertyIfPresent("javax.net.ssl.trustStorePassword", trustStorePassword);
