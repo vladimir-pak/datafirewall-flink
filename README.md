@@ -631,6 +631,10 @@ handler.dotnet.shadow.kafka.enabled=true
 handler.dotnet.shadow.kafka.topic=datafirewall.shadow-processing
 handler.dotnet.shadow.kafka.bootstrap=kafka-host:9092
 
+handler.dotnet.ssl.truststore.location=/opt/flink/certs/dotnet-truststore.p12
+handler.dotnet.ssl.truststore.password=changeit
+handler.dotnet.ssl.truststore.type=PKCS12
+
 parallelism=4
 parallelism.source=4
 parallelism.process=4

@@ -87,11 +87,21 @@ public class RulesReloadBroadcastProcessFunction
                 logPayloads
         );
 
+        String dotnetUrl = pt.get("handler.dotnet.url");
+        Long dotnetTimeoutMs = pt.getLong("handler.dotnet.timeout.ms", 20_000L);
+        String jwt = firstNotBlank(pt.get("handler.dotnet.jwt", null), dotnetJwt);
+        String dotnetTrustStorePath = pt.get("handler.dotnet.ssl.truststore.location");
+        String dotnetTrustStorePassword = pt.get("handler.dotnet.ssl.truststore.password");
+        String dotnetTrustStoreType = pt.get("handler.dotnet.ssl.truststore.type");
+
         this.dotnetHandlerClient = new DotnetHandlerClient(
-                pt.get("handler.dotnet.url", pt.get("dotnet.handler.url", null)),
-                firstNotBlank(pt.get("handler.dotnet.jwt", null), dotnetJwt),
-                pt.getLong("handler.dotnet.timeout.ms", 20_000L),
-                mapper
+                dotnetUrl,
+                jwt,
+                dotnetTimeoutMs,
+                mapper,
+                dotnetTrustStorePath,
+                dotnetTrustStorePassword,
+                dotnetTrustStoreType
         );
 
         log.info(

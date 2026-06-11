@@ -4,12 +4,19 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.dto.ProcessingResult;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
 import java.time.Duration;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 
 public final class DotnetHandlerClient {
 
@@ -19,18 +26,52 @@ public final class DotnetHandlerClient {
     private final String jwt;
     private final Duration requestTimeout;
 
-    public DotnetHandlerClient(String url, String jwt, long timeoutMs) {
-        this(url, jwt, timeoutMs, new ObjectMapper());
+    private final String trustStorePath;
+    private final String trustStorePassword;
+    private final String trustStoreType;
+
+    public DotnetHandlerClient(
+            String url,
+            String jwt,
+            long timeoutMs,
+            String trustStorePath,
+            String trustStorePassword,
+            String trustStoreType
+    ) {
+        this(url, jwt, timeoutMs, new ObjectMapper(), trustStorePath, trustStorePassword, trustStoreType);
     }
 
-    public DotnetHandlerClient(String url, String jwt, long timeoutMs, ObjectMapper mapper) {
+    public DotnetHandlerClient(
+            String url,
+            String jwt,
+            long timeoutMs,
+            ObjectMapper mapper,
+            String trustStorePath,
+            String trustStorePassword,
+            String trustStoreType
+    ) {
         this.url = normalizeUrlOrNull(url);
         this.jwt = normalizeJwt(jwt);
         this.requestTimeout = Duration.ofMillis(timeoutMs <= 0 ? 20_000L : timeoutMs);
         this.mapper = mapper == null ? new ObjectMapper() : mapper;
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(3))
-                .build();
+        this.trustStorePath = normalizeUrlOrNull(trustStorePath);
+        this.trustStorePassword = trustStorePassword;
+        this.trustStoreType = trustStoreType == null || trustStoreType.isBlank()
+                ? "PKCS12"
+                : trustStoreType.trim();
+
+        HttpClient.Builder builder = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(3));
+
+        if (this.trustStorePath != null) {
+            builder.sslContext(buildSslContext(
+                    this.trustStorePath,
+                    this.trustStorePassword,
+                    this.trustStoreType
+            ));
+        }
+
+        this.http = builder.build();
     }
 
     public ProcessingResult process(MessageRecord in) {
@@ -156,6 +197,43 @@ public final class DotnetHandlerClient {
             return "";
         }
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    private static SSLContext buildSslContext(
+            String trustStorePath,
+            String trustStorePassword,
+            String trustStoreType
+    ) {
+        try {
+            KeyStore trustStore = KeyStore.getInstance(
+                    trustStoreType == null || trustStoreType.isBlank()
+                            ? "PKCS12"
+                            : trustStoreType
+            );
+
+            try (InputStream in = Files.newInputStream(Path.of(trustStorePath))) {
+                trustStore.load(
+                        in,
+                        trustStorePassword == null ? null : trustStorePassword.toCharArray()
+                );
+            }
+
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                    TrustManagerFactory.getDefaultAlgorithm()
+            );
+            tmf.init(trustStore);
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, tmf.getTrustManagers(), null);
+
+            return sslContext;
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to build SSLContext for dotnet handler. trustStore=" +
+                            trustStorePath + ", trustStoreType=" + trustStoreType,
+                    e
+            );
+        }
     }
 
     private record DotnetHandlerResponse(String shortJson, String detailJson) {
