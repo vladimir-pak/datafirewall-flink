@@ -23,7 +23,8 @@ public record VaultKv2SecretResponseDto(
             String mqTruststorePassword,
             String kafkaUser,
             String kafkaPassword,
-            String jwt
+            String jwt,
+            String dotnetJwt
     ) {
     }
 
@@ -41,7 +42,8 @@ public record VaultKv2SecretResponseDto(
                 data.data.mqTruststorePassword(),
                 data.data.kafkaUser(),
                 data.data.kafkaPassword(),
-                data.data.jwt()
+                data.data.jwt(),
+                data.data.dotnetJwt()
         );
     }
 }

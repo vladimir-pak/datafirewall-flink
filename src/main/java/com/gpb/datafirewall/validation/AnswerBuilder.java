@@ -55,8 +55,9 @@ public final class AnswerBuilder {
                 : validation.processStatus();
         out.put("PROCESS_STATUS", processStatus);
 
-        out.set("details", buildShortDetails(originalEvent, validation));
-        out.set("errors", buildErrors(originalEvent, validation));
+        ObjectNode details = buildShortDetails(originalEvent, validation);
+        details.set("errors", buildErrors(originalEvent, validation));
+        out.set("details", details);
 
         return out;
     }

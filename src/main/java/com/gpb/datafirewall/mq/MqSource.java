@@ -13,7 +13,7 @@ import com.ibm.mq.MQQueueManager;
 import com.ibm.mq.constants.MQConstants;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,7 +24,7 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
 
-public class MqSource extends RichSourceFunction<MessageRecord> {
+public class MqSource extends RichParallelSourceFunction<MessageRecord> {
 
     private static final Logger log = LoggerFactory.getLogger(MqSource.class);
 
@@ -243,21 +243,19 @@ public class MqSource extends RichSourceFunction<MessageRecord> {
 
                 boolean endsWithJsonClose = body != null && body.trim().endsWith("}");
 
-                log.info(
-                        "MQ READ subtask={} msgIdLen={} messageLength={} dataLength={} bytesRead={} bodyChars={} endsWithJsonClose={}",
-                        getRuntimeContext().getIndexOfThisSubtask(),
-                        msgIdBytes.length,
-                        messageLength,
-                        dataLength,
-                        buf.length,
-                        body.length(),
-                        endsWithJsonClose
-                );
+                // log.info(
+                //         "MQ READ subtask={} msgIdLen={} messageLength={} dataLength={} bytesRead={} bodyChars={} endsWithJsonClose={}",
+                //         getRuntimeContext().getIndexOfThisSubtask(),
+                //         msgIdBytes.length,
+                //         messageLength,
+                //         dataLength,
+                //         buf.length,
+                //         body.length(),
+                //         endsWithJsonClose
+                // );
 
                 if (logPayloads) {
                     log.info("MQ READ msgId={} BODY:\n{}", msgIdHex, body);
-                } else {
-                    log.info("MQ READ msgId={} BODY preview={}", msgIdHex, preview(body, logPreviewLen));
                 }
 
                 synchronized (ctx.getCheckpointLock()) {

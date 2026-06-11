@@ -12,6 +12,7 @@ import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,8 +26,13 @@ public class RulesReloadBroadcastProcessFunction
 
     private static final String CACHE_HANDLER = "handler";
 
+    public static final OutputTag<String> DOTNET_SHADOW_REQUEST_TAG =
+            new OutputTag<String>("dotnet-shadow-request") {
+            };
+
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
     private final String jwt;
+    private final String dotnetJwt;
 
     private transient ObjectMapper mapper;
     private transient RulesCacheRuntime cacheRuntime;
@@ -38,8 +44,17 @@ public class RulesReloadBroadcastProcessFunction
             MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
             String jwt
     ) {
+        this(rulesBroadcastDesc, jwt, null);
+    }
+
+    public RulesReloadBroadcastProcessFunction(
+            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
+            String jwt,
+            String dotnetJwt
+    ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
         this.jwt = jwt;
+        this.dotnetJwt = dotnetJwt;
     }
 
     @Override
@@ -74,8 +89,9 @@ public class RulesReloadBroadcastProcessFunction
 
         this.dotnetHandlerClient = new DotnetHandlerClient(
                 pt.get("handler.dotnet.url", pt.get("dotnet.handler.url", null)),
-                pt.get("handler.dotnet.jwt", jwt),
-                pt.getLong("handler.dotnet.timeout.ms", 20_000L)
+                firstNotBlank(pt.get("handler.dotnet.jwt", null), dotnetJwt),
+                pt.getLong("handler.dotnet.timeout.ms", 20_000L),
+                mapper
         );
 
         log.info(
@@ -96,11 +112,16 @@ public class RulesReloadBroadcastProcessFunction
         DynamicHandler handler = handlerRoutingState.currentHandler();
 
         try {
-            ProcessingResult result = switch (handler) {
-                case FLINK -> messageProcessor.process(in);
-                case DOTNET -> dotnetHandlerClient.process(in);
-            };
+            if (handler == DynamicHandler.DOTNET) {
+                ProcessingResult result = dotnetHandlerClient.process(in);
+                if (result != null) {
+                    out.collect(result);
+                }
+                emitDotnetShadowRequest(in, ctx);
+                return;
+            }
 
+            ProcessingResult result = messageProcessor.process(in);
             if (result != null) {
                 out.collect(result);
             }
@@ -108,6 +129,26 @@ public class RulesReloadBroadcastProcessFunction
             String eventId = in == null ? "unknown" : in.eventId();
             log.error("[PIPE][eventId={}] failed to process message. handler={}", eventId, handler.value(), e);
         }
+    }
+
+    private void emitDotnetShadowRequest(MessageRecord in, ReadOnlyContext ctx) {
+        if (in == null || in.payload == null || in.payload.isBlank()) {
+            return;
+        }
+
+        ctx.output(DOTNET_SHADOW_REQUEST_TAG, in.payload);
+    }
+
+    private static String firstNotBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return null;
     }
 
     @Override

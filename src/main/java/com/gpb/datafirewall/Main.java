@@ -15,6 +15,7 @@ import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsIni
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.BroadcastStream;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.util.Collector;
@@ -39,6 +40,7 @@ import com.gpb.datafirewall.kafka.CacheUpdateEvent;
 import com.gpb.datafirewall.kafka.CacheUpdateEventDeserializationSchema;
 import com.gpb.datafirewall.mq.MqSink;
 import com.gpb.datafirewall.mq.MqSource;
+import com.gpb.datafirewall.services.DynamicHandler;
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.services.MessageReply;
 import com.gpb.datafirewall.services.RulesReloadBroadcastProcessFunction;
@@ -88,6 +90,11 @@ public class Main {
         int parallelism = pt.getInt("parallelism", DEFAULT_PARALLELISM);
         env.setParallelism(parallelism);
 
+        int sourceParallelism = pt.getInt("parallelism.source", parallelism);
+        int processParallelism = pt.getInt("parallelism.process", parallelism);
+        int sinkParallelism = pt.getInt("parallelism.sink", parallelism);
+        int shadowKafkaParallelism = pt.getInt("parallelism.shadow.kafka", parallelism);
+
         // boolean detailKafkaEnabled = pt.getBoolean("detail.kafka.enabled", false);
         boolean checkpointingEnabled = pt.getBoolean("flink.checkpoint.enabled", true);
 
@@ -121,6 +128,10 @@ public class Main {
         }
 
         String backend = pt.get("messaging.backend", DEFAULT_MESSAGING_BACKEND).trim().toLowerCase();
+        DynamicHandler startupHandler = DynamicHandler.from(
+                pt.get("handler", pt.get("handler.default", "flink")),
+                DynamicHandler.FLINK
+        );
         JobConfig cfg = JobConfig.fromArgs(pt, vaultSecrets);
 
         String kafkaBootstrap = pt.get("kafka.bootstrap", DEFAULT_KAFKA_BOOTSTRAP);
@@ -195,6 +206,21 @@ public class Main {
         String auditKafkaBootstrap = pt.get("audit.kafka.bootstrap", kafkaBootstrap);
         String auditKafkaTopic = pt.get("audit.kafka.topic", "datafirewall.processing.audit");
 
+        boolean dotnetShadowKafkaEnabled = pt.getBoolean("handler.dotnet.shadow.kafka.enabled", true);
+        String dotnetShadowKafkaBootstrap = pt.get("handler.dotnet.shadow.kafka.bootstrap", kafkaBootstrap);
+        String dotnetShadowKafkaTopic = firstNotBlank(
+                pt.get("handler.dotnet.shadow.kafka.topic", null),
+                pt.get("shadow.kafka.topic", null)
+        );
+
+        if (startupHandler == DynamicHandler.DOTNET) {
+            requireNotBlank(pt.get("handler.dotnet.url", pt.get("dotnet.handler.url", null)), "handler.dotnet.url/dotnet.handler.url");
+            requireNotBlank(vaultSecrets.dotnetJwt(), "dotnetJwt in vault");
+            if (dotnetShadowKafkaEnabled) {
+                requireNotBlank(dotnetShadowKafkaTopic, "handler.dotnet.shadow.kafka.topic/shadow.kafka.topic");
+            }
+        }
+
         if ("artemis".equals(backend)) {
             requireNotBlank(artemisUser, "mqUser in vault");
             requireNotBlank(artemisPassword, "mqPassword in vault");
@@ -268,8 +294,8 @@ public class Main {
                                 "mq-source"
                         )
                         .name("mq-source")
-                        .uid("mq-source");
-                        // .setParallelism(1);
+                        .uid("mq-source")
+                        .setParallelism(sourceParallelism);
             }
 
             case "artemis" -> {
@@ -287,8 +313,8 @@ public class Main {
                                 "artemis-source"
                         )
                         .name("artemis-source")
-                        .uid("artemis-source");
-                        // .setParallelism(1);
+                        .uid("artemis-source")
+                        .setParallelism(sourceParallelism);
             }
 
             default -> throw new IllegalArgumentException(
@@ -298,6 +324,7 @@ public class Main {
 
         Properties kafkaClientProps = buildKafkaClientProperties(pt, "kafka", vaultSecrets);
         Properties auditKafkaClientProps = buildKafkaClientProperties(pt, "audit.kafka", vaultSecrets);
+        Properties dotnetShadowKafkaClientProps = buildKafkaClientProperties(pt, "handler.dotnet.shadow.kafka", vaultSecrets);
 
         try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
             publishKafkaConnectionCheck(jobAuditPublisher, cefAuditConfig, "rules-kafka", kafkaBootstrap, kafkaClientProps, vaultSecrets.kafkaUser());
@@ -337,11 +364,38 @@ public class Main {
 
         BroadcastStream<CacheUpdateEvent> bcUpdates = updates.broadcast(bcDesc);
 
-        DataStream<ProcessingResult> processed = inputStream
+        SingleOutputStreamOperator<ProcessingResult> processed = inputStream
                 .connect(bcUpdates)
-                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets.jwt()))
+                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets.jwt(), vaultSecrets.dotnetJwt()))
                 .name("process-with-rules-reload")
-                .uid("process-with-rules-reload");
+                .uid("process-with-rules-reload")
+                .setParallelism(processParallelism);
+
+        if (dotnetShadowKafkaEnabled && dotnetShadowKafkaTopic != null && !dotnetShadowKafkaTopic.isBlank()) {
+            KafkaSink<String> dotnetShadowKafkaSink = KafkaSink.<String>builder()
+                    .setBootstrapServers(dotnetShadowKafkaBootstrap)
+                    .setKafkaProducerConfig(dotnetShadowKafkaClientProps)
+                    .setRecordSerializer(
+                            KafkaRecordSerializationSchema.builder()
+                                    .setTopic(dotnetShadowKafkaTopic)
+                                    .setValueSerializationSchema(new SimpleStringSchema())
+                                    .build()
+                    )
+                    .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                    .build();
+
+            processed
+                    .getSideOutput(RulesReloadBroadcastProcessFunction.DOTNET_SHADOW_REQUEST_TAG)
+                    .sinkTo(dotnetShadowKafkaSink)
+                    .name("dotnet-shadow-kafka-sink")
+                    .uid("dotnet-shadow-kafka-sink")
+                    .setParallelism(shadowKafkaParallelism);
+
+            log.info("[MAIN] dotnet shadow kafka sink enabled: bootstrap={}, topic={}",
+                    dotnetShadowKafkaBootstrap, dotnetShadowKafkaTopic);
+        } else {
+            log.info("[MAIN] dotnet shadow kafka sink disabled");
+        }
 
         if ("mq".equals(backend)) {
             DataStream<MessageReply> shortReplies = processed
@@ -382,7 +436,8 @@ public class Main {
                             cefAuditConfig
                     ))
                     .name("mq-sink")
-                    .uid("mq-sink");
+                    .uid("mq-sink")
+                    .setParallelism(sinkParallelism);
 
             log.info("[MAIN] MQ output sink enabled");
         } else if ("artemis".equals(backend)) {
@@ -415,7 +470,8 @@ public class Main {
                             cefAuditConfig
                     ))
                     .name("artemis-sink")
-                    .uid("artemis-sink");
+                    .uid("artemis-sink")
+                    .setParallelism(sinkParallelism);
 
             log.info("[MAIN] Artemis output sink enabled");
         }

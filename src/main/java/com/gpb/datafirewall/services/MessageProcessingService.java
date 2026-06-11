@@ -263,15 +263,15 @@ public final class MessageProcessingService {
                     raw
             );
 
-            log.info(
-                    "[PIPE][{}][eventId={}] result built: isMq={}, isJms={}, shortLen={}, detailLen={}",
-                    qid,
-                    result.getEventId(),
-                    result.isMq(),
-                    result.isJms(),
-                    result.getShortJson() == null ? 0 : result.getShortJson().length(),
-                    result.getDetailJson() == null ? 0 : result.getDetailJson().length()
-            );
+            // log.info(
+            //         "[PIPE][{}][eventId={}] result built: isMq={}, isJms={}, shortLen={}, detailLen={}",
+            //         qid,
+            //         result.getEventId(),
+            //         result.isMq(),
+            //         result.isJms(),
+            //         result.getShortJson() == null ? 0 : result.getShortJson().length(),
+            //         result.getDetailJson() == null ? 0 : result.getDetailJson().length()
+            // );
 
             return result;
 

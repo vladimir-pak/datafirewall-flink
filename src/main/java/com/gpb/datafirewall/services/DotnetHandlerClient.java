@@ -1,5 +1,7 @@
 package com.gpb.datafirewall.services;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.dto.ProcessingResult;
 
 import java.net.URI;
@@ -12,14 +14,20 @@ import java.time.Duration;
 public final class DotnetHandlerClient {
 
     private final HttpClient http;
+    private final ObjectMapper mapper;
     private final String url;
     private final String jwt;
     private final Duration requestTimeout;
 
     public DotnetHandlerClient(String url, String jwt, long timeoutMs) {
+        this(url, jwt, timeoutMs, new ObjectMapper());
+    }
+
+    public DotnetHandlerClient(String url, String jwt, long timeoutMs, ObjectMapper mapper) {
         this.url = normalizeUrlOrNull(url);
         this.jwt = normalizeJwt(jwt);
         this.requestTimeout = Duration.ofMillis(timeoutMs <= 0 ? 20_000L : timeoutMs);
+        this.mapper = mapper == null ? new ObjectMapper() : mapper;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3))
                 .build();
@@ -35,17 +43,20 @@ public final class DotnetHandlerClient {
         if (url == null || url.isBlank()) {
             throw new IllegalStateException("handler.dotnet.url must be provided when runtime handler=dotnet");
         }
+        if (jwt == null || jwt.isBlank()) {
+            throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
+        }
 
-        String responseJson = call(in.payload);
-        if (responseJson == null || responseJson.isBlank()) {
+        DotnetHandlerResponse response = parseResponse(call(in.payload));
+        if (response.shortJson() == null || response.shortJson().isBlank()) {
             return null;
         }
 
         if (in.mqMessageId != null) {
             return ProcessingResult.forMq(
                     in.mqMessageId,
-                    responseJson,
-                    null,
+                    response.shortJson(),
+                    response.detailJson(),
                     in.payload
             );
         }
@@ -53,8 +64,8 @@ public final class DotnetHandlerClient {
         if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
             return ProcessingResult.forJms(
                     in.jmsMessageId,
-                    responseJson,
-                    null,
+                    response.shortJson(),
+                    response.detailJson(),
                     in.payload
             );
         }
@@ -64,16 +75,42 @@ public final class DotnetHandlerClient {
         );
     }
 
+    private DotnetHandlerResponse parseResponse(String responseJson) {
+        if (responseJson == null || responseJson.isBlank()) {
+            return new DotnetHandlerResponse(null, null);
+        }
+
+        try {
+            JsonNode root = mapper.readTree(responseJson);
+            JsonNode answer = root.get("answer");
+            JsonNode detailAnswer = root.get("detail_answer");
+
+            if (answer == null || answer.isNull()) {
+                throw new IllegalArgumentException("Dotnet handler response does not contain required field 'answer'");
+            }
+
+            String shortJson = mapper.writeValueAsString(answer);
+            String detailJson = detailAnswer == null || detailAnswer.isNull()
+                    ? null
+                    : mapper.writeValueAsString(detailAnswer);
+
+            return new DotnetHandlerResponse(shortJson, detailJson);
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to parse dotnet handler response. Expected JSON: {\"answer\": ObjectNode, \"detail_answer\": ObjectNode}. Body="
+                            + truncate(responseJson, 800),
+                    e
+            );
+        }
+    }
+
     private String call(String payload) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(requestTimeout)
                 .header("Content-Type", "application/json; charset=utf-8")
+                .header("Authorization", "Bearer " + jwt)
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
-
-        if (jwt != null && !jwt.isBlank()) {
-            builder.header("Authorization", "Bearer " + jwt);
-        }
 
         HttpRequest request = builder.build();
 
@@ -119,5 +156,8 @@ public final class DotnetHandlerClient {
             return "";
         }
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    private record DotnetHandlerResponse(String shortJson, String detailJson) {
     }
 }
