@@ -507,7 +507,7 @@ Authorization: Bearer <dotnetJwt>
   "answer": {
     "ALL_RESULT": "SUCCESS"
   },
-  "detailAnswer": {
+  "detail_answer": {
     "ALL_RESULT": "SUCCESS"
   }
 }

@@ -59,7 +59,10 @@ public final class AnswerBuilder {
         details.set("errors", buildErrors(originalEvent, validation));
         out.set("details", details);
 
-        return out;
+        ObjectNode wrapped = mapper.createObjectNode();
+        wrapped.set("data", out);
+
+        return wrapped;
     }
 
     private ObjectNode buildShortDetails(JsonNode originalEvent, ValidationResult validation) {
