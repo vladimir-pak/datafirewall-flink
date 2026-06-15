@@ -94,6 +94,7 @@ public class RulesReloadBroadcastProcessFunction
         String dotnetTrustStorePath = pt.get("handler.dotnet.ssl.truststore.location");
         String dotnetTrustStorePassword = firstNotBlank(pt.get("handler.dotnet.ssl.truststore.password", null), vaultSecrets.truststorePassword());
         String dotnetTrustStoreType = pt.get("handler.dotnet.ssl.truststore.type");
+        boolean verifySsl = pt.getBoolean("handler.dotnet.ssl.verify", true);
 
         this.dotnetHandlerClient = new DotnetHandlerClient(
                 dotnetUrl,
@@ -102,7 +103,8 @@ public class RulesReloadBroadcastProcessFunction
                 mapper,
                 dotnetTrustStorePath,
                 dotnetTrustStorePassword,
-                dotnetTrustStoreType
+                dotnetTrustStoreType,
+                verifySsl
         );
 
         log.info(

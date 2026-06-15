@@ -13,10 +13,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 
 public final class DotnetHandlerClient {
 
@@ -30,6 +33,8 @@ public final class DotnetHandlerClient {
     private final String trustStorePassword;
     private final String trustStoreType;
 
+    private final boolean verifySsl;
+
     public DotnetHandlerClient(
             String url,
             String jwt,
@@ -38,7 +43,7 @@ public final class DotnetHandlerClient {
             String trustStorePassword,
             String trustStoreType
     ) {
-        this(url, jwt, timeoutMs, new ObjectMapper(), trustStorePath, trustStorePassword, trustStoreType);
+        this(url, jwt, timeoutMs, new ObjectMapper(), trustStorePath, trustStorePassword, trustStoreType, true);
     }
 
     public DotnetHandlerClient(
@@ -48,7 +53,8 @@ public final class DotnetHandlerClient {
             ObjectMapper mapper,
             String trustStorePath,
             String trustStorePassword,
-            String trustStoreType
+            String trustStoreType,
+            boolean verifySsl
     ) {
         this.url = normalizeUrlOrNull(url);
         this.jwt = normalizeJwt(jwt);
@@ -62,6 +68,21 @@ public final class DotnetHandlerClient {
 
         HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3));
+
+        this.verifySsl = verifySsl;
+
+        // Логика выбора SSL-контекста
+        if (!this.verifySsl) {
+            // Отключаем проверку SSL
+            builder.sslContext(createInsecureSslContext());
+        } else if (this.trustStorePath != null) {
+            // Используем кастомный truststore
+            builder.sslContext(buildSslContext(
+                    this.trustStorePath,
+                    this.trustStorePassword,
+                    this.trustStoreType
+            ));
+        }
 
         if (this.trustStorePath != null) {
             builder.sslContext(buildSslContext(
@@ -233,6 +254,39 @@ public final class DotnetHandlerClient {
                             trustStorePath + ", trustStoreType=" + trustStoreType,
                     e
             );
+        }
+    }
+
+    /**
+     * Создает небезопасный SSL-контекст, который принимает все сертификаты.
+     * Аналог verify=False в Python requests.
+     */
+    private static SSLContext createInsecureSslContext() {
+        try {
+            TrustManager[] trustAllCerts = new TrustManager[]{
+                    new X509TrustManager() {
+                        @Override
+                        public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                            // Доверяем всем клиентским сертификатам
+                        }
+
+                        @Override
+                        public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                            // Доверяем всем серверным сертификатам
+                        }
+
+                        @Override
+                        public X509Certificate[] getAcceptedIssuers() {
+                            return new X509Certificate[0];
+                        }
+                    }
+            };
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+            return sslContext;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create insecure SSL context", e);
         }
     }
 
