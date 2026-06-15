@@ -241,19 +241,6 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
                 byte[] msgIdBytes = Arrays.copyOf(msg.messageId, msg.messageId.length);
                 String msgIdHex = toHexSafe(msgIdBytes);
 
-                boolean endsWithJsonClose = body != null && body.trim().endsWith("}");
-
-                // log.info(
-                //         "MQ READ subtask={} msgIdLen={} messageLength={} dataLength={} bytesRead={} bodyChars={} endsWithJsonClose={}",
-                //         getRuntimeContext().getIndexOfThisSubtask(),
-                //         msgIdBytes.length,
-                //         messageLength,
-                //         dataLength,
-                //         buf.length,
-                //         body.length(),
-                //         endsWithJsonClose
-                // );
-
                 if (logPayloads) {
                     log.info("MQ READ msgId={} BODY:\n{}", msgIdHex, body);
                 }

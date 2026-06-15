@@ -37,6 +37,8 @@ public final class DotnetHandlerClient {
     private final boolean verifySsl;
 
     private static final String FIELD_DFW_REQUEST_LATENCY = "dfw_request_latency";
+    private static final String FIELD_DFW_CREATED_DTTM = "dfw_created_dttm";
+    private static final String FIELD_DFW_READED_DTTM = "dfw_readed_dttm";
 
     public DotnetHandlerClient(
             String url,
@@ -107,7 +109,9 @@ public final class DotnetHandlerClient {
         DotnetHttpResponse httpResponse = call(in.payload);
         DotnetHandlerResponse response = parseResponse(
                 httpResponse.body(),
-                httpResponse.latencyMs()
+                httpResponse.latencyMs(),
+                in.createdDttm,
+                in.readedDttm
         );
         if (response.shortJson() == null || response.shortJson().isBlank()) {
             return null;
@@ -136,13 +140,19 @@ public final class DotnetHandlerClient {
         );
     }
 
-    private DotnetHandlerResponse parseResponse(String responseJson, long requestLatencyMs) {
+    private DotnetHandlerResponse parseResponse(
+            String responseJson,
+            long requestLatencyMs,
+            Long createdDttm,
+            Long readedDttm
+    ) {
         if (responseJson == null || responseJson.isBlank()) {
             return new DotnetHandlerResponse(null, null);
         }
 
         try {
             JsonNode root = mapper.readTree(responseJson);
+
             JsonNode answer = root.get("answer");
             JsonNode detailAnswer = root.get("detail_answer");
 
@@ -158,12 +168,28 @@ public final class DotnetHandlerClient {
                 answerObject.set("value", answer);
             }
 
-            answerObject.put(FIELD_DFW_REQUEST_LATENCY, requestLatencyMs);
+            ObjectNode detailAnswerObject;
+            if (detailAnswer != null && detailAnswer.isObject()) {
+                detailAnswerObject = (ObjectNode) detailAnswer.deepCopy();
+            } else if (detailAnswer != null && !detailAnswer.isNull()) {
+                detailAnswerObject = mapper.createObjectNode();
+                detailAnswerObject.set("value", detailAnswer);
+            } else {
+                detailAnswerObject = mapper.createObjectNode();
+            }
+
+            if (createdDttm != null) {
+                detailAnswerObject.put(FIELD_DFW_CREATED_DTTM, createdDttm);
+            }
+
+            if (readedDttm != null) {
+                detailAnswerObject.put(FIELD_DFW_READED_DTTM, readedDttm);
+            }
+
+            detailAnswerObject.put(FIELD_DFW_REQUEST_LATENCY, requestLatencyMs);
 
             String shortJson = mapper.writeValueAsString(answerObject);
-            String detailJson = detailAnswer == null || detailAnswer.isNull()
-                    ? null
-                    : mapper.writeValueAsString(detailAnswer);
+            String detailJson = mapper.writeValueAsString(detailAnswerObject);
 
             return new DotnetHandlerResponse(shortJson, detailJson);
         } catch (Exception e) {
