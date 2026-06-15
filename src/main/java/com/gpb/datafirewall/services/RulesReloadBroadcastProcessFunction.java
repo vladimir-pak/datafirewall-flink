@@ -3,6 +3,7 @@ package com.gpb.datafirewall.services;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.dto.ProcessingResult;
 import com.gpb.datafirewall.kafka.CacheUpdateEvent;
+import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RuntimeContext;
@@ -32,7 +33,7 @@ public class RulesReloadBroadcastProcessFunction
 
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
     private final String jwt;
-    private final String dotnetJwt;
+    private final VaultSecretsDto vaultSecrets;
 
     private transient ObjectMapper mapper;
     private transient RulesCacheRuntime cacheRuntime;
@@ -50,11 +51,11 @@ public class RulesReloadBroadcastProcessFunction
     public RulesReloadBroadcastProcessFunction(
             MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
             String jwt,
-            String dotnetJwt
+            VaultSecretsDto vaultSecrets
     ) {
         this.rulesBroadcastDesc = rulesBroadcastDesc;
         this.jwt = jwt;
-        this.dotnetJwt = dotnetJwt;
+        this.vaultSecrets = vaultSecrets;
     }
 
     @Override
@@ -89,9 +90,9 @@ public class RulesReloadBroadcastProcessFunction
 
         String dotnetUrl = pt.get("handler.dotnet.url");
         Long dotnetTimeoutMs = pt.getLong("handler.dotnet.timeout.ms", 20_000L);
-        String jwt = firstNotBlank(pt.get("handler.dotnet.jwt", null), dotnetJwt);
+        String jwt = firstNotBlank(pt.get("handler.dotnet.jwt", null), vaultSecrets.dotnetJwt());
         String dotnetTrustStorePath = pt.get("handler.dotnet.ssl.truststore.location");
-        String dotnetTrustStorePassword = pt.get("handler.dotnet.ssl.truststore.password");
+        String dotnetTrustStorePassword = firstNotBlank(pt.get("handler.dotnet.ssl.truststore.password", null), vaultSecrets.truststorePassword());
         String dotnetTrustStoreType = pt.get("handler.dotnet.ssl.truststore.type");
 
         this.dotnetHandlerClient = new DotnetHandlerClient(

@@ -366,7 +366,7 @@ public class Main {
 
         SingleOutputStreamOperator<ProcessingResult> processed = inputStream
                 .connect(bcUpdates)
-                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets.jwt(), vaultSecrets.dotnetJwt()))
+                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets.jwt(), vaultSecrets))
                 .name("process-with-rules-reload")
                 .uid("process-with-rules-reload")
                 .setParallelism(processParallelism);
