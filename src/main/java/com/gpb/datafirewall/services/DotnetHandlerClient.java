@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.time.Instant;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -39,6 +40,7 @@ public final class DotnetHandlerClient {
     private static final String FIELD_DFW_REQUEST_LATENCY = "dfw_request_latency";
     private static final String FIELD_DFW_CREATED_DTTM = "dfw_created_dttm";
     private static final String FIELD_DFW_READED_DTTM = "dfw_readed_dttm";
+    private static final String FIELD_DFW_PROCESS_DTTM = "dfw_process_dttm";
 
     public DotnetHandlerClient(
             String url,
@@ -187,6 +189,7 @@ public final class DotnetHandlerClient {
             }
 
             detailAnswerObject.put(FIELD_DFW_REQUEST_LATENCY, requestLatencyMs);
+            detailAnswerObject.put(FIELD_DFW_PROCESS_DTTM, currentTimestampMs());
 
             String shortJson = mapper.writeValueAsString(answerObject);
             String detailJson = mapper.writeValueAsString(detailAnswerObject);
@@ -332,6 +335,10 @@ public final class DotnetHandlerClient {
         } catch (Exception e) {
             throw new RuntimeException("Failed to create insecure SSL context", e);
         }
+    }
+
+    private static long currentTimestampMs() {
+        return Instant.now().toEpochMilli();
     }
 
     private record DotnetHandlerResponse(String shortJson, String detailJson) {
