@@ -37,10 +37,14 @@ public final class DotnetHandlerClient {
 
     private final boolean verifySsl;
 
-    private static final String FIELD_DFW_REQUEST_LATENCY = "dfw_request_latency";
     private static final String FIELD_DFW_CREATED_DTTM = "dfw_created_dttm";
     private static final String FIELD_DFW_READED_DTTM = "dfw_readed_dttm";
+    private static final String FIELD_DFW_DOTNET_PROCESS_START_DTTM = "dfw_dotnet_process_start_dttm";
+    private static final String FIELD_DFW_REQUEST_START_DTTM = "dfw_request_start_dttm";
+    private static final String FIELD_DFW_REQUEST_END_DTTM = "dfw_request_end_dttm";
+    private static final String FIELD_DFW_REQUEST_LATENCY = "dfw_request_latency";
     private static final String FIELD_DFW_PROCESS_DTTM = "dfw_process_dttm";
+    private static final String FIELD_DFW_FLINK_QUEUE_LATENCY = "dfw_flink_queue_latency";
 
     public DotnetHandlerClient(
             String url,
@@ -72,18 +76,14 @@ public final class DotnetHandlerClient {
         this.trustStoreType = trustStoreType == null || trustStoreType.isBlank()
                 ? "PKCS12"
                 : trustStoreType.trim();
+        this.verifySsl = verifySsl;
 
         HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3));
 
-        this.verifySsl = verifySsl;
-
-        // Логика выбора SSL-контекста
         if (!this.verifySsl) {
-            // Отключаем проверку SSL
             builder.sslContext(createInsecureSslContext());
         } else if (this.trustStorePath != null) {
-            // Используем кастомный truststore
             builder.sslContext(buildSslContext(
                     this.trustStorePath,
                     this.trustStorePassword,
@@ -108,13 +108,24 @@ public final class DotnetHandlerClient {
             throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
         }
 
+        /*
+         * Время, когда сообщение реально дошло до DotnetHandlerClient.process(...)
+         * Если dfw_readed_dttm сильно раньше этого времени — сообщение ждало внутри Flink pipeline.
+         */
+        long dotnetProcessStartDttm = currentTimestampMs();
+
         DotnetHttpResponse httpResponse = call(in.payload);
+
         DotnetHandlerResponse response = parseResponse(
                 httpResponse.body(),
-                httpResponse.latencyMs(),
                 in.createdDttm,
-                in.readedDttm
+                in.readedDttm,
+                dotnetProcessStartDttm,
+                httpResponse.requestStartDttm(),
+                httpResponse.requestEndDttm(),
+                httpResponse.latencyMs()
         );
+
         if (response.shortJson() == null || response.shortJson().isBlank()) {
             return null;
         }
@@ -144,9 +155,12 @@ public final class DotnetHandlerClient {
 
     private DotnetHandlerResponse parseResponse(
             String responseJson,
-            long requestLatencyMs,
             Long createdDttm,
-            Long readedDttm
+            Long readedDttm,
+            long dotnetProcessStartDttm,
+            long requestStartDttm,
+            long requestEndDttm,
+            long requestLatencyMs
     ) {
         if (responseJson == null || responseJson.isBlank()) {
             return new DotnetHandlerResponse(null, null);
@@ -157,39 +171,32 @@ public final class DotnetHandlerClient {
 
             JsonNode answer = root.get("answer");
             JsonNode detailAnswer = root.get("detail_answer");
+            if (detailAnswer == null || detailAnswer.isNull()) {
+                detailAnswer = root.get("detailAnswer");
+            }
 
             if (answer == null || answer.isNull()) {
                 throw new IllegalArgumentException("Dotnet handler response does not contain required field 'answer'");
             }
 
-            ObjectNode answerObject;
-            if (answer.isObject()) {
-                answerObject = (ObjectNode) answer.deepCopy();
-            } else {
-                answerObject = mapper.createObjectNode();
-                answerObject.set("value", answer);
-            }
+            ObjectNode answerObject = toObjectNode(answer);
 
             ObjectNode detailAnswerObject;
-            if (detailAnswer != null && detailAnswer.isObject()) {
-                detailAnswerObject = (ObjectNode) detailAnswer.deepCopy();
-            } else if (detailAnswer != null && !detailAnswer.isNull()) {
+            if (detailAnswer == null || detailAnswer.isNull()) {
                 detailAnswerObject = mapper.createObjectNode();
-                detailAnswerObject.set("value", detailAnswer);
             } else {
-                detailAnswerObject = mapper.createObjectNode();
+                detailAnswerObject = toObjectNode(detailAnswer);
             }
 
-            if (createdDttm != null) {
-                detailAnswerObject.put(FIELD_DFW_CREATED_DTTM, createdDttm);
-            }
-
-            if (readedDttm != null) {
-                detailAnswerObject.put(FIELD_DFW_READED_DTTM, readedDttm);
-            }
-
-            detailAnswerObject.put(FIELD_DFW_REQUEST_LATENCY, requestLatencyMs);
-            detailAnswerObject.put(FIELD_DFW_PROCESS_DTTM, currentTimestampMs());
+            enrichDetailAnswerWithTimings(
+                    detailAnswerObject,
+                    createdDttm,
+                    readedDttm,
+                    dotnetProcessStartDttm,
+                    requestStartDttm,
+                    requestEndDttm,
+                    requestLatencyMs
+            );
 
             String shortJson = mapper.writeValueAsString(answerObject);
             String detailJson = mapper.writeValueAsString(detailAnswerObject);
@@ -204,16 +211,63 @@ public final class DotnetHandlerClient {
         }
     }
 
+    private void enrichDetailAnswerWithTimings(
+            ObjectNode detailAnswerObject,
+            Long createdDttm,
+            Long readedDttm,
+            long dotnetProcessStartDttm,
+            long requestStartDttm,
+            long requestEndDttm,
+            long requestLatencyMs
+    ) {
+        if (createdDttm != null) {
+            detailAnswerObject.put(FIELD_DFW_CREATED_DTTM, createdDttm);
+        }
+
+        if (readedDttm != null) {
+            detailAnswerObject.put(FIELD_DFW_READED_DTTM, readedDttm);
+        }
+
+        detailAnswerObject.put(FIELD_DFW_DOTNET_PROCESS_START_DTTM, dotnetProcessStartDttm);
+        detailAnswerObject.put(FIELD_DFW_REQUEST_START_DTTM, requestStartDttm);
+        detailAnswerObject.put(FIELD_DFW_REQUEST_END_DTTM, requestEndDttm);
+        detailAnswerObject.put(FIELD_DFW_REQUEST_LATENCY, requestLatencyMs);
+
+        /*
+         * Максимально близкое к завершению обработки в DotnetHandlerClient.
+         * После этого остается только сериализация detailJson/shortJson и создание ProcessingResult.
+         */
+        long processDttm = currentTimestampMs();
+        detailAnswerObject.put(FIELD_DFW_PROCESS_DTTM, processDttm);
+
+        if (readedDttm != null) {
+            detailAnswerObject.put(
+                    FIELD_DFW_FLINK_QUEUE_LATENCY,
+                    dotnetProcessStartDttm - readedDttm
+            );
+        }
+    }
+
+    private ObjectNode toObjectNode(JsonNode node) {
+        if (node != null && node.isObject()) {
+            return (ObjectNode) node.deepCopy();
+        }
+
+        ObjectNode objectNode = mapper.createObjectNode();
+        objectNode.set("value", node);
+        return objectNode;
+    }
+
     private DotnetHttpResponse call(String payload) {
-        HttpRequest.Builder builder = HttpRequest.newBuilder()
+        HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(requestTimeout)
                 .header("Content-Type", "application/json; charset=utf-8")
                 .header("Authorization", "Bearer " + jwt)
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build();
 
-        HttpRequest request = builder.build();
-
+        long requestStartDttm = currentTimestampMs();
         long startedAtNs = System.nanoTime();
 
         try {
@@ -222,6 +276,7 @@ public final class DotnetHandlerClient {
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
             );
 
+            long requestEndDttm = currentTimestampMs();
             long latencyMs = elapsedMs(startedAtNs);
 
             if (response.statusCode() / 100 != 2) {
@@ -233,11 +288,21 @@ public final class DotnetHandlerClient {
                 );
             }
 
-            return new DotnetHttpResponse(response.body(), latencyMs);
+            return new DotnetHttpResponse(
+                    response.body(),
+                    latencyMs,
+                    requestStartDttm,
+                    requestEndDttm
+            );
         } catch (Exception e) {
+            long requestEndDttm = currentTimestampMs();
             long latencyMs = elapsedMs(startedAtNs);
+
             throw new RuntimeException(
-                    "Failed to call dotnet handler API: " + url + ", latencyMs=" + latencyMs,
+                    "Failed to call dotnet handler API: " + url +
+                            ", requestStartDttm=" + requestStartDttm +
+                            ", requestEndDttm=" + requestEndDttm +
+                            ", latencyMs=" + latencyMs,
                     e
             );
         }
@@ -254,10 +319,12 @@ public final class DotnetHandlerClient {
         if (jwt == null || jwt.isBlank()) {
             return null;
         }
+
         String value = jwt.trim();
         if (value.regionMatches(true, 0, "Bearer ", 0, "Bearer ".length())) {
             return value.substring("Bearer ".length()).trim();
         }
+
         return value;
     }
 
@@ -306,7 +373,8 @@ public final class DotnetHandlerClient {
     }
 
     /**
-     * Создает небезопасный SSL-контекст, который принимает все сертификаты.
+     * Небезопасный SSLContext: доверяет любому сертификату.
+     * Использовать только для dev/test.
      */
     private static SSLContext createInsecureSslContext() {
         try {
@@ -314,12 +382,12 @@ public final class DotnetHandlerClient {
                     new X509TrustManager() {
                         @Override
                         public void checkClientTrusted(X509Certificate[] chain, String authType) {
-                            // Доверяем всем клиентским сертификатам
+                            // trust all
                         }
 
                         @Override
                         public void checkServerTrusted(X509Certificate[] chain, String authType) {
-                            // Доверяем всем серверным сертификатам
+                            // trust all
                         }
 
                         @Override
@@ -341,13 +409,21 @@ public final class DotnetHandlerClient {
         return Instant.now().toEpochMilli();
     }
 
-    private record DotnetHandlerResponse(String shortJson, String detailJson) {
-    }
-
     private static long elapsedMs(long startedAtNs) {
         return (System.nanoTime() - startedAtNs) / 1_000_000L;
     }
 
-    private record DotnetHttpResponse(String body, long latencyMs) {
+    private record DotnetHandlerResponse(
+            String shortJson,
+            String detailJson
+    ) {
+    }
+
+    private record DotnetHttpResponse(
+            String body,
+            long latencyMs,
+            long requestStartDttm,
+            long requestEndDttm
+    ) {
     }
 }
