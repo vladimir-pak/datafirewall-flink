@@ -2,6 +2,7 @@ package com.gpb.datafirewall.services;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.dto.ProcessingResult;
 
 import java.io.InputStream;
@@ -34,6 +35,8 @@ public final class DotnetHandlerClient {
     private final String trustStoreType;
 
     private final boolean verifySsl;
+
+    private static final String FIELD_DFW_REQUEST_LATENCY = "dfw_request_latency";
 
     public DotnetHandlerClient(
             String url,
@@ -84,14 +87,6 @@ public final class DotnetHandlerClient {
             ));
         }
 
-        if (this.trustStorePath != null) {
-            builder.sslContext(buildSslContext(
-                    this.trustStorePath,
-                    this.trustStorePassword,
-                    this.trustStoreType
-            ));
-        }
-
         this.http = builder.build();
     }
 
@@ -109,7 +104,11 @@ public final class DotnetHandlerClient {
             throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
         }
 
-        DotnetHandlerResponse response = parseResponse(call(in.payload));
+        DotnetHttpResponse httpResponse = call(in.payload);
+        DotnetHandlerResponse response = parseResponse(
+                httpResponse.body(),
+                httpResponse.latencyMs()
+        );
         if (response.shortJson() == null || response.shortJson().isBlank()) {
             return null;
         }
@@ -137,7 +136,7 @@ public final class DotnetHandlerClient {
         );
     }
 
-    private DotnetHandlerResponse parseResponse(String responseJson) {
+    private DotnetHandlerResponse parseResponse(String responseJson, long requestLatencyMs) {
         if (responseJson == null || responseJson.isBlank()) {
             return new DotnetHandlerResponse(null, null);
         }
@@ -151,7 +150,17 @@ public final class DotnetHandlerClient {
                 throw new IllegalArgumentException("Dotnet handler response does not contain required field 'answer'");
             }
 
-            String shortJson = mapper.writeValueAsString(answer);
+            ObjectNode answerObject;
+            if (answer.isObject()) {
+                answerObject = (ObjectNode) answer.deepCopy();
+            } else {
+                answerObject = mapper.createObjectNode();
+                answerObject.set("value", answer);
+            }
+
+            answerObject.put(FIELD_DFW_REQUEST_LATENCY, requestLatencyMs);
+
+            String shortJson = mapper.writeValueAsString(answerObject);
             String detailJson = detailAnswer == null || detailAnswer.isNull()
                     ? null
                     : mapper.writeValueAsString(detailAnswer);
@@ -166,7 +175,7 @@ public final class DotnetHandlerClient {
         }
     }
 
-    private String call(String payload) {
+    private DotnetHttpResponse call(String payload) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(requestTimeout)
@@ -176,22 +185,32 @@ public final class DotnetHandlerClient {
 
         HttpRequest request = builder.build();
 
+        long startedAtNs = System.nanoTime();
+
         try {
             HttpResponse<String> response = http.send(
                     request,
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
             );
 
+            long latencyMs = elapsedMs(startedAtNs);
+
             if (response.statusCode() / 100 != 2) {
                 throw new RuntimeException(
                         "Dotnet handler HTTP " + response.statusCode() +
-                                " for " + url + ": " + truncate(response.body(), 800)
+                                " for " + url +
+                                ", latencyMs=" + latencyMs +
+                                ": " + truncate(response.body(), 800)
                 );
             }
 
-            return response.body();
+            return new DotnetHttpResponse(response.body(), latencyMs);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to call dotnet handler API: " + url, e);
+            long latencyMs = elapsedMs(startedAtNs);
+            throw new RuntimeException(
+                    "Failed to call dotnet handler API: " + url + ", latencyMs=" + latencyMs,
+                    e
+            );
         }
     }
 
@@ -259,7 +278,6 @@ public final class DotnetHandlerClient {
 
     /**
      * Создает небезопасный SSL-контекст, который принимает все сертификаты.
-     * Аналог verify=False в Python requests.
      */
     private static SSLContext createInsecureSslContext() {
         try {
@@ -291,5 +309,12 @@ public final class DotnetHandlerClient {
     }
 
     private record DotnetHandlerResponse(String shortJson, String detailJson) {
+    }
+
+    private static long elapsedMs(long startedAtNs) {
+        return (System.nanoTime() - startedAtNs) / 1_000_000L;
+    }
+
+    private record DotnetHttpResponse(String body, long latencyMs) {
     }
 }
