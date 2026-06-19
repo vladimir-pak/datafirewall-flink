@@ -20,6 +20,12 @@ public final class MessageReply implements Serializable {
     public String jmsCorrelationId;
 
     /**
+     * Kafka correlationId.
+     * Для ответа в Kafka сюда нужно положить kafkaMessageId входящего сообщения.
+     */
+    public String kafkaCorrelationId;
+
+    /**
      * Тело ответа.
      */
     public String payload;
@@ -27,18 +33,23 @@ public final class MessageReply implements Serializable {
     public MessageReply() {
     }
 
-    private MessageReply(byte[] mqCorrelationId, String jmsCorrelationId, String payload) {
+    private MessageReply(byte[] mqCorrelationId, String jmsCorrelationId, String kafkaCorrelationId, String payload) {
         this.mqCorrelationId = mqCorrelationId;
         this.jmsCorrelationId = jmsCorrelationId;
+        this.kafkaCorrelationId = kafkaCorrelationId;
         this.payload = payload;
     }
 
     public static MessageReply forMq(byte[] mqCorrelationId, String payload) {
-        return new MessageReply(normalizeMqId(mqCorrelationId), null, payload);
+        return new MessageReply(normalizeMqId(mqCorrelationId), null, null, payload);
     }
 
     public static MessageReply forJms(String jmsCorrelationId, String payload) {
-        return new MessageReply(null, jmsCorrelationId, payload);
+        return new MessageReply(null, jmsCorrelationId, null, payload);
+    }
+
+    public static MessageReply forKafka(String kafkaCorrelationId, String payload) {
+        return new MessageReply(null, null, kafkaCorrelationId, payload);
     }
 
     public boolean isMq() {
@@ -49,12 +60,19 @@ public final class MessageReply implements Serializable {
         return jmsCorrelationId != null && !jmsCorrelationId.isBlank();
     }
 
+    public boolean isKafka() {
+        return kafkaCorrelationId != null && !kafkaCorrelationId.isBlank();
+    }
+
     public String correlationIdForLog() {
         if (isMq()) {
             return mqIdToHex(mqCorrelationId);
         }
         if (isJms()) {
             return jmsCorrelationId;
+        }
+        if (isKafka()) {
+            return kafkaCorrelationId;
         }
         return "unknown";
     }
@@ -90,6 +108,7 @@ public final class MessageReply implements Serializable {
         return "MessageReply{" +
                 "mqCorrelationId=" + (mqCorrelationId == null ? "null" : ("byte[" + mqCorrelationId.length + "]")) +
                 ", jmsCorrelationId='" + jmsCorrelationId + '\'' +
+                ", kafkaCorrelationId='" + kafkaCorrelationId + '\'' +
                 ", payloadLen=" + (payload == null ? 0 : payload.length()) +
                 '}';
     }

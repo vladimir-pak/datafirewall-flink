@@ -8,6 +8,7 @@ public class ProcessingResult implements Serializable {
 
     private byte[] mqCorrelationId;
     private String jmsCorrelationId;
+    private String kafkaCorrelationId;
     private String eventId;
 
     private String shortJson;
@@ -79,6 +80,14 @@ public class ProcessingResult implements Serializable {
 
     public void setJmsCorrelationId(String jmsCorrelationId) {
         this.jmsCorrelationId = jmsCorrelationId;
+    }
+
+    public String getKafkaCorrelationId() {
+        return kafkaCorrelationId;
+    }
+
+    public void setKafkaCorrelationId(String kafkaCorrelationId) {
+        this.kafkaCorrelationId = kafkaCorrelationId;
     }
 
     public String getEventId() {

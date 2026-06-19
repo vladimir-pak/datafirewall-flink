@@ -20,6 +20,12 @@ public final class MessageRecord implements Serializable {
     public String jmsMessageId;
 
     /**
+     * Kafka messageId.
+     * Формат: kafka-{topic}-{partition}-{offset}
+     */
+    public String kafkaMessageId;
+
+    /**
      * Тело сообщения.
      */
     public String payload;
@@ -31,14 +37,16 @@ public final class MessageRecord implements Serializable {
     }
 
     private MessageRecord(
-        byte[] mqMessageId, 
-        String jmsMessageId, 
-        String payload, 
-        Long createdDttm,
-        Long readedDttm
+            byte[] mqMessageId,
+            String jmsMessageId,
+            String kafkaMessageId,
+            String payload,
+            Long createdDttm,
+            Long readedDttm
     ) {
         this.mqMessageId = mqMessageId;
         this.jmsMessageId = jmsMessageId;
+        this.kafkaMessageId = kafkaMessageId;
         this.payload = payload;
         this.createdDttm = createdDttm;
         this.readedDttm = readedDttm;
@@ -50,7 +58,7 @@ public final class MessageRecord implements Serializable {
         Long createdDttm,
         Long readedDttm
     ) {
-        return new MessageRecord(normalizeMqId(mqMessageId), null, payload, createdDttm, readedDttm);
+        return new MessageRecord(normalizeMqId(mqMessageId), null, null, payload, createdDttm, readedDttm);
     }
 
     public static MessageRecord fromJms(
@@ -59,7 +67,16 @@ public final class MessageRecord implements Serializable {
         Long createdDttm,
         Long readedDttm
     ) {
-        return new MessageRecord(null, jmsMessageId, payload, createdDttm, readedDttm);
+        return new MessageRecord(null, jmsMessageId, null, payload, createdDttm, readedDttm);
+    }
+
+    public static MessageRecord fromKafka(
+            String kafkaMessageId,
+            String payload,
+            Long createdDttm,
+            Long readedDttm
+    ) {
+        return new MessageRecord(null, null, kafkaMessageId, payload, createdDttm, readedDttm);
     }
 
     public boolean isMq() {
@@ -70,12 +87,19 @@ public final class MessageRecord implements Serializable {
         return jmsMessageId != null && !jmsMessageId.isBlank();
     }
 
+    public boolean isKafka() {
+        return kafkaMessageId != null && !kafkaMessageId.isBlank();
+    }
+
     public String eventId() {
         if (isMq()) {
             return mqIdToHex(mqMessageId);
         }
         if (isJms()) {
             return jmsMessageId;
+        }
+        if (isKafka()) {
+            return kafkaMessageId;
         }
         return "unknown";
     }
@@ -111,6 +135,7 @@ public final class MessageRecord implements Serializable {
         return "MessageRecord{" +
                 "mqMessageId=" + (mqMessageId == null ? "null" : ("byte[" + mqMessageId.length + "]")) +
                 ", jmsMessageId='" + jmsMessageId + '\'' +
+                ", kafkaMessageId='" + kafkaMessageId + '\'' +
                 ", payloadLen=" + (payload == null ? 0 : payload.length()) +
                 '}';
     }

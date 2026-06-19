@@ -47,6 +47,9 @@ import com.gpb.datafirewall.services.RulesReloadBroadcastProcessFunction;
 import com.gpb.datafirewall.vault.VaultClient;
 import com.gpb.datafirewall.vault.VaultClientConfig;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
+import com.gpb.datafirewall.kafka.KafkaConnectionUrlBuilder;
+import com.gpb.datafirewall.kafka.KafkaResponseSink;
+import com.gpb.datafirewall.kafka.KafkaRequestSource;
 
 import java.time.Instant;
 import java.nio.file.Path;
@@ -75,6 +78,11 @@ public class Main {
     private static final String DEFAULT_ARTEMIS_IN_QUEUE = "IN.Q";
     private static final String DEFAULT_ARTEMIS_OUT_QUEUE = "OUT.Q";
     private static final long DEFAULT_ARTEMIS_RECEIVE_TIMEOUT_MS = 1000L;
+
+    private static final String DEFAULT_KAFKA_REQUEST_TOPIC = "datafirewall.flink-processing";
+    private static final String DEFAULT_KAFKA_RESPONSE_TOPIC = "datafirewall.responses";
+    private static final String DEFAULT_KAFKA_REQUEST_GROUP = "dfw-requests-group";
+    private static final long DEFAULT_KAFKA_POLL_TIMEOUT_MS = 1000L;
 
     @SuppressWarnings("deprecation")
     public static void main(String[] args) throws Exception {
@@ -195,6 +203,30 @@ public class Main {
                 artemisCipherSuites
         );
         log.info("Artemis URL: {}", artemisBrokerUrl);
+
+        String kafkaRequestBootstrap = pt.get("kafka.request.bootstrap", kafkaBootstrap);
+        String kafkaRequestTopic = pt.get("kafka.request.topic", DEFAULT_KAFKA_REQUEST_TOPIC);
+        String kafkaRequestGroup = pt.get("kafka.request.group", DEFAULT_KAFKA_REQUEST_GROUP);
+        long kafkaPollTimeoutMs = pt.getLong("kafka.poll.timeout.ms", DEFAULT_KAFKA_POLL_TIMEOUT_MS);
+
+        String kafkaResponseBootstrap = pt.get("kafka.response.bootstrap", kafkaBootstrap);
+        String kafkaResponseTopic = pt.get("kafka.response.topic", DEFAULT_KAFKA_RESPONSE_TOPIC);
+
+        boolean kafkaRequestTlsEnabled = pt.getBoolean("kafka.request.tls.enabled", false);
+        String kafkaRequestSecurityProtocol = pt.get("kafka.request.security.protocol", null);
+        String kafkaRequestSaslMechanism = pt.get("kafka.request.sasl.mechanism", null);
+        String kafkaRequestTrustStore = pt.get("kafka.request.ssl.truststore.location", null);
+        String kafkaRequestTrustStorePassword = vaultSecrets.truststorePassword();
+        String kafkaRequestKeyStore = pt.get("kafka.request.ssl.keystore.location", null);
+        String kafkaRequestKeyStorePassword = vaultSecrets.keystorePassword();
+
+        boolean kafkaResponseTlsEnabled = pt.getBoolean("kafka.response.tls.enabled", false);
+        String kafkaResponseSecurityProtocol = pt.get("kafka.response.security.protocol", null);
+        String kafkaResponseSaslMechanism = pt.get("kafka.response.sasl.mechanism", null);
+        String kafkaResponseTrustStore = pt.get("kafka.response.ssl.truststore.location", null);
+        String kafkaResponseTrustStorePassword = vaultSecrets.truststorePassword();
+        String kafkaResponseKeyStore = pt.get("kafka.response.ssl.keystore.location", null);
+        String kafkaResponseKeyStorePassword = vaultSecrets.keystorePassword();
 
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
         String rulesLoader = pt.get("rules.loader", "http");
@@ -317,8 +349,42 @@ public class Main {
                         .setParallelism(sourceParallelism);
             }
 
+            case "kafka" -> {
+                log.info("[MAIN] INPUT -> KAFKA");
+
+                Properties kafkaRequestConsumerProps = KafkaConnectionUrlBuilder.buildConsumerConfig(
+                        kafkaRequestBootstrap,
+                        kafkaRequestGroup,
+                        kafkaRequestTlsEnabled,
+                        kafkaRequestSecurityProtocol,
+                        kafkaRequestSaslMechanism,
+                        kafkaRequestTrustStore,
+                        kafkaRequestTrustStorePassword,
+                        kafkaRequestKeyStore,
+                        kafkaRequestKeyStorePassword,
+                        vaultSecrets.kafkaUser(),
+                        vaultSecrets.kafkaPassword()
+                );
+
+                inputStream = env.addSource(
+                                new KafkaRequestSource(
+                                        kafkaRequestBootstrap,
+                                        kafkaRequestTopic,
+                                        kafkaRequestGroup,
+                                        kafkaRequestConsumerProps,
+                                        kafkaPollTimeoutMs,
+                                        logPayloads,
+                                        pt.getInt("log.preview.len", 600),
+                                        cefAuditConfig
+                                ),
+                                "kafka-request-source"
+                        )
+                        .name("kafka-request-source")
+                        .uid("kafka-request-source")
+                        .setParallelism(sourceParallelism);
+            }
             default -> throw new IllegalArgumentException(
-                    "Unsupported messaging.backend=" + backend + ". Supported: mq|artemis"
+                    "Unsupported messaging.backend=" + backend + ". Supported: mq|artemis|kafka"
             );
         }
 
@@ -534,6 +600,53 @@ public class Main {
                     
             log.info("[MAIN] audit kafka sink enabled: bootstrap={}, topic={}",
                 auditKafkaBootstrap, auditKafkaTopic);
+        } else if ("kafka".equals(backend)) {
+            DataStream<MessageReply> shortReplies = processed
+                    .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
+                        @Override
+                        public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
+                            if (result == null) {
+                                return;
+                            }
+
+                            String shortJson = result.getShortJson();
+                            if (shortJson == null || shortJson.isBlank()) {
+                                return;
+                            }
+
+                            out.collect(MessageReply.forKafka(result.getKafkaCorrelationId(), shortJson));
+                        }
+                    })
+                    .returns(Types.POJO(MessageReply.class))
+                    .name("build-short-reply")
+                    .uid("build-short-reply");
+
+            Properties kafkaResponseProducerProps = KafkaConnectionUrlBuilder.buildProducerConfig(
+                    kafkaResponseBootstrap,
+                    kafkaResponseTlsEnabled,
+                    kafkaResponseSecurityProtocol,
+                    kafkaResponseSaslMechanism,
+                    kafkaResponseTrustStore,
+                    kafkaResponseTrustStorePassword,
+                    kafkaResponseKeyStore,
+                    kafkaResponseKeyStorePassword,
+                    vaultSecrets.kafkaUser(),
+                    vaultSecrets.kafkaPassword()
+            );
+
+            shortReplies
+                    .addSink(new KafkaResponseSink(
+                            kafkaResponseBootstrap,
+                            kafkaResponseTopic,
+                            kafkaResponseProducerProps,
+                            cefAuditConfig
+                    ))
+                    .name("kafka-response-sink")
+                    .uid("kafka-response-sink")
+                    .setParallelism(sinkParallelism);
+
+            log.info("[MAIN] Kafka response sink enabled: bootstrap={}, topic={}",
+                    kafkaResponseBootstrap, kafkaResponseTopic);
         } else {
             log.info("[MAIN] audit kafka sink is disabled.");
         }
