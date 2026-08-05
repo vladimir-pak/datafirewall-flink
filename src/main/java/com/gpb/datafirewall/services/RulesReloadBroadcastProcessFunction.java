@@ -27,8 +27,19 @@ public class RulesReloadBroadcastProcessFunction
 
     private static final String CACHE_HANDLER = "handler";
 
-    public static final OutputTag<String> DOTNET_SHADOW_REQUEST_TAG =
-            new OutputTag<String>("dotnet-shadow-request") {
+    /**
+     * Отдельный выходной поток только для результата внутренней Flink-обработки.
+     *
+     * handler=flink:
+     * - основной output: Flink result -> MQ/Artemis;
+     * - side output: тот же Flink result -> Kafka audit.
+     *
+     * handler=dotnet:
+     * - основной output: внешний result -> MQ/Artemis;
+     * - side output: внутренний Flink result -> Kafka audit.
+     */
+    public static final OutputTag<ProcessingResult> FLINK_AUDIT_RESULT_TAG =
+            new OutputTag<ProcessingResult>("flink-audit-result") {
             };
 
     private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
@@ -89,16 +100,34 @@ public class RulesReloadBroadcastProcessFunction
         );
 
         String dotnetUrl = pt.get("handler.dotnet.url");
-        Long dotnetTimeoutMs = pt.getLong("handler.dotnet.timeout.ms", 20_000L);
-        String jwt = firstNotBlank(pt.get("handler.dotnet.jwt", null), vaultSecrets.dotnetJwt());
-        String dotnetTrustStorePath = pt.get("handler.dotnet.ssl.truststore.location");
-        String dotnetTrustStorePassword = firstNotBlank(pt.get("handler.dotnet.ssl.truststore.password", null), vaultSecrets.truststorePassword());
-        String dotnetTrustStoreType = pt.get("handler.dotnet.ssl.truststore.type");
-        boolean verifySsl = pt.getBoolean("handler.dotnet.ssl.verify", true);
+        long dotnetTimeoutMs = pt.getLong("handler.dotnet.timeout.ms", 20_000L);
+
+        String vaultDotnetJwt = vaultSecrets == null ? null : vaultSecrets.dotnetJwt();
+        String vaultTruststorePassword =
+                vaultSecrets == null ? null : vaultSecrets.truststorePassword();
+
+        String dotnetJwt = firstNotBlank(
+                pt.get("handler.dotnet.jwt", null),
+                vaultDotnetJwt
+        );
+
+        String dotnetTrustStorePath =
+                pt.get("handler.dotnet.ssl.truststore.location");
+
+        String dotnetTrustStorePassword = firstNotBlank(
+                pt.get("handler.dotnet.ssl.truststore.password", null),
+                vaultTruststorePassword
+        );
+
+        String dotnetTrustStoreType =
+                pt.get("handler.dotnet.ssl.truststore.type");
+
+        boolean verifySsl =
+                pt.getBoolean("handler.dotnet.ssl.verify", true);
 
         this.dotnetHandlerClient = new DotnetHandlerClient(
                 dotnetUrl,
-                jwt,
+                dotnetJwt,
                 dotnetTimeoutMs,
                 mapper,
                 dotnetTrustStorePath,
@@ -108,7 +137,9 @@ public class RulesReloadBroadcastProcessFunction
         );
 
         log.info(
-                "[INIT] subtask={} handler.default={} rulesLoaded={} dataset2controlAreaLoaded={} controlAreaRulesLoaded={} errorMessagesLoaded={} datasetExclusionLoaded={} filterFlagLoaded={}",
+                "[INIT] subtask={} handler.default={} rulesLoaded={} dataset2controlAreaLoaded={} "
+                        + "controlAreaRulesLoaded={} errorMessagesLoaded={} datasetExclusionLoaded={} "
+                        + "filterFlagLoaded={}",
                 rc.getIndexOfThisSubtask(),
                 defaultHandler.value(),
                 cacheRuntime.rulesSize(),
@@ -121,46 +152,127 @@ public class RulesReloadBroadcastProcessFunction
     }
 
     @Override
-    public void processElement(MessageRecord in, ReadOnlyContext ctx, Collector<ProcessingResult> out) {
+    public void processElement(
+            MessageRecord in,
+            ReadOnlyContext ctx,
+            Collector<ProcessingResult> out
+    ) {
         DynamicHandler handler = handlerRoutingState.currentHandler();
 
-        try {
-            if (handler == DynamicHandler.DOTNET) {
-                ProcessingResult result = dotnetHandlerClient.process(in);
-                if (result != null) {
-                    out.collect(result);
-                }
-                emitDotnetShadowRequest(in, ctx);
-                return;
-            }
-
-            ProcessingResult result = messageProcessor.process(in);
-            if (result != null) {
-                out.collect(result);
-            }
-        } catch (Exception e) {
-            String eventId = in == null ? "unknown" : in.eventId();
-            log.error("[PIPE][eventId={}] failed to process message. handler={}", eventId, handler.value(), e);
-        }
-    }
-
-    private void emitDotnetShadowRequest(MessageRecord in, ReadOnlyContext ctx) {
-        if (in == null || in.payload == null || in.payload.isBlank()) {
+        if (handler == DynamicHandler.DOTNET) {
+            processWithDotnetHandler(in, ctx, out);
             return;
         }
 
-        ctx.output(DOTNET_SHADOW_REQUEST_TAG, in.payload);
+        processWithFlinkHandler(in, ctx, out);
+    }
+
+    /**
+     * handler=flink:
+     * - внешний сервис не вызывается;
+     * - внутренний Flink-результат идет обратно в MQ/Artemis;
+     * - этот же результат идет в Kafka audit через side output.
+     */
+    private void processWithFlinkHandler(
+            MessageRecord in,
+            ReadOnlyContext ctx,
+            Collector<ProcessingResult> out
+    ) {
+        String eventId = in == null ? "unknown" : in.eventId();
+
+        try {
+            ProcessingResult flinkResult = messageProcessor.process(in);
+
+            if (flinkResult == null) {
+                log.warn(
+                        "[PIPE][eventId={}] internal Flink handler returned null",
+                        eventId
+                );
+                return;
+            }
+
+            // Основной выход: ответ обратно в MQ/Artemis.
+            out.collect(flinkResult);
+
+            // Отдельный выход: внутренний результат в Kafka audit.
+            ctx.output(FLINK_AUDIT_RESULT_TAG, flinkResult);
+
+        } catch (Exception e) {
+            log.error(
+                    "[PIPE][eventId={}] failed to process message with Flink handler",
+                    eventId,
+                    e
+            );
+        }
+    }
+
+    /**
+     * handler=dotnet:
+     * - внешний результат идет обратно в MQ/Artemis;
+     * - внутренний Flink handler тоже выполняется;
+     * - внутренний Flink-результат идет только в Kafka audit.
+     */
+    private void processWithDotnetHandler(
+            MessageRecord in,
+            ReadOnlyContext ctx,
+            Collector<ProcessingResult> out
+    ) {
+        String eventId = in == null ? "unknown" : in.eventId();
+
+        // Внешний результат является реальным ответом вызывающей системе.
+        try {
+            ProcessingResult externalResult = dotnetHandlerClient.process(in);
+
+            if (externalResult != null) {
+                out.collect(externalResult);
+            } else {
+                log.warn(
+                        "[PIPE][eventId={}] external handler returned null",
+                        eventId
+                );
+            }
+
+        } catch (Exception e) {
+            log.error(
+                    "[PIPE][eventId={}] external handler processing failed",
+                    eventId,
+                    e
+            );
+        }
+
+        // Внутренняя Flink-обработка выполняется независимо от внешнего handler.
+        try {
+            ProcessingResult flinkResult = messageProcessor.process(in);
+
+            if (flinkResult != null) {
+                ctx.output(FLINK_AUDIT_RESULT_TAG, flinkResult);
+            } else {
+                log.warn(
+                        "[PIPE][eventId={}] internal Flink handler returned null",
+                        eventId
+                );
+            }
+
+        } catch (Exception e) {
+            log.error(
+                    "[PIPE][eventId={}] internal Flink processing failed in dotnet mode",
+                    eventId,
+                    e
+            );
+        }
     }
 
     private static String firstNotBlank(String... values) {
         if (values == null) {
             return null;
         }
+
         for (String value : values) {
             if (value != null && !value.isBlank()) {
                 return value.trim();
             }
         }
+
         return null;
     }
 
@@ -180,54 +292,81 @@ public class RulesReloadBroadcastProcessFunction
         CacheUpdateEvent current = st.get(ev.cacheName);
 
         if (CACHE_HANDLER.equalsIgnoreCase(ev.cacheName)) {
-            if (current != null && current.handler != null && current.handler.equalsIgnoreCase(ev.handler)) {
-                log.info("[HANDLER][KAFKA] ignore handler event hadnler={} current={}",
-                        ev.handler, current.handler);
-                return;
-            }
-
             DynamicHandler newHandler = DynamicHandler.from(ev.handler, null);
+
             if (newHandler == null) {
-                log.warn("[HANDLER][KAFKA] ignore handler event with invalid handler='{}'",
-                        ev.handler);
+                log.warn(
+                        "[HANDLER][KAFKA] ignore handler event with invalid handler='{}'",
+                        ev.handler
+                );
                 return;
             }
 
             DynamicHandler currentHandler = handlerRoutingState.currentHandler();
 
+            if (currentHandler == newHandler) {
+                log.info(
+                        "[HANDLER][KAFKA] ignore handler event handler={} current={}",
+                        newHandler.value(),
+                        currentHandler.value()
+                );
+                return;
+            }
+
             handlerRoutingState.update(newHandler);
             st.put(ev.cacheName, ev);
 
-            log.info("[HANDLER][KAFKA] handler switched from {} to {} by event",
-                    currentHandler.value(), newHandler.value());
+            log.info(
+                    "[HANDLER][KAFKA] handler switched from {} to {} by event",
+                    currentHandler.value(),
+                    newHandler.value()
+            );
             return;
         }
 
         if (current != null && ev.version <= current.version) {
-            log.info("[CACHE][KAFKA] ignore cacheName={} version={} (current={})",
-                    ev.cacheName, ev.version, current.version);
+            log.info(
+                    "[CACHE][KAFKA] ignore cacheName={} version={} (current={})",
+                    ev.cacheName,
+                    ev.version,
+                    current.version
+            );
             return;
         }
 
-        log.info("[CACHE][KAFKA] new event cacheName={} version={} (prev={}) -> reloading...",
+        log.info(
+                "[CACHE][KAFKA] new event cacheName={} version={} (prev={}) -> reloading...",
                 ev.cacheName,
                 ev.version,
-                current != null ? current.version : null);
+                current != null ? current.version : null
+        );
 
         long t0 = System.nanoTime();
+
         try {
             cacheRuntime.reload(ev);
 
             long ms = (System.nanoTime() - t0) / 1_000_000;
             st.put(ev.cacheName, ev);
 
-            log.info("[CACHE][KAFKA] reload OK cacheName={} version={} in {}ms",
-                    ev.cacheName, ev.version, ms);
+            log.info(
+                    "[CACHE][KAFKA] reload OK cacheName={} version={} in {}ms",
+                    ev.cacheName,
+                    ev.version,
+                    ms
+            );
 
         } catch (Exception ex) {
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            log.error("[CACHE][KAFKA] reload FAILED cacheName={} version={} after {}ms (keep old snapshot)",
-                    ev.cacheName, ev.version, ms, ex);
+
+            log.error(
+                    "[CACHE][KAFKA] reload FAILED cacheName={} version={} "
+                            + "after {}ms (keep old snapshot)",
+                    ev.cacheName,
+                    ev.version,
+                    ms,
+                    ex
+            );
         }
     }
 
