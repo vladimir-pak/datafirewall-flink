@@ -86,6 +86,7 @@ public class RulesReloadBroadcastProcessFunction
                 pt.get("handler", pt.get("handler.default", "flink")),
                 DynamicHandler.FLINK
         );
+
         this.handlerRoutingState = new HandlerRoutingState(defaultHandler);
 
         this.mapper = new ObjectMapper();
@@ -100,9 +101,14 @@ public class RulesReloadBroadcastProcessFunction
         );
 
         String dotnetUrl = pt.get("handler.dotnet.url");
-        long dotnetTimeoutMs = pt.getLong("handler.dotnet.timeout.ms", 20_000L);
+        long dotnetTimeoutMs = pt.getLong(
+                "handler.dotnet.timeout.ms",
+                20_000L
+        );
 
-        String vaultDotnetJwt = vaultSecrets == null ? null : vaultSecrets.dotnetJwt();
+        String vaultDotnetJwt =
+                vaultSecrets == null ? null : vaultSecrets.dotnetJwt();
+
         String vaultTruststorePassword =
                 vaultSecrets == null ? null : vaultSecrets.truststorePassword();
 
@@ -137,11 +143,15 @@ public class RulesReloadBroadcastProcessFunction
         );
 
         log.info(
-                "[INIT] subtask={} handler.default={} rulesLoaded={} dataset2controlAreaLoaded={} "
-                        + "controlAreaRulesLoaded={} errorMessagesLoaded={} datasetExclusionLoaded={} "
-                        + "filterFlagLoaded={}",
+                "[INIT] subtask={} handler.default={} dotnetUrl={} dotnetTimeoutMs={} "
+                        + "dotnetSslVerify={} rulesLoaded={} dataset2controlAreaLoaded={} "
+                        + "controlAreaRulesLoaded={} errorMessagesLoaded={} "
+                        + "datasetExclusionLoaded={} filterFlagLoaded={}",
                 rc.getIndexOfThisSubtask(),
                 defaultHandler.value(),
+                dotnetUrl,
+                dotnetTimeoutMs,
+                verifySsl,
                 cacheRuntime.rulesSize(),
                 cacheRuntime.dataset2ControlAreaSize(),
                 cacheRuntime.controlAreaRulesSize(),
@@ -157,7 +167,15 @@ public class RulesReloadBroadcastProcessFunction
             ReadOnlyContext ctx,
             Collector<ProcessingResult> out
     ) {
+        String eventId = in == null ? "unknown" : in.eventId();
+
         DynamicHandler handler = handlerRoutingState.currentHandler();
+
+        log.info(
+                "[ROUTING][eventId={}] selected handler={}",
+                eventId,
+                handler.value()
+        );
 
         if (handler == DynamicHandler.DOTNET) {
             processWithDotnetHandler(in, ctx, out);
@@ -180,27 +198,58 @@ public class RulesReloadBroadcastProcessFunction
     ) {
         String eventId = in == null ? "unknown" : in.eventId();
 
+        log.info(
+                "[FLINK][eventId={}] internal processing START",
+                eventId
+        );
+
+        long startedAtNs = System.nanoTime();
+
         try {
             ProcessingResult flinkResult = messageProcessor.process(in);
 
+            long durationMs =
+                    (System.nanoTime() - startedAtNs) / 1_000_000L;
+
             if (flinkResult == null) {
                 log.warn(
-                        "[PIPE][eventId={}] internal Flink handler returned null",
-                        eventId
+                        "[FLINK][eventId={}] internal handler returned null durationMs={}",
+                        eventId,
+                        durationMs
                 );
                 return;
             }
 
+            log.info(
+                    "[FLINK][eventId={}] internal processing SUCCESS durationMs={}",
+                    eventId,
+                    durationMs
+            );
+
             // Основной выход: ответ обратно в MQ/Artemis.
             out.collect(flinkResult);
+
+            log.info(
+                    "[FLINK][eventId={}] result sent to main output -> MQ/Artemis",
+                    eventId
+            );
 
             // Отдельный выход: внутренний результат в Kafka audit.
             ctx.output(FLINK_AUDIT_RESULT_TAG, flinkResult);
 
+            log.info(
+                    "[FLINK][eventId={}] result sent to Kafka audit side output",
+                    eventId
+            );
+
         } catch (Exception e) {
+            long durationMs =
+                    (System.nanoTime() - startedAtNs) / 1_000_000L;
+
             log.error(
-                    "[PIPE][eventId={}] failed to process message with Flink handler",
+                    "[FLINK][eventId={}] internal processing FAILED durationMs={}",
                     eventId,
+                    durationMs,
                     e
             );
         }
@@ -219,44 +268,107 @@ public class RulesReloadBroadcastProcessFunction
     ) {
         String eventId = in == null ? "unknown" : in.eventId();
 
-        // Внешний результат является реальным ответом вызывающей системе.
+        /*
+         * Внешний .NET handler.
+         */
+        log.info(
+                "[DOTNET][eventId={}] external processing START",
+                eventId
+        );
+
+        long externalStartedAtNs = System.nanoTime();
+
         try {
-            ProcessingResult externalResult = dotnetHandlerClient.process(in);
+            ProcessingResult externalResult =
+                    dotnetHandlerClient.process(in);
+
+            long externalDurationMs =
+                    (System.nanoTime() - externalStartedAtNs) / 1_000_000L;
 
             if (externalResult != null) {
+                log.info(
+                        "[DOTNET][eventId={}] external processing SUCCESS durationMs={}",
+                        eventId,
+                        externalDurationMs
+                );
+
                 out.collect(externalResult);
+
+                log.info(
+                        "[DOTNET][eventId={}] external result sent to main output -> MQ/Artemis",
+                        eventId
+                );
             } else {
                 log.warn(
-                        "[PIPE][eventId={}] external handler returned null",
-                        eventId
+                        "[DOTNET][eventId={}] external handler returned null durationMs={}",
+                        eventId,
+                        externalDurationMs
                 );
             }
 
         } catch (Exception e) {
+            long externalDurationMs =
+                    (System.nanoTime() - externalStartedAtNs) / 1_000_000L;
+
             log.error(
-                    "[PIPE][eventId={}] external handler processing failed",
+                    "[DOTNET][eventId={}] external processing FAILED durationMs={}",
                     eventId,
+                    externalDurationMs,
                     e
             );
         }
 
-        // Внутренняя Flink-обработка выполняется независимо от внешнего handler.
+        /*
+         * Внутренняя Flink-обработка выполняется независимо
+         * от результата внешнего .NET handler.
+         */
+        log.info(
+                "[FLINK-AUDIT][eventId={}] internal processing START",
+                eventId
+        );
+
+        long flinkStartedAtNs = System.nanoTime();
+
         try {
-            ProcessingResult flinkResult = messageProcessor.process(in);
+            ProcessingResult flinkResult =
+                    messageProcessor.process(in);
+
+            long flinkDurationMs =
+                    (System.nanoTime() - flinkStartedAtNs) / 1_000_000L;
 
             if (flinkResult != null) {
-                ctx.output(FLINK_AUDIT_RESULT_TAG, flinkResult);
+                log.info(
+                        "[FLINK-AUDIT][eventId={}] internal processing SUCCESS durationMs={}",
+                        eventId,
+                        flinkDurationMs
+                );
+
+                ctx.output(
+                        FLINK_AUDIT_RESULT_TAG,
+                        flinkResult
+                );
+
+                log.info(
+                        "[FLINK-AUDIT][eventId={}] result sent to Kafka audit side output",
+                        eventId
+                );
+
             } else {
                 log.warn(
-                        "[PIPE][eventId={}] internal Flink handler returned null",
-                        eventId
+                        "[FLINK-AUDIT][eventId={}] internal handler returned null durationMs={}",
+                        eventId,
+                        flinkDurationMs
                 );
             }
 
         } catch (Exception e) {
+            long flinkDurationMs =
+                    (System.nanoTime() - flinkStartedAtNs) / 1_000_000L;
+
             log.error(
-                    "[PIPE][eventId={}] internal Flink processing failed in dotnet mode",
+                    "[FLINK-AUDIT][eventId={}] internal processing FAILED durationMs={}",
                     eventId,
+                    flinkDurationMs,
                     e
             );
         }
@@ -282,6 +394,7 @@ public class RulesReloadBroadcastProcessFunction
             Context ctx,
             Collector<ProcessingResult> out
     ) throws Exception {
+
         if (ev == null || !ev.isValid()) {
             return;
         }
@@ -292,7 +405,8 @@ public class RulesReloadBroadcastProcessFunction
         CacheUpdateEvent current = st.get(ev.cacheName);
 
         if (CACHE_HANDLER.equalsIgnoreCase(ev.cacheName)) {
-            DynamicHandler newHandler = DynamicHandler.from(ev.handler, null);
+            DynamicHandler newHandler =
+                    DynamicHandler.from(ev.handler, null);
 
             if (newHandler == null) {
                 log.warn(
@@ -302,7 +416,8 @@ public class RulesReloadBroadcastProcessFunction
                 return;
             }
 
-            DynamicHandler currentHandler = handlerRoutingState.currentHandler();
+            DynamicHandler currentHandler =
+                    handlerRoutingState.currentHandler();
 
             if (currentHandler == newHandler) {
                 log.info(
@@ -321,6 +436,7 @@ public class RulesReloadBroadcastProcessFunction
                     currentHandler.value(),
                     newHandler.value()
             );
+
             return;
         }
 
@@ -346,7 +462,9 @@ public class RulesReloadBroadcastProcessFunction
         try {
             cacheRuntime.reload(ev);
 
-            long ms = (System.nanoTime() - t0) / 1_000_000;
+            long ms =
+                    (System.nanoTime() - t0) / 1_000_000L;
+
             st.put(ev.cacheName, ev);
 
             log.info(
@@ -357,7 +475,8 @@ public class RulesReloadBroadcastProcessFunction
             );
 
         } catch (Exception ex) {
-            long ms = (System.nanoTime() - t0) / 1_000_000;
+            long ms =
+                    (System.nanoTime() - t0) / 1_000_000L;
 
             log.error(
                     "[CACHE][KAFKA] reload FAILED cacheName={} version={} "
