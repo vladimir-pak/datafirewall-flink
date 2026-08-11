@@ -31,6 +31,8 @@ public final class DotnetHandlerClient {
     private static final Logger log =
             LoggerFactory.getLogger(DotnetHandlerClient.class);
 
+    private static final String FIELD_DFW_EVENT_ID = "dfw_event_id";
+
     private final HttpClient http;
     private final ObjectMapper mapper;
     private final String url;
@@ -106,7 +108,6 @@ public final class DotnetHandlerClient {
                 .connectTimeout(Duration.ofSeconds(3));
 
         if (!this.verifySsl) {
-
             log.warn(
                     "[DOTNET-HTTP][INIT] SSL verification is DISABLED"
             );
@@ -114,7 +115,6 @@ public final class DotnetHandlerClient {
             builder.sslContext(createInsecureSslContext());
 
         } else if (this.trustStorePath != null) {
-
             log.info(
                     "[DOTNET-HTTP][INIT] SSL verification enabled trustStore={} type={}",
                     this.trustStorePath,
@@ -186,10 +186,6 @@ public final class DotnetHandlerClient {
             );
         }
 
-        /*
-         * Время, когда сообщение реально дошло
-         * до DotnetHandlerClient.process(...).
-         */
         long dotnetProcessStartDttm = currentTimestampMs();
 
         log.info(
@@ -201,8 +197,26 @@ public final class DotnetHandlerClient {
                 in.readedDttm
         );
 
+        /*
+         * Формируем отдельный JSON для .NET.
+         * Исходный in.payload не изменяем.
+         */
+        String dotnetPayload =
+                addEventIdToPayload(
+                        in.payload,
+                        eventId
+                );
+
+        log.info(
+                "[DOTNET][eventId={}] field {} added to request payload originalSize={} dotnetPayloadSize={}",
+                eventId,
+                FIELD_DFW_EVENT_ID,
+                in.payload.length(),
+                dotnetPayload.length()
+        );
+
         DotnetHttpResponse httpResponse =
-                call(in.payload, eventId);
+                call(dotnetPayload, eventId);
 
         log.info(
                 "[DOTNET][eventId={}] HTTP call SUCCESS status=2xx latencyMs={} responseSize={}",
@@ -291,6 +305,49 @@ public final class DotnetHandlerClient {
                         + "Cannot build dotnet ProcessingResult. "
                         + in
         );
+    }
+
+    private String addEventIdToPayload(
+            String payload,
+            String eventId
+    ) {
+        try {
+            JsonNode root =
+                    mapper.readTree(payload);
+
+            if (root == null || !root.isObject()) {
+                throw new IllegalArgumentException(
+                        "Dotnet request payload must be a JSON object"
+                );
+            }
+
+            ObjectNode request =
+                    ((ObjectNode) root).deepCopy();
+
+            request.put(
+                    FIELD_DFW_EVENT_ID,
+                    eventId
+            );
+
+            return mapper.writeValueAsString(request);
+
+        } catch (Exception e) {
+            log.error(
+                    "[DOTNET][eventId={}] failed to add {} to request payload exception={} message={}",
+                    eventId,
+                    FIELD_DFW_EVENT_ID,
+                    e.getClass().getSimpleName(),
+                    e.getMessage()
+            );
+
+            throw new RuntimeException(
+                    "Failed to add "
+                            + FIELD_DFW_EVENT_ID
+                            + " to dotnet request payload, eventId="
+                            + eventId,
+                    e
+            );
+        }
     }
 
     private DotnetHandlerResponse parseResponse(
@@ -467,10 +524,6 @@ public final class DotnetHandlerClient {
                 requestLatencyMs
         );
 
-        /*
-         * Максимально близкое к завершению обработки
-         * в DotnetHandlerClient.
-         */
         long processDttm =
                 currentTimestampMs();
 
@@ -758,12 +811,6 @@ public final class DotnetHandlerClient {
         }
     }
 
-    /**
-     * Небезопасный SSLContext:
-     * доверяет любому сертификату.
-     *
-     * Использовать только для dev/test.
-     */
     private static SSLContext createInsecureSslContext() {
 
         try {
