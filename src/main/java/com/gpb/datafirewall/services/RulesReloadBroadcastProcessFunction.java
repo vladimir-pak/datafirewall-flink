@@ -159,6 +159,12 @@ public class RulesReloadBroadcastProcessFunction
                 cacheRuntime.datasetExclusionSize(),
                 cacheRuntime.filterFlagSize()
         );
+
+        log.info(
+                "[INIT-DIAG] subtask={} rulesSnapshot.size={} diagnosticsEnabled=true",
+                rc.getIndexOfThisSubtask(),
+                cacheRuntime.rulesSnapshot() == null ? 0 : cacheRuntime.rulesSnapshot().size()
+        );
     }
 
     @Override
