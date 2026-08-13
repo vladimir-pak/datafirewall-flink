@@ -22,31 +22,45 @@ public final class MappingNormalizer {
      * - находит рядом поле без "mapping." и кладёт logicalName -> value
      *
      * Если logicalName повторяется (например массив документов) — склеиваем через ';'
+     *
+     * ВАЖНО:
+     * строка "none" является обычным значением и НЕ преобразуется в null.
      */
     public Map<String, String> normalize(JsonNode event) {
         Map<String, String> out = new LinkedHashMap<>();
 
         JsonNode data = event == null ? null : event.get("data");
-        if (data == null || data.isNull()) return out;
+        if (data == null || data.isNull()) {
+            return out;
+        }
 
         walk(data, out);
         return out;
     }
 
     private void walk(JsonNode node, Map<String, String> out) {
-        if (node == null || node.isNull()) return;
+        if (node == null || node.isNull()) {
+            return;
+        }
 
         if (node.isObject()) {
             extractMappings(node, out);
 
             Iterator<Map.Entry<String, JsonNode>> it = node.fields();
+
             while (it.hasNext()) {
                 Map.Entry<String, JsonNode> e = it.next();
+
                 JsonNode v = e.getValue();
-                // if (v == null || v.isNull()) continue;
-                v = v.isTextual() && (v.asText().isEmpty() || "none".equalsIgnoreCase(v.asText())) 
-                        ? mapper.nullNode() : v;
-                
+
+                if (v == null || v.isNull()) {
+                    continue;
+                }
+
+                if (v.isTextual() && v.asText().isEmpty()) {
+                    v = mapper.nullNode();
+                }
+
                 if (v.isObject() || v.isArray()) {
                     walk(v, out);
                 }
@@ -59,38 +73,68 @@ public final class MappingNormalizer {
         }
     }
 
-    private void extractMappings(JsonNode obj, Map<String, String> out) {
+    private void extractMappings(
+            JsonNode obj,
+            Map<String, String> out
+    ) {
         Iterator<Map.Entry<String, JsonNode>> it = obj.fields();
+
         while (it.hasNext()) {
             Map.Entry<String, JsonNode> e = it.next();
+
             String k = e.getKey();
             JsonNode v = e.getValue();
 
-            if (k == null || !k.startsWith("mapping.")) continue;
-            if (v == null || v.isNull()) continue;
+            if (k == null || !k.startsWith("mapping.")) {
+                continue;
+            }
 
-            String rawField = k.substring("mapping.".length());
-            String logical = v.asText(null);
+            if (v == null || v.isNull()) {
+                continue;
+            }
 
-            if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical)) continue;
+            String rawField =
+                    k.substring("mapping.".length());
 
-            JsonNode valueNode = obj.get(rawField);
-            // if (valueNode == null || valueNode.isNull()) continue;
+            String logical =
+                    v.asText(null);
 
-            String value = toFlatString(valueNode);
 
-            String prev = out.get(logical);
+            if (logical == null
+                    || logical.isBlank()
+                    || "none".equalsIgnoreCase(logical.trim())) {
+                continue;
+            }
+
+            JsonNode valueNode =
+                    obj.get(rawField);
+
+            String value =
+                    toFlatString(valueNode);
+
+            String prev =
+                    out.get(logical);
+
             if (prev == null || prev.isBlank()) {
                 out.put(logical, value);
             } else {
-                out.put(logical, prev + ";" + value);
+                out.put(
+                        logical,
+                        prev + ";" + value
+                );
             }
         }
     }
 
     private String toFlatString(JsonNode v) {
-        if (v == null || v.isNull()) return null;
-        if (v.isValueNode()) return v.asText();
+        if (v == null || v.isNull()) {
+            return null;
+        }
+
+        if (v.isValueNode()) {
+            return v.asText();
+        }
+
         try {
             return mapper.writeValueAsString(v);
         } catch (Exception e) {
