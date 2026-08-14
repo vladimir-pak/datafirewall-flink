@@ -30,26 +30,6 @@ public final class MessageProcessingService {
     private static final String PROCESS_RULE_EXCEPTION = "RULE_EXCEPTION";
     private static final String PROCESS_OK = "OK";
 
-    // Временная диагностика расхождений Flink vs old .NET.
-    // После завершения анализа эти логи можно удалить.
-    private static final Set<String> DIAG_RULE_IDS = Set.of(
-            "1080",
-            "1093",
-            "10329",
-            "10377",
-            "10378",
-            "10383",
-            "1194"
-    );
-
-    private static final Set<String> DIAG_LOGICAL_FIELDS = Set.of(
-            "ИНН.Номер свидетельства",
-            "ОСНОВНЫЕ СВЕДЕНИЯ.СНИЛС",
-            "КОНТАКТ.Почта.Электронный адрес (email)",
-            "АДРЕС.Район",
-            "АДРЕС.Строение"
-    );
-
     private final ObjectMapper mapper;
     private final RulesCacheRuntime cacheRuntime;
     private final ValidationService validationService;
@@ -84,16 +64,7 @@ public final class MessageProcessingService {
         try {
             JsonNode originalEvent = mapper.readTree(raw);
 
-            logNullLikeInputDiagnostics(originalEvent, eventId);
-
-            int nullLikeValuesConverted =
-                    normalizeEmptyStringsToNull(originalEvent);
-
-            log.info(
-                    "[DIAG][eventId={}] normalizeEmptyStringsToNull convertedCount={}",
-                    eventId,
-                    nullLikeValuesConverted
-            );
+            normalizeEmptyStringsToNull(originalEvent);
 
             String qid = originalEvent.path("dfw_query_id").asText(null);
             if (qid == null || qid.isBlank()) {
@@ -128,13 +99,6 @@ public final class MessageProcessingService {
             String controlArea =
                     cacheRuntime.controlAreaByDataset(datasetCode);
 
-            log.info(
-                    "[DIAG][eventId={}] datasetCode={} controlArea={}",
-                    eventId,
-                    datasetCode,
-                    controlArea
-            );
-
             if (controlArea == null || controlArea.isBlank()) {
                 log.warn(
                         "[PIPE][{}][eventId={}] controlArea not found for datasetCode={}",
@@ -159,30 +123,11 @@ public final class MessageProcessingService {
                 return null;
             }
 
-            Boolean filterFlag =
-                    cacheRuntime.filterFlag(controlArea);
-
-            log.info(
-                    "[DIAG][eventId={}] controlArea={} filterFlag={} fieldToRules.fields={} fieldToRules.ruleRefs={}",
-                    eventId,
-                    controlArea,
-                    filterFlag,
-                    allFieldToRules.size(),
-                    countRuleReferences(allFieldToRules)
-            );
-
             Map<String, String> normalizedMap =
                     normalizer.normalize(originalEvent);
 
             Map<String, Map<String, String>> errorMessagesByRule =
                     cacheRuntime.errorMessagesSnapshot();
-
-            logDiagnosticFields(
-                    "NORMALIZED",
-                    eventId,
-                    normalizedMap,
-                    allFieldToRules
-            );
 
             if (logPayloads && log.isInfoEnabled()) {
                 log.info(
@@ -202,28 +147,8 @@ public final class MessageProcessingService {
             Map<String, Rule> compiledRules =
                     cacheRuntime.rulesSnapshot();
 
-            log.info(
-                    "[DIAG][eventId={}] compiledRules.size={} errorMessages.size={} diagnosticRules={}",
-                    eventId,
-                    compiledRules == null ? 0 : compiledRules.size(),
-                    errorMessagesByRule == null ? 0 : errorMessagesByRule.size(),
-                    diagnosticRulePresence(compiledRules)
-            );
-
-            logMissingCompiledRules(
-                    eventId,
-                    allFieldToRules,
-                    compiledRules
-            );
-
             Set<String> excludedBlocks =
                     cacheRuntime.excludedBlocks(controlArea);
-
-            log.info(
-                    "[DIAG][eventId={}] excludedBlocks={}",
-                    eventId,
-                    excludedBlocks
-            );
 
             JsonNode dataNode =
                     originalEvent.path("data");
@@ -312,22 +237,6 @@ public final class MessageProcessingService {
                             mainFieldToRules
                     );
 
-            log.info(
-                    "[DIAG][eventId={}] MAIN filterFlag={} normalized.size={} fieldToRules.fields={} fieldToRules.ruleRefs={}",
-                    eventId,
-                    cacheRuntime.filterFlag(controlArea),
-                    mainEffectiveNormalizedMap.size(),
-                    mainEffectiveFieldToRules.size(),
-                    countRuleReferences(mainEffectiveFieldToRules)
-            );
-
-            logDiagnosticFields(
-                    "MAIN_EFFECTIVE",
-                    eventId,
-                    mainEffectiveNormalizedMap,
-                    mainEffectiveFieldToRules
-            );
-
             ValidationResult mainValidation =
                     validationService.validate(
                             compiledRules,
@@ -335,25 +244,6 @@ public final class MessageProcessingService {
                             mainEffectiveFieldToRules,
                             errorMessagesByRule
                     );
-
-            log.info(
-                    "[DIAG][eventId={}] MAIN validation allResult={} processStatus={} detailFields={} errorFields={}",
-                    eventId,
-                    mainValidation.allResult(),
-                    mainValidation.processStatus(),
-                    mainValidation.detailByField() == null
-                            ? 0
-                            : mainValidation.detailByField().size(),
-                    mainValidation.errorsByField() == null
-                            ? 0
-                            : mainValidation.errorsByField().size()
-            );
-
-            logDiagnosticValidationResult(
-                    "MAIN",
-                    eventId,
-                    mainValidation
-            );
 
             Map<String, Map<String, String>> mergedDetailByField =
                     new LinkedHashMap<>();
@@ -455,25 +345,6 @@ public final class MessageProcessingService {
                                 blockFieldToRules
                         );
 
-                log.info(
-                        "[DIAG][eventId={}] BLOCK={} datasetCode={} controlArea={} filterFlag={} normalized.size={} fieldToRules.fields={} fieldToRules.ruleRefs={}",
-                        eventId,
-                        blockName,
-                        blockDatasetCode,
-                        blockControlArea,
-                        cacheRuntime.filterFlag(blockControlArea),
-                        blockEffectiveNormalizedMap.size(),
-                        blockEffectiveFieldToRules.size(),
-                        countRuleReferences(blockEffectiveFieldToRules)
-                );
-
-                logDiagnosticFields(
-                        "BLOCK=" + blockName,
-                        eventId,
-                        blockEffectiveNormalizedMap,
-                        blockEffectiveFieldToRules
-                );
-
                 ValidationResult blockValidation =
                         validationService.validate(
                                 compiledRules,
@@ -481,26 +352,6 @@ public final class MessageProcessingService {
                                 blockEffectiveFieldToRules,
                                 errorMessagesByRule
                         );
-
-                log.info(
-                        "[DIAG][eventId={}] BLOCK={} validation allResult={} processStatus={} detailFields={} errorFields={}",
-                        eventId,
-                        blockName,
-                        blockValidation.allResult(),
-                        blockValidation.processStatus(),
-                        blockValidation.detailByField() == null
-                                ? 0
-                                : blockValidation.detailByField().size(),
-                        blockValidation.errorsByField() == null
-                                ? 0
-                                : blockValidation.errorsByField().size()
-                );
-
-                logDiagnosticValidationResult(
-                        "BLOCK=" + blockName,
-                        eventId,
-                        blockValidation
-                );
 
                 if (blockValidation.detailByField() != null) {
                     mergedDetailByField.putAll(
@@ -548,28 +399,6 @@ public final class MessageProcessingService {
                             Map.copyOf(mergedDetailByDataset),
                             freezeErrors(mergedErrorsByField)
                     );
-
-            log.info(
-                    "[DIAG][eventId={}] FINAL allResult={} processStatus={} mergedDetailFields={} mergedDatasets={} mergedErrorFields={}",
-                    eventId,
-                    finalValidation.allResult(),
-                    finalValidation.processStatus(),
-                    finalValidation.detailByField() == null
-                            ? 0
-                            : finalValidation.detailByField().size(),
-                    finalValidation.detailByDataset() == null
-                            ? 0
-                            : finalValidation.detailByDataset().size(),
-                    finalValidation.errorsByField() == null
-                            ? 0
-                            : finalValidation.errorsByField().size()
-            );
-
-            logDiagnosticValidationResult(
-                    "FINAL",
-                    eventId,
-                    finalValidation
-            );
 
             String shortJson =
                     shortAnswerService.build(
@@ -926,7 +755,9 @@ public final class MessageProcessingService {
                         controlArea
                 );
 
-        if (!Boolean.TRUE.equals(
+        // true  -> проверяем только реально присутствующие поля;
+        // false -> добавляем недостающие поля из fieldToRules со значением null.
+        if (Boolean.TRUE.equals(
                 filterFlag)) {
             return safeNormalized;
         }
@@ -987,17 +818,12 @@ public final class MessageProcessingService {
         return effective;
     }
 
-    private Map<String, Set<String>> buildEffectiveFieldToRules(
-            String controlArea,
-            Map<String, String> effectiveNormalizedMap,
-            Map<String, Set<String>> fieldToRules
-    ) {
+    private Map<String, Set<String>> buildEffectiveFieldToRules(String controlArea,Map<String, String> effectiveNormalizedMap, Map<String, Set<String>> fieldToRules) {
         Boolean filterFlag =
                 cacheRuntime.filterFlag(
                         controlArea
                 );
-
-        if (Boolean.TRUE.equals(
+        if (!Boolean.TRUE.equals(
                 filterFlag)) {
 
             return fieldToRules == null
@@ -1007,24 +833,16 @@ public final class MessageProcessingService {
             );
         }
 
-        return filterFieldToRulesByNormalizedMap(
-                fieldToRules,
-                effectiveNormalizedMap
-        );
+        return filterFieldToRulesByNormalizedMap(fieldToRules,effectiveNormalizedMap);
     }
 
-    private Map<String, Map<String, String>> safeFieldMap(
-            Map<String, Map<String, String>> source
-    ) {
+    private Map<String, Map<String, String>> safeFieldMap(Map<String, Map<String, String>> source) {
         return source == null
                 ? Map.of()
                 : source;
     }
 
-    private void mergeErrors(
-            Map<String, List<String>> target,
-            Map<String, List<String>> source
-    ) {
+    private void mergeErrors(Map<String, List<String>> target, Map<String, List<String>> source) {
         if (source == null
                 || source.isEmpty()) {
             return;
@@ -1046,13 +864,7 @@ public final class MessageProcessingService {
                 continue;
             }
 
-            LinkedHashSet<String> merged =
-                    new LinkedHashSet<>(
-                            target.getOrDefault(
-                                    logicalField,
-                                    List.of()
-                            )
-                    );
+            LinkedHashSet<String> merged = new LinkedHashSet<>(target.getOrDefault(logicalField, List.of()));
 
             for (String msg : messages) {
                 if (msg != null
@@ -1070,22 +882,15 @@ public final class MessageProcessingService {
         }
     }
 
-    private Map<String, List<String>> freezeErrors(
-            Map<String, List<String>> source
-    ) {
-        if (source == null
-                || source.isEmpty()) {
+    private Map<String, List<String>> freezeErrors(Map<String, List<String>> source) {
+        if (source == null || source.isEmpty()) {
             return Map.of();
         }
 
-        Map<String, List<String>> result =
-                new LinkedHashMap<>();
+        Map<String, List<String>> result = new LinkedHashMap<>();
 
-        for (Map.Entry<String, List<String>> entry
-                : source.entrySet()) {
-
-            if (entry.getKey() == null
-                    || entry.getKey().isBlank()) {
+        for (Map.Entry<String, List<String>> entry : source.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) {
                 continue;
             }
 
@@ -1146,15 +951,12 @@ public final class MessageProcessingService {
     }
 
     private String maskJsonPretty(String json) {
-        if (json == null
-                || json.isBlank()) {
+        if (json == null || json.isBlank()) {
             return json;
         }
 
         try {
-            JsonNode root =
-                    mapper.readTree(json);
-
+            JsonNode root = mapper.readTree(json);
             maskNode(root);
 
             return mapper
@@ -1176,15 +978,10 @@ public final class MessageProcessingService {
                     node.fieldNames();
 
             while (it.hasNext()) {
-                String fn =
-                        it.next();
+                String fn = it.next();
+                JsonNode child = node.get(fn);
 
-                JsonNode child =
-                        node.get(fn);
-
-                if (isSensitiveKey(fn)
-                        && node instanceof ObjectNode obj) {
-
+                if (isSensitiveKey(fn) && node instanceof ObjectNode obj) {
                     obj.put(fn, "***");
 
                 } else {
@@ -1199,9 +996,7 @@ public final class MessageProcessingService {
         }
     }
 
-    private boolean isSensitiveKey(
-            String key
-    ) {
+    private boolean isSensitiveKey(String key) {
         if (key == null) {
             return false;
         }
@@ -1335,22 +1130,7 @@ public final class MessageProcessingService {
 
         return "unknown";
     }
-
-    /**
-     * Нормализует только реально пустые строковые значения:
-     *
-     * ""     -> null
-     * "   "  -> null
-     *
-     * ВАЖНО:
-     * "none" НЕ преобразуется в null.
-     *
-     * Это сделано для совместимости со старым Python/.NET,
-     * где is_null("none") == false.
-     */
-    private int normalizeEmptyStringsToNull(
-            JsonNode node
-    ) {
+    private int normalizeEmptyStringsToNull(JsonNode node) {
         if (node == null || node.isNull()) {
             return 0;
         }
@@ -1411,377 +1191,6 @@ public final class MessageProcessingService {
 
         return converted;
     }
-
-    private void logNullLikeInputDiagnostics(
-            JsonNode originalEvent,
-            String eventId
-    ) {
-        if (originalEvent == null) {
-            return;
-        }
-
-        JsonNode data =
-                originalEvent.path("data");
-
-        logInputValueState(
-                eventId,
-                "documents.clientInn",
-                data.path("documents")
-                        .get("clientInn")
-        );
-
-        logInputValueState(
-                eventId,
-                "documents.clientSnils",
-                data.path("documents")
-                        .get("clientSnils")
-        );
-
-        logInputValueState(
-                eventId,
-                "contactInfo.emailValue",
-                data.path("contactInfo")
-                        .get("emailValue")
-        );
-
-        logInputValueState(
-                eventId,
-                "homeAddress.area",
-                data.path("homeAddress")
-                        .get("area")
-        );
-
-        logInputValueState(
-                eventId,
-                "homeAddress.block",
-                data.path("homeAddress")
-                        .get("block")
-        );
-
-        logInputValueState(
-                eventId,
-                "registrationAddress.area",
-                data.path("registrationAddress")
-                        .get("area")
-        );
-
-        logInputValueState(
-                eventId,
-                "registrationAddress.block",
-                data.path("registrationAddress")
-                        .get("block")
-        );
-    }
-
-    private void logInputValueState(
-            String eventId,
-            String path,
-            JsonNode value
-    ) {
-        log.info(
-                "[DIAG][eventId={}] INPUT {} state={}",
-                eventId,
-                path,
-                valueState(value)
-        );
-    }
-
-    private String valueState(
-            JsonNode value
-    ) {
-        if (value == null
-                || value.isMissingNode()) {
-            return "MISSING";
-        }
-
-        if (value.isNull()) {
-            return "NULL";
-        }
-
-        if (!value.isTextual()) {
-            return "PRESENT_"
-                    + value.getNodeType();
-        }
-
-        String text =
-                value.asText();
-
-        if (text == null) {
-            return "NULL_TEXT";
-        }
-
-        if (text.isBlank()) {
-            return "BLANK";
-        }
-
-        if ("none".equalsIgnoreCase(
-                text.trim())) {
-            return "NONE";
-        }
-
-        return "PRESENT";
-    }
-
-    private void logDiagnosticFields(
-            String stage,
-            String eventId,
-            Map<String, String> normalizedMap,
-            Map<String, Set<String>> fieldToRules
-    ) {
-        for (String logicalField
-                : DIAG_LOGICAL_FIELDS) {
-
-            boolean normalizedContains =
-                    normalizedMap != null
-                            && normalizedMap
-                            .containsKey(logicalField);
-
-            String valueState =
-                    normalizedContains
-                            ? stringValueState(
-                            normalizedMap.get(
-                                    logicalField
-                            )
-                    )
-                            : "MISSING";
-
-            Set<String> rules =
-                    fieldToRules == null
-                            ? null
-                            : fieldToRules.get(
-                            logicalField
-                    );
-
-            log.info(
-                    "[DIAG][eventId={}] {} field='{}' normalizedContains={} valueState={} rules={}",
-                    eventId,
-                    stage,
-                    logicalField,
-                    normalizedContains,
-                    valueState,
-                    rules
-            );
-        }
-    }
-
-    private String stringValueState(
-            String value
-    ) {
-        if (value == null) {
-            return "NULL";
-        }
-
-        if (value.isBlank()) {
-            return "BLANK";
-        }
-
-        if ("none".equalsIgnoreCase(
-                value.trim())) {
-            return "NONE";
-        }
-
-        return "PRESENT";
-    }
-
-    private int countRuleReferences(
-            Map<String, Set<String>> fieldToRules
-    ) {
-        if (fieldToRules == null
-                || fieldToRules.isEmpty()) {
-            return 0;
-        }
-
-        int count = 0;
-
-        for (Set<String> rules
-                : fieldToRules.values()) {
-
-            if (rules != null) {
-                count += rules.size();
-            }
-        }
-
-        return count;
-    }
-
-    private Map<String, Boolean> diagnosticRulePresence(
-            Map<String, Rule> compiledRules
-    ) {
-        Map<String, Boolean> result =
-                new LinkedHashMap<>();
-
-        for (String ruleId
-                : DIAG_RULE_IDS) {
-
-            boolean present = false;
-
-            if (compiledRules != null) {
-                present =
-                        compiledRules.containsKey(
-                                ruleId
-                        )
-                                || compiledRules.containsKey(
-                                "Rule" + ruleId
-                        );
-            }
-
-            result.put(
-                    ruleId,
-                    present
-            );
-        }
-
-        return result;
-    }
-
-    private void logMissingCompiledRules(
-            String eventId,
-            Map<String, Set<String>> fieldToRules,
-            Map<String, Rule> compiledRules
-    ) {
-        if (fieldToRules == null
-                || fieldToRules.isEmpty()) {
-            return;
-        }
-
-        Set<String> missing =
-                new LinkedHashSet<>();
-
-        int totalReferenced = 0;
-
-        for (Set<String> ruleIds
-                : fieldToRules.values()) {
-
-            if (ruleIds == null) {
-                continue;
-            }
-
-            for (String ruleId : ruleIds) {
-                if (ruleId == null
-                        || ruleId.isBlank()) {
-                    continue;
-                }
-
-                totalReferenced++;
-
-                boolean present =
-                        compiledRules != null
-                                && (
-                                compiledRules.containsKey(
-                                        ruleId
-                                )
-                                        || compiledRules.containsKey(
-                                        ruleId.startsWith("Rule")
-                                                ? ruleId.substring(4)
-                                                : "Rule" + ruleId
-                                )
-                        );
-
-                if (!present) {
-                    missing.add(ruleId);
-                }
-            }
-        }
-
-        log.info(
-                "[DIAG][eventId={}] compiled rule coverage referenced={} missing.count={} missing.sample={}",
-                eventId,
-                totalReferenced,
-                missing.size(),
-                missing.stream()
-                        .limit(30)
-                        .toList()
-        );
-    }
-
-    private void logDiagnosticValidationResult(
-            String stage,
-            String eventId,
-            ValidationResult validation
-    ) {
-        if (validation == null
-                || validation.detailByField() == null) {
-            return;
-        }
-
-        for (String logicalField
-                : DIAG_LOGICAL_FIELDS) {
-
-            Map<String, String> ruleStatuses =
-                    validation.detailByField()
-                            .get(logicalField);
-
-            if (ruleStatuses == null
-                    || ruleStatuses.isEmpty()) {
-
-                log.info(
-                        "[DIAG][eventId={}] {} RESULT field='{}' absent",
-                        eventId,
-                        stage,
-                        logicalField
-                );
-
-                continue;
-            }
-
-            Map<String, String> selected =
-                    new LinkedHashMap<>();
-
-            for (Map.Entry<String, String> entry
-                    : ruleStatuses.entrySet()) {
-
-                String ruleId =
-                        normalizeRuleId(
-                                entry.getKey()
-                        );
-
-                if (DIAG_RULE_IDS.contains(
-                        ruleId)) {
-
-                    selected.put(
-                            entry.getKey(),
-                            entry.getValue()
-                    );
-                }
-            }
-
-            if (!selected.isEmpty()) {
-                log.info(
-                        "[DIAG][eventId={}] {} RESULT field='{}' statuses={}",
-                        eventId,
-                        stage,
-                        logicalField,
-                        selected
-                );
-            }
-        }
-    }
-
-    private String normalizeRuleId(
-            String ruleName
-    ) {
-        if (ruleName == null) {
-            return "";
-        }
-
-        return ruleName.startsWith("Rule")
-                && ruleName.length() > 4
-                ? ruleName.substring(4)
-                : ruleName;
-    }
-
-    /**
-     * ВАЖНО:
-     *
-     * Старый Python/.NET считает null только:
-     * - None
-     * - ""
-     * - специальный CNULLVal
-     *
-     * Строка "none" НЕ является null.
-     *
-     * Поэтому здесь "none" намеренно не проверяем.
-     */
 
     private boolean isNullLikeText(JsonNode node) {
         if (node == null || !node.isTextual()) {
