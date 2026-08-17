@@ -19,7 +19,6 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
-import java.time.Instant;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -44,15 +43,6 @@ public final class DotnetHandlerClient {
     private final String trustStoreType;
 
     private final boolean verifySsl;
-
-    private static final String FIELD_DFW_CREATED_DTTM = "dfw_created_dttm";
-    private static final String FIELD_DFW_READED_DTTM = "dfw_readed_dttm";
-    private static final String FIELD_DFW_DOTNET_PROCESS_START_DTTM = "dfw_dotnet_process_start_dttm";
-    private static final String FIELD_DFW_REQUEST_START_DTTM = "dfw_request_start_dttm";
-    private static final String FIELD_DFW_REQUEST_END_DTTM = "dfw_request_end_dttm";
-    private static final String FIELD_DFW_REQUEST_LATENCY = "dfw_request_latency";
-    private static final String FIELD_DFW_PROCESS_DTTM = "dfw_process_dttm";
-    private static final String FIELD_DFW_FLINK_QUEUE_LATENCY = "dfw_flink_queue_latency";
 
     public DotnetHandlerClient(
             String url,
@@ -186,8 +176,6 @@ public final class DotnetHandlerClient {
             );
         }
 
-        long dotnetProcessStartDttm = currentTimestampMs();
-
         log.info(
                 "[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",
                 eventId,
@@ -197,10 +185,6 @@ public final class DotnetHandlerClient {
                 in.readedDttm
         );
 
-        /*
-         * Формируем отдельный JSON для .NET.
-         * Исходный in.payload не изменяем.
-         */
         String dotnetPayload =
                 addEventIdToPayload(
                         in.payload,
@@ -227,22 +211,17 @@ public final class DotnetHandlerClient {
                         : httpResponse.body().length()
         );
 
-        DotnetHandlerResponse response = parseResponse(
-                httpResponse.body(),
-                in.createdDttm,
-                in.readedDttm,
-                dotnetProcessStartDttm,
-                httpResponse.requestStartDttm(),
-                httpResponse.requestEndDttm(),
-                httpResponse.latencyMs(),
-                eventId
-        );
+        DotnetHandlerResponse response =
+                parseResponse(
+                        httpResponse.body(),
+                        eventId
+                );
 
         if (response.shortJson() == null
                 || response.shortJson().isBlank()) {
 
             log.warn(
-                    "[DOTNET][eventId={}] parsed response contains empty answer -> return null",
+                    "[DOTNET][eventId={}] parsed response contains empty result -> return null",
                     eventId
             );
 
@@ -259,7 +238,7 @@ public final class DotnetHandlerClient {
             ProcessingResult result = ProcessingResult.forMq(
                     in.mqMessageId,
                     response.shortJson(),
-                    response.detailJson(),
+                    null,
                     in.payload
             );
 
@@ -283,7 +262,7 @@ public final class DotnetHandlerClient {
             ProcessingResult result = ProcessingResult.forJms(
                     in.jmsMessageId,
                     response.shortJson(),
-                    response.detailJson(),
+                    null,
                     in.payload
             );
 
@@ -352,26 +331,16 @@ public final class DotnetHandlerClient {
 
     private DotnetHandlerResponse parseResponse(
             String responseJson,
-            Long createdDttm,
-            Long readedDttm,
-            long dotnetProcessStartDttm,
-            long requestStartDttm,
-            long requestEndDttm,
-            long requestLatencyMs,
             String eventId
     ) {
 
         if (responseJson == null || responseJson.isBlank()) {
-
             log.warn(
                     "[DOTNET-PARSE][eventId={}] HTTP response body is empty",
                     eventId
             );
 
-            return new DotnetHandlerResponse(
-                    null,
-                    null
-            );
+            return new DotnetHandlerResponse(null);
         }
 
         log.info(
@@ -384,79 +353,63 @@ public final class DotnetHandlerClient {
             JsonNode root =
                     mapper.readTree(responseJson);
 
-            JsonNode answer =
-                    root.get("answer");
-
-            JsonNode detailAnswer =
-                    root.get("detail_answer");
-
-            if (detailAnswer == null
-                    || detailAnswer.isNull()) {
-
-                detailAnswer =
-                        root.get("detailAnswer");
+            if (root == null || root.isNull()) {
+                throw new IllegalArgumentException(
+                        "Dotnet handler response is null"
+                );
             }
 
-            if (answer == null
-                    || answer.isNull()) {
+            JsonNode resultNode =
+                    root.get("result");
 
+            if (resultNode == null || resultNode.isNull()) {
                 log.error(
-                        "[DOTNET-PARSE][eventId={}] required field 'answer' is missing",
+                        "[DOTNET-PARSE][eventId={}] required field 'result' is missing",
                         eventId
                 );
 
                 throw new IllegalArgumentException(
-                        "Dotnet handler response does not contain required field 'answer'"
+                        "Dotnet handler response does not contain required field 'result'"
                 );
             }
 
-            ObjectNode answerObject =
-                    toObjectNode(answer);
+            JsonNode answerNode;
 
-            ObjectNode detailAnswerObject;
+            if (resultNode.isTextual()) {
+                String resultJson =
+                        resultNode.asText();
 
-            if (detailAnswer == null
-                    || detailAnswer.isNull()) {
+                if (resultJson == null || resultJson.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "Dotnet handler response field 'result' is empty"
+                    );
+                }
 
-                log.warn(
-                        "[DOTNET-PARSE][eventId={}] detail_answer is missing -> using empty object",
-                        eventId
-                );
-
-                detailAnswerObject =
-                        mapper.createObjectNode();
+                answerNode =
+                        mapper.readTree(resultJson);
 
             } else {
-                detailAnswerObject =
-                        toObjectNode(detailAnswer);
+                answerNode =
+                        resultNode;
             }
 
-            enrichDetailAnswerWithTimings(
-                    detailAnswerObject,
-                    createdDttm,
-                    readedDttm,
-                    dotnetProcessStartDttm,
-                    requestStartDttm,
-                    requestEndDttm,
-                    requestLatencyMs
-            );
+            if (answerNode == null || answerNode.isNull()) {
+                throw new IllegalArgumentException(
+                        "Dotnet handler result is null"
+                );
+            }
 
             String shortJson =
-                    mapper.writeValueAsString(answerObject);
-
-            String detailJson =
-                    mapper.writeValueAsString(detailAnswerObject);
+                    mapper.writeValueAsString(answerNode);
 
             log.info(
-                    "[DOTNET-PARSE][eventId={}] parsing SUCCESS answerSize={} detailAnswerSize={}",
+                    "[DOTNET-PARSE][eventId={}] parsing SUCCESS resultSize={}",
                     eventId,
-                    shortJson.length(),
-                    detailJson.length()
+                    shortJson.length()
             );
 
             return new DotnetHandlerResponse(
-                    shortJson,
-                    detailJson
+                    shortJson
             );
 
         } catch (Exception e) {
@@ -471,90 +424,13 @@ public final class DotnetHandlerClient {
 
             throw new RuntimeException(
                     "Failed to parse dotnet handler response. "
-                            + "Expected JSON: "
-                            + "{\"answer\": ObjectNode, \"detail_answer\": ObjectNode}. "
+                            + "Expected JSON: {\"result\": \"{...ANSWER...}\"} "
+                            + "or {\"result\": {...ANSWER...}}. "
                             + "Body="
                             + truncate(responseJson, 800),
                     e
             );
         }
-    }
-
-    private void enrichDetailAnswerWithTimings(
-            ObjectNode detailAnswerObject,
-            Long createdDttm,
-            Long readedDttm,
-            long dotnetProcessStartDttm,
-            long requestStartDttm,
-            long requestEndDttm,
-            long requestLatencyMs
-    ) {
-
-        if (createdDttm != null) {
-            detailAnswerObject.put(
-                    FIELD_DFW_CREATED_DTTM,
-                    createdDttm
-            );
-        }
-
-        if (readedDttm != null) {
-            detailAnswerObject.put(
-                    FIELD_DFW_READED_DTTM,
-                    readedDttm
-            );
-        }
-
-        detailAnswerObject.put(
-                FIELD_DFW_DOTNET_PROCESS_START_DTTM,
-                dotnetProcessStartDttm
-        );
-
-        detailAnswerObject.put(
-                FIELD_DFW_REQUEST_START_DTTM,
-                requestStartDttm
-        );
-
-        detailAnswerObject.put(
-                FIELD_DFW_REQUEST_END_DTTM,
-                requestEndDttm
-        );
-
-        detailAnswerObject.put(
-                FIELD_DFW_REQUEST_LATENCY,
-                requestLatencyMs
-        );
-
-        long processDttm =
-                currentTimestampMs();
-
-        detailAnswerObject.put(
-                FIELD_DFW_PROCESS_DTTM,
-                processDttm
-        );
-
-        if (readedDttm != null) {
-            detailAnswerObject.put(
-                    FIELD_DFW_FLINK_QUEUE_LATENCY,
-                    dotnetProcessStartDttm - readedDttm
-            );
-        }
-    }
-
-    private ObjectNode toObjectNode(JsonNode node) {
-
-        if (node != null && node.isObject()) {
-            return (ObjectNode) node.deepCopy();
-        }
-
-        ObjectNode objectNode =
-                mapper.createObjectNode();
-
-        objectNode.set(
-                "value",
-                node
-        );
-
-        return objectNode;
     }
 
     private DotnetHttpResponse call(
@@ -582,7 +458,7 @@ public final class DotnetHandlerClient {
                 .build();
 
         long requestStartDttm =
-                currentTimestampMs();
+                System.currentTimeMillis();
 
         long startedAtNs =
                 System.nanoTime();
@@ -606,7 +482,7 @@ public final class DotnetHandlerClient {
                     );
 
             long requestEndDttm =
-                    currentTimestampMs();
+                    System.currentTimeMillis();
 
             long latencyMs =
                     elapsedMs(startedAtNs);
@@ -672,7 +548,7 @@ public final class DotnetHandlerClient {
         } catch (Exception e) {
 
             long requestEndDttm =
-                    currentTimestampMs();
+                    System.currentTimeMillis();
 
             long latencyMs =
                     elapsedMs(startedAtNs);
@@ -862,10 +738,6 @@ public final class DotnetHandlerClient {
         }
     }
 
-    private static long currentTimestampMs() {
-        return Instant.now().toEpochMilli();
-    }
-
     private static long elapsedMs(
             long startedAtNs
     ) {
@@ -876,8 +748,7 @@ public final class DotnetHandlerClient {
     }
 
     private record DotnetHandlerResponse(
-            String shortJson,
-            String detailJson
+            String shortJson
     ) {
     }
 
