@@ -4,10 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.dto.ProcessingResult;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -20,16 +23,9 @@ import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
-
 public final class DotnetHandlerClient {
 
-    private static final Logger log =
-            LoggerFactory.getLogger(DotnetHandlerClient.class);
-
+    private static final Logger log = LoggerFactory.getLogger(DotnetHandlerClient.class);
     private static final String FIELD_DFW_EVENT_ID = "dfw_event_id";
 
     private final HttpClient http;
@@ -37,726 +33,316 @@ public final class DotnetHandlerClient {
     private final String url;
     private final String jwt;
     private final Duration requestTimeout;
-
     private final String trustStorePath;
     private final String trustStorePassword;
     private final String trustStoreType;
-
     private final boolean verifySsl;
 
-    public DotnetHandlerClient(
-            String url,
-            String jwt,
-            long timeoutMs,
-            String trustStorePath,
-            String trustStorePassword,
-            String trustStoreType
-    ) {
-        this(
-                url,
-                jwt,
-                timeoutMs,
-                new ObjectMapper(),
-                trustStorePath,
-                trustStorePassword,
-                trustStoreType,
-                true
-        );
+    public DotnetHandlerClient(String url, String jwt, long timeoutMs, String trustStorePath, String trustStorePassword, String trustStoreType) {
+        this(url, jwt, timeoutMs, new ObjectMapper(), trustStorePath, trustStorePassword, trustStoreType, true);
     }
 
-    public DotnetHandlerClient(
-            String url,
-            String jwt,
-            long timeoutMs,
-            ObjectMapper mapper,
-            String trustStorePath,
-            String trustStorePassword,
-            String trustStoreType,
-            boolean verifySsl
-    ) {
+    public DotnetHandlerClient(String url, String jwt, long timeoutMs, ObjectMapper mapper, String trustStorePath, String trustStorePassword, String trustStoreType, boolean verifySsl) {
         this.url = normalizeUrlOrNull(url);
         this.jwt = normalizeJwt(jwt);
-        this.requestTimeout =
-                Duration.ofMillis(timeoutMs <= 0 ? 20_000L : timeoutMs);
-
-        this.mapper =
-                mapper == null ? new ObjectMapper() : mapper;
-
-        this.trustStorePath =
-                normalizeUrlOrNull(trustStorePath);
-
+        this.requestTimeout = Duration.ofMillis(timeoutMs <= 0 ? 20_000L : timeoutMs);
+        this.mapper = mapper == null ? new ObjectMapper() : mapper;
+        this.trustStorePath = normalizeUrlOrNull(trustStorePath);
         this.trustStorePassword = trustStorePassword;
-
-        this.trustStoreType =
-                trustStoreType == null || trustStoreType.isBlank()
-                        ? "PKCS12"
-                        : trustStoreType.trim();
-
+        this.trustStoreType = trustStoreType == null || trustStoreType.isBlank() ? "PKCS12" : trustStoreType.trim();
         this.verifySsl = verifySsl;
 
-        HttpClient.Builder builder = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(3));
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3));
 
         if (!this.verifySsl) {
-            log.warn(
-                    "[DOTNET-HTTP][INIT] SSL verification is DISABLED"
-            );
-
+            log.warn("[DOTNET-HTTP][INIT] SSL verification is DISABLED");
             builder.sslContext(createInsecureSslContext());
-
         } else if (this.trustStorePath != null) {
-            log.info(
-                    "[DOTNET-HTTP][INIT] SSL verification enabled trustStore={} type={}",
-                    this.trustStorePath,
-                    this.trustStoreType
-            );
-
-            builder.sslContext(
-                    buildSslContext(
-                            this.trustStorePath,
-                            this.trustStorePassword,
-                            this.trustStoreType
-                    )
-            );
-
+            log.info("[DOTNET-HTTP][INIT] SSL verification enabled trustStore={} type={}", this.trustStorePath, this.trustStoreType);
+            builder.sslContext(buildSslContext(this.trustStorePath, this.trustStorePassword, this.trustStoreType));
         } else {
-            log.info(
-                    "[DOTNET-HTTP][INIT] SSL verification enabled using default JVM truststore"
-            );
+            log.info("[DOTNET-HTTP][INIT] SSL verification enabled using default JVM truststore");
         }
 
         this.http = builder.build();
 
-        log.info(
-                "[DOTNET-HTTP][INIT] client created url={} requestTimeoutMs={} connectTimeoutMs={} verifySsl={} jwtConfigured={}",
-                this.url,
-                this.requestTimeout.toMillis(),
-                3000,
-                this.verifySsl,
-                this.jwt != null && !this.jwt.isBlank()
-        );
+        log.info("[DOTNET-HTTP][INIT] client created url={} requestTimeoutMs={} connectTimeoutMs={} verifySsl={} jwtConfigured={}",
+                this.url, this.requestTimeout.toMillis(), 3000, this.verifySsl, this.jwt != null && !this.jwt.isBlank());
     }
 
     public ProcessingResult process(MessageRecord in) {
-
         if (in == null) {
             throw new IllegalArgumentException("MessageRecord is null");
         }
 
-        String eventId =
-                in.eventId() == null ? "unknown" : in.eventId();
+        String eventId = in.eventId() == null ? "unknown" : in.eventId();
 
         if (in.payload == null || in.payload.isBlank()) {
-            log.warn(
-                    "[DOTNET][eventId={}] payload is empty -> skip external processing",
-                    eventId
-            );
+            log.warn("[DOTNET][eventId={}] payload is empty -> skip external processing", eventId);
             return null;
         }
 
         if (url == null || url.isBlank()) {
-            log.error(
-                    "[DOTNET][eventId={}] handler.dotnet.url is not configured",
-                    eventId
-            );
-
-            throw new IllegalStateException(
-                    "handler.dotnet.url must be provided when runtime handler=dotnet"
-            );
+            log.error("[DOTNET][eventId={}] handler.dotnet.url is not configured", eventId);
+            throw new IllegalStateException("handler.dotnet.url must be provided when runtime handler=dotnet");
         }
 
         if (jwt == null || jwt.isBlank()) {
-            log.error(
-                    "[DOTNET][eventId={}] dotnet JWT is not configured",
-                    eventId
-            );
-
-            throw new IllegalStateException(
-                    "dotnetJwt must be provided in Vault when runtime handler=dotnet"
-            );
+            log.error("[DOTNET][eventId={}] dotnet JWT is not configured", eventId);
+            throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
         }
 
-        log.info(
-                "[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",
-                eventId,
-                url,
-                in.payload.length(),
-                in.createdDttm,
-                in.readedDttm
-        );
+        log.info("[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",
+                eventId, url, in.payload.length(), in.createdDttm, in.readedDttm);
 
-        String dotnetPayload =
-                addEventIdToPayload(
-                        in.payload,
-                        eventId
-                );
+        String dotnetPayload = addEventIdToPayload(in.payload, eventId);
 
-        log.info(
-                "[DOTNET][eventId={}] field {} added to request payload originalSize={} dotnetPayloadSize={}",
-                eventId,
-                FIELD_DFW_EVENT_ID,
-                in.payload.length(),
-                dotnetPayload.length()
-        );
+        log.info("[DOTNET][eventId={}] field {} added to request payload originalSize={} dotnetPayloadSize={}",
+                eventId, FIELD_DFW_EVENT_ID, in.payload.length(), dotnetPayload.length());
 
-        DotnetHttpResponse httpResponse =
-                call(dotnetPayload, eventId);
+        log.info("[DOTNET-PAYLOAD][eventId={}] outgoing payload={}", eventId, dotnetPayload);
 
-        log.info(
-                "[DOTNET][eventId={}] HTTP call SUCCESS status=2xx latencyMs={} responseSize={}",
-                eventId,
-                httpResponse.latencyMs(),
-                httpResponse.body() == null
-                        ? 0
-                        : httpResponse.body().length()
-        );
+        DotnetHttpResponse httpResponse = call(dotnetPayload, eventId);
 
-        DotnetHandlerResponse response =
-                parseResponse(
-                        httpResponse.body(),
-                        eventId
-                );
+        log.info("[DOTNET][eventId={}] HTTP call SUCCESS status=2xx latencyMs={} responseSize={}",
+                eventId, httpResponse.latencyMs(), httpResponse.body() == null ? 0 : httpResponse.body().length());
 
-        if (response.shortJson() == null
-                || response.shortJson().isBlank()) {
+        DotnetHandlerResponse response = parseResponse(httpResponse.body(), eventId);
 
-            log.warn(
-                    "[DOTNET][eventId={}] parsed response contains empty result -> return null",
-                    eventId
-            );
-
+        if (response.shortJson() == null || response.shortJson().isBlank()) {
+            log.warn("[DOTNET][eventId={}] parsed response contains empty result -> return null", eventId);
             return null;
         }
 
         if (in.mqMessageId != null) {
-
-            log.info(
-                    "[DOTNET][eventId={}] building MQ ProcessingResult mqMessageIdPresent=true",
-                    eventId
-            );
-
-            ProcessingResult result = ProcessingResult.forMq(
-                    in.mqMessageId,
-                    response.shortJson(),
-                    null,
-                    in.payload
-            );
-
-            log.info(
-                    "[DOTNET][eventId={}] processing SUCCESS transport=MQ",
-                    eventId
-            );
-
+            log.info("[DOTNET][eventId={}] building MQ ProcessingResult mqMessageIdPresent=true", eventId);
+            ProcessingResult result = ProcessingResult.forMq(in.mqMessageId, response.shortJson(), null, in.payload);
+            log.info("[DOTNET][eventId={}] processing SUCCESS transport=MQ", eventId);
             return result;
         }
 
-        if (in.jmsMessageId != null
-                && !in.jmsMessageId.isBlank()) {
-
-            log.info(
-                    "[DOTNET][eventId={}] building JMS ProcessingResult jmsMessageId={}",
-                    eventId,
-                    in.jmsMessageId
-            );
-
-            ProcessingResult result = ProcessingResult.forJms(
-                    in.jmsMessageId,
-                    response.shortJson(),
-                    null,
-                    in.payload
-            );
-
-            log.info(
-                    "[DOTNET][eventId={}] processing SUCCESS transport=JMS",
-                    eventId
-            );
-
+        if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
+            log.info("[DOTNET][eventId={}] building JMS ProcessingResult jmsMessageId={}", eventId, in.jmsMessageId);
+            ProcessingResult result = ProcessingResult.forJms(in.jmsMessageId, response.shortJson(), null, in.payload);
+            log.info("[DOTNET][eventId={}] processing SUCCESS transport=JMS", eventId);
             return result;
         }
 
-        log.error(
-                "[DOTNET][eventId={}] cannot build ProcessingResult: neither MQ nor JMS message id exists",
-                eventId
-        );
-
-        throw new IllegalStateException(
-                "MessageRecord has neither mqMessageId nor jmsMessageId. "
-                        + "Cannot build dotnet ProcessingResult. "
-                        + in
-        );
+        log.error("[DOTNET][eventId={}] cannot build ProcessingResult: neither MQ nor JMS message id exists", eventId);
+        throw new IllegalStateException("MessageRecord has neither mqMessageId nor jmsMessageId. Cannot build dotnet ProcessingResult. " + in);
     }
 
-    private String addEventIdToPayload(
-            String payload,
-            String eventId
-    ) {
+    private String addEventIdToPayload(String payload, String eventId) {
         try {
-            JsonNode root =
-                    mapper.readTree(payload);
+            JsonNode root = mapper.readTree(payload);
 
             if (root == null || !root.isObject()) {
-                throw new IllegalArgumentException(
-                        "Dotnet request payload must be a JSON object"
-                );
+                throw new IllegalArgumentException("Dotnet request payload must be a JSON object");
             }
 
-            ObjectNode request =
-                    ((ObjectNode) root).deepCopy();
-
-            request.put(
-                    FIELD_DFW_EVENT_ID,
-                    eventId
-            );
+            ObjectNode request = ((ObjectNode) root).deepCopy();
+            request.put(FIELD_DFW_EVENT_ID, eventId);
 
             return mapper.writeValueAsString(request);
-
         } catch (Exception e) {
-            log.error(
-                    "[DOTNET][eventId={}] failed to add {} to request payload exception={} message={}",
-                    eventId,
-                    FIELD_DFW_EVENT_ID,
-                    e.getClass().getSimpleName(),
-                    e.getMessage()
-            );
+            log.error("[DOTNET][eventId={}] failed to add {} to request payload exception={} message={}",
+                    eventId, FIELD_DFW_EVENT_ID, e.getClass().getSimpleName(), e.getMessage());
 
-            throw new RuntimeException(
-                    "Failed to add "
-                            + FIELD_DFW_EVENT_ID
-                            + " to dotnet request payload, eventId="
-                            + eventId,
-                    e
-            );
+            throw new RuntimeException("Failed to add " + FIELD_DFW_EVENT_ID + " to dotnet request payload, eventId=" + eventId, e);
         }
     }
 
-    private DotnetHandlerResponse parseResponse(
-            String responseJson,
-            String eventId
-    ) {
-
+    private DotnetHandlerResponse parseResponse(String responseJson, String eventId) {
         if (responseJson == null || responseJson.isBlank()) {
-            log.warn(
-                    "[DOTNET-PARSE][eventId={}] HTTP response body is empty",
-                    eventId
-            );
-
+            log.warn("[DOTNET-PARSE][eventId={}] HTTP response body is empty", eventId);
             return new DotnetHandlerResponse(null);
         }
 
-        log.info(
-                "[DOTNET-PARSE][eventId={}] parsing response START responseSize={}",
-                eventId,
-                responseJson.length()
-        );
+        log.info("[DOTNET-PARSE][eventId={}] parsing response START responseSize={}", eventId, responseJson.length());
 
         try {
-            JsonNode root =
-                    mapper.readTree(responseJson);
+            JsonNode root = mapper.readTree(responseJson);
 
             if (root == null || root.isNull()) {
-                throw new IllegalArgumentException(
-                        "Dotnet handler response is null"
-                );
+                throw new IllegalArgumentException("Dotnet handler response is null");
             }
 
-            JsonNode resultNode =
-                    root.get("result");
+            JsonNode resultNode = root.get("result");
 
             if (resultNode == null || resultNode.isNull()) {
-                log.error(
-                        "[DOTNET-PARSE][eventId={}] required field 'result' is missing",
-                        eventId
-                );
-
-                throw new IllegalArgumentException(
-                        "Dotnet handler response does not contain required field 'result'"
-                );
+                log.error("[DOTNET-PARSE][eventId={}] required field 'result' is missing", eventId);
+                throw new IllegalArgumentException("Dotnet handler response does not contain required field 'result'");
             }
 
             JsonNode answerNode;
 
             if (resultNode.isTextual()) {
-                String resultJson =
-                        resultNode.asText();
+                String resultJson = resultNode.asText();
 
                 if (resultJson == null || resultJson.isBlank()) {
-                    throw new IllegalArgumentException(
-                            "Dotnet handler response field 'result' is empty"
-                    );
+                    throw new IllegalArgumentException("Dotnet handler response field 'result' is empty");
                 }
 
-                answerNode =
-                        mapper.readTree(resultJson);
-
+                answerNode = mapper.readTree(resultJson);
             } else {
-                answerNode =
-                        resultNode;
+                answerNode = resultNode;
             }
 
             if (answerNode == null || answerNode.isNull()) {
-                throw new IllegalArgumentException(
-                        "Dotnet handler result is null"
-                );
+                throw new IllegalArgumentException("Dotnet handler result is null");
             }
 
-            String shortJson =
-                    mapper.writeValueAsString(answerNode);
+            String shortJson = mapper.writeValueAsString(answerNode);
 
-            log.info(
-                    "[DOTNET-PARSE][eventId={}] parsing SUCCESS resultSize={}",
-                    eventId,
-                    shortJson.length()
-            );
+            log.info("[DOTNET-PARSE][eventId={}] parsing SUCCESS resultSize={}", eventId, shortJson.length());
 
-            return new DotnetHandlerResponse(
-                    shortJson
-            );
-
+            return new DotnetHandlerResponse(shortJson);
         } catch (Exception e) {
-
-            log.error(
-                    "[DOTNET-PARSE][eventId={}] parsing FAILED responseSize={} exception={} message={}",
-                    eventId,
-                    responseJson.length(),
-                    e.getClass().getSimpleName(),
-                    e.getMessage()
-            );
+            log.error("[DOTNET-PARSE][eventId={}] parsing FAILED responseSize={} exception={} message={}",
+                    eventId, responseJson.length(), e.getClass().getSimpleName(), e.getMessage());
 
             throw new RuntimeException(
-                    "Failed to parse dotnet handler response. "
-                            + "Expected JSON: {\"result\": \"{...ANSWER...}\"} "
-                            + "or {\"result\": {...ANSWER...}}. "
-                            + "Body="
-                            + truncate(responseJson, 800),
-                    e
+                    "Failed to parse dotnet handler response. Expected JSON: {\"result\": \"{...ANSWER...}\"} or {\"result\": {...ANSWER...}}. Body="
+                            + truncate(responseJson, 800), e
             );
         }
     }
 
-    private DotnetHttpResponse call(
-            String payload,
-            String eventId
-    ) {
-
+    private DotnetHttpResponse call(String payload, String eventId) {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(requestTimeout)
-                .header(
-                        "Content-Type",
-                        "application/json; charset=utf-8"
-                )
-                .header(
-                        "Authorization",
-                        "Bearer " + jwt
-                )
-                .POST(
-                        HttpRequest.BodyPublishers.ofString(
-                                payload,
-                                StandardCharsets.UTF_8
-                        )
-                )
+                .header("Content-Type", "application/json; charset=utf-8")
+                .header("Authorization", "Bearer " + jwt)
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
                 .build();
 
-        long requestStartDttm =
-                System.currentTimeMillis();
+        long requestStartDttm = System.currentTimeMillis();
+        long startedAtNs = System.nanoTime();
 
-        long startedAtNs =
-                System.nanoTime();
-
-        log.info(
-                "[DOTNET-HTTP][eventId={}] POST START url={} timeoutMs={} payloadSize={}",
-                eventId,
-                url,
-                requestTimeout.toMillis(),
-                payload == null ? 0 : payload.length()
-        );
+        log.info("[DOTNET-HTTP][eventId={}] POST START url={} timeoutMs={} payloadSize={}",
+                eventId, url, requestTimeout.toMillis(), payload == null ? 0 : payload.length());
 
         try {
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
-            HttpResponse<String> response =
-                    http.send(
-                            request,
-                            HttpResponse.BodyHandlers.ofString(
-                                    StandardCharsets.UTF_8
-                            )
-                    );
+            long requestEndDttm = System.currentTimeMillis();
+            long latencyMs = elapsedMs(startedAtNs);
+            int statusCode = response.statusCode();
+            int responseSize = response.body() == null ? 0 : response.body().length();
 
-            long requestEndDttm =
-                    System.currentTimeMillis();
-
-            long latencyMs =
-                    elapsedMs(startedAtNs);
-
-            int statusCode =
-                    response.statusCode();
-
-            int responseSize =
-                    response.body() == null
-                            ? 0
-                            : response.body().length();
-
-            log.info(
-                    "[DOTNET-HTTP][eventId={}] RESPONSE RECEIVED url={} status={} latencyMs={} responseSize={}",
-                    eventId,
-                    url,
-                    statusCode,
-                    latencyMs,
-                    responseSize
-            );
+            log.info("[DOTNET-HTTP][eventId={}] RESPONSE RECEIVED url={} status={} latencyMs={} responseSize={}",
+                    eventId, url, statusCode, latencyMs, responseSize);
 
             if (statusCode / 100 != 2) {
+                log.error("[DOTNET-HTTP][eventId={}] HTTP FAILED url={} status={} latencyMs={} responseBody={}",
+                        eventId, url, statusCode, latencyMs, truncate(response.body(), 800));
 
-                log.error(
-                        "[DOTNET-HTTP][eventId={}] HTTP FAILED url={} status={} latencyMs={} responseBody={}",
-                        eventId,
-                        url,
-                        statusCode,
-                        latencyMs,
-                        truncate(response.body(), 800)
-                );
-
-                throw new RuntimeException(
-                        "Dotnet handler HTTP "
-                                + statusCode
-                                + " for "
-                                + url
-                                + ", latencyMs="
-                                + latencyMs
-                                + ": "
-                                + truncate(
-                                response.body(),
-                                800
-                        )
-                );
+                throw new RuntimeException("Dotnet handler HTTP " + statusCode + " for " + url
+                        + ", latencyMs=" + latencyMs + ": " + truncate(response.body(), 800));
             }
 
-            log.info(
-                    "[DOTNET-HTTP][eventId={}] POST SUCCESS url={} status={} latencyMs={}",
-                    eventId,
-                    url,
-                    statusCode,
-                    latencyMs
-            );
+            log.info("[DOTNET-HTTP][eventId={}] POST SUCCESS url={} status={} latencyMs={}", eventId, url, statusCode, latencyMs);
 
-            return new DotnetHttpResponse(
-                    response.body(),
-                    latencyMs,
-                    requestStartDttm,
-                    requestEndDttm
-            );
-
+            return new DotnetHttpResponse(response.body(), latencyMs, requestStartDttm, requestEndDttm);
         } catch (Exception e) {
+            long requestEndDttm = System.currentTimeMillis();
+            long latencyMs = elapsedMs(startedAtNs);
 
-            long requestEndDttm =
-                    System.currentTimeMillis();
+            log.error("[DOTNET-HTTP][eventId={}] REQUEST FAILED url={} latencyMs={} exception={} message={}",
+                    eventId, url, latencyMs, e.getClass().getSimpleName(), e.getMessage());
 
-            long latencyMs =
-                    elapsedMs(startedAtNs);
-
-            log.error(
-                    "[DOTNET-HTTP][eventId={}] REQUEST FAILED url={} latencyMs={} exception={} message={}",
-                    eventId,
-                    url,
-                    latencyMs,
-                    e.getClass().getSimpleName(),
-                    e.getMessage()
-            );
-
-            throw new RuntimeException(
-                    "Failed to call dotnet handler API: "
-                            + url
-                            + ", requestStartDttm="
-                            + requestStartDttm
-                            + ", requestEndDttm="
-                            + requestEndDttm
-                            + ", latencyMs="
-                            + latencyMs,
-                    e
-            );
+            throw new RuntimeException("Failed to call dotnet handler API: " + url
+                    + ", requestStartDttm=" + requestStartDttm
+                    + ", requestEndDttm=" + requestEndDttm
+                    + ", latencyMs=" + latencyMs, e);
         }
     }
 
-    private static String normalizeUrlOrNull(
-            String url
-    ) {
-
+    private static String normalizeUrlOrNull(String url) {
         if (url == null || url.isBlank()) {
             return null;
         }
-
         return url.trim();
     }
 
-    private static String normalizeJwt(
-            String jwt
-    ) {
-
+    private static String normalizeJwt(String jwt) {
         if (jwt == null || jwt.isBlank()) {
             return null;
         }
 
-        String value =
-                jwt.trim();
+        String value = jwt.trim();
 
-        if (value.regionMatches(
-                true,
-                0,
-                "Bearer ",
-                0,
-                "Bearer ".length()
-        )) {
-            return value
-                    .substring("Bearer ".length())
-                    .trim();
+        if (value.regionMatches(true, 0, "Bearer ", 0, "Bearer ".length())) {
+            return value.substring("Bearer ".length()).trim();
         }
 
         return value;
     }
 
-    private static String truncate(
-            String s,
-            int max
-    ) {
-
+    private static String truncate(String s, int max) {
         if (s == null) {
             return "";
         }
-
-        return s.length() <= max
-                ? s
-                : s.substring(0, max) + "...";
+        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
-    private static SSLContext buildSslContext(
-            String trustStorePath,
-            String trustStorePassword,
-            String trustStoreType
-    ) {
-
+    private static SSLContext buildSslContext(String trustStorePath, String trustStorePassword, String trustStoreType) {
         try {
+            KeyStore trustStore = KeyStore.getInstance(trustStoreType == null || trustStoreType.isBlank() ? "PKCS12" : trustStoreType);
 
-            KeyStore trustStore =
-                    KeyStore.getInstance(
-                            trustStoreType == null
-                                    || trustStoreType.isBlank()
-                                    ? "PKCS12"
-                                    : trustStoreType
-                    );
-
-            try (InputStream in =
-                         Files.newInputStream(
-                                 Path.of(trustStorePath)
-                         )) {
-
-                trustStore.load(
-                        in,
-                        trustStorePassword == null
-                                ? null
-                                : trustStorePassword.toCharArray()
-                );
+            try (InputStream in = Files.newInputStream(Path.of(trustStorePath))) {
+                trustStore.load(in, trustStorePassword == null ? null : trustStorePassword.toCharArray());
             }
 
-            TrustManagerFactory tmf =
-                    TrustManagerFactory.getInstance(
-                            TrustManagerFactory.getDefaultAlgorithm()
-                    );
-
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
             tmf.init(trustStore);
 
-            SSLContext sslContext =
-                    SSLContext.getInstance("TLS");
-
-            sslContext.init(
-                    null,
-                    tmf.getTrustManagers(),
-                    null
-            );
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, tmf.getTrustManagers(), null);
 
             return sslContext;
-
         } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Failed to build SSLContext for dotnet handler. "
-                            + "trustStore="
-                            + trustStorePath
-                            + ", trustStoreType="
-                            + trustStoreType,
-                    e
-            );
+            throw new RuntimeException("Failed to build SSLContext for dotnet handler. trustStore="
+                    + trustStorePath + ", trustStoreType=" + trustStoreType, e);
         }
     }
 
     private static SSLContext createInsecureSslContext() {
-
         try {
+            TrustManager[] trustAllCerts = new TrustManager[]{
+                    new X509TrustManager() {
+                        @Override
+                        public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                            // trust all
+                        }
 
-            TrustManager[] trustAllCerts =
-                    new TrustManager[]{
-                            new X509TrustManager() {
+                        @Override
+                        public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                            // trust all
+                        }
 
-                                @Override
-                                public void checkClientTrusted(
-                                        X509Certificate[] chain,
-                                        String authType
-                                ) {
-                                    // trust all
-                                }
+                        @Override
+                        public X509Certificate[] getAcceptedIssuers() {
+                            return new X509Certificate[0];
+                        }
+                    }
+            };
 
-                                @Override
-                                public void checkServerTrusted(
-                                        X509Certificate[] chain,
-                                        String authType
-                                ) {
-                                    // trust all
-                                }
-
-                                @Override
-                                public X509Certificate[] getAcceptedIssuers() {
-                                    return new X509Certificate[0];
-                                }
-                            }
-                    };
-
-            SSLContext sslContext =
-                    SSLContext.getInstance("TLS");
-
-            sslContext.init(
-                    null,
-                    trustAllCerts,
-                    new java.security.SecureRandom()
-            );
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
 
             return sslContext;
-
         } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Failed to create insecure SSL context",
-                    e
-            );
+            throw new RuntimeException("Failed to create insecure SSL context", e);
         }
     }
 
-    private static long elapsedMs(
-            long startedAtNs
-    ) {
-        return (
-                System.nanoTime()
-                        - startedAtNs
-        ) / 1_000_000L;
+    private static long elapsedMs(long startedAtNs) {
+        return (System.nanoTime() - startedAtNs) / 1_000_000L;
     }
 
-    private record DotnetHandlerResponse(
-            String shortJson
-    ) {
-    }
+    private record DotnetHandlerResponse(String shortJson) {}
 
-    private record DotnetHttpResponse(
-            String body,
-            long latencyMs,
-            long requestStartDttm,
-            long requestEndDttm
-    ) {
-    }
+    private record DotnetHttpResponse(String body, long latencyMs, long requestStartDttm, long requestEndDttm) {}
 }
