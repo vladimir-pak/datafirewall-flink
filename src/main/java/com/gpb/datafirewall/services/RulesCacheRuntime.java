@@ -99,21 +99,59 @@ public final class RulesCacheRuntime implements AutoCloseable {
         boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
 
         if (bootstrapEnabled) {
-            CacheBootstrapService bootstrapService = new CacheBootstrapService(
-                    igniteApiClient,
-                    reloader,
-                    rulesRegistry,
-                    dataset2ControlAreaCache,
-                    controlAreaRulesCache,
-                    errorMessagesCache,
-                    datasetExclusionCache,
-                    filterFlagCache,
-                    politicsBootstrapEnabled
-            );
-            bootstrapService.initializeAll();
+            CacheBootstrapService bootstrapService = new CacheBootstrapService(igniteApiClient, reloader, rulesRegistry, dataset2ControlAreaCache, controlAreaRulesCache, errorMessagesCache, datasetExclusionCache, filterFlagCache, politicsBootstrapEnabled);
+            initializeBootstrapWithRetry(bootstrapService, pt);
         } else {
             log.info("[INIT] startup cache bootstrap is disabled. Waiting for Kafka cache update events.");
         }
+    }
+
+    private void initializeBootstrapWithRetry(CacheBootstrapService bootstrapService, ParameterTool pt) {
+        long initialDelayMs = Math.max(1_000L, pt.getLong("cache.reload.retry.initial.ms", 5_000L));
+        long maxDelayMs = Math.max(initialDelayMs, pt.getLong("cache.reload.retry.max.ms", 60_000L));
+        long delayMs = initialDelayMs;
+        int attempt = 1;
+        while (true) {
+            long t0 = System.nanoTime();
+            try {
+                log.info("[CACHE][SPRING][BOOTSTRAP] loading startup caches attempt={}", attempt);
+                bootstrapService.initializeAll();
+                long ms = (System.nanoTime() - t0) / 1_000_000L;
+                if (attempt == 1) {
+                    log.info("[CACHE][SPRING][BOOTSTRAP] startup caches loaded successfully in {}ms", ms);
+                } else {
+                    log.info("[CACHE][SPRING][BOOTSTRAP] Spring connection restored, startup caches loaded successfully attempt={} durationMs={}", attempt, ms);
+                }
+                return;
+            } catch (Exception ex) {
+                log.warn("[CACHE][SPRING][BOOTSTRAP] Spring cache service unavailable attempt={} retryInMs={} cause={}", attempt, delayMs, rootMessage(ex));
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Startup cache bootstrap retry interrupted", interrupted);
+                }
+                delayMs = nextRetryDelay(delayMs, initialDelayMs, maxDelayMs);
+                attempt++;
+            }
+        }
+    }
+
+    private static long nextRetryDelay(long previousDelayMs, long initialDelayMs, long maxDelayMs) {
+        long doubled = previousDelayMs >= maxDelayMs / 2 ? maxDelayMs : previousDelayMs * 2;
+        return Math.min(maxDelayMs, Math.max(initialDelayMs, doubled));
+    }
+
+    private static String rootMessage(Throwable throwable) {
+        if (throwable == null) {
+            return "unknown";
+        }
+        Throwable current = throwable;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        String message = current.getMessage();
+        return current.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
     }
 
     private void initRulesLoader(ParameterTool pt) {

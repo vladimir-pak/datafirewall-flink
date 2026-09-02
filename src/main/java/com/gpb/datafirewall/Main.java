@@ -4,6 +4,8 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.utils.ParameterTool;
@@ -65,6 +67,8 @@ public class Main {
     // private static final String DEFAULT_DETAIL_KAFKA_TOPIC = "detail-answer";
     private static final String DEFAULT_MESSAGING_BACKEND = "mq";
     private static final int DEFAULT_PARALLELISM = 1;
+    private static final int DEFAULT_RESTART_ATTEMPTS = Integer.MAX_VALUE;
+    private static final long DEFAULT_RESTART_DELAY_MS = 30_000L;
 
     private static final long DEFAULT_CHECKPOINT_INTERVAL_MS = 5000L;
     private static final long DEFAULT_CHECKPOINT_TIMEOUT_MS = 60000L;
@@ -89,6 +93,29 @@ public class Main {
 
         int parallelism = pt.getInt("parallelism", DEFAULT_PARALLELISM);
         env.setParallelism(parallelism);
+
+        int restartAttempts = pt.getInt(
+                "flink.restart.attempts",
+                DEFAULT_RESTART_ATTEMPTS
+        );
+
+        long restartDelayMs = pt.getLong(
+                "flink.restart.delay.ms",
+                DEFAULT_RESTART_DELAY_MS
+        );
+
+        env.setRestartStrategy(
+                RestartStrategies.fixedDelayRestart(
+                        restartAttempts,
+                        Time.milliseconds(restartDelayMs)
+                )
+        );
+
+        log.info(
+                "[MAIN] restart strategy: fixed delay, attempts={}, delayMs={}",
+                restartAttempts,
+                restartDelayMs
+        );
 
         int sourceParallelism = pt.getInt("parallelism.source", parallelism);
         int processParallelism = pt.getInt("parallelism.process", parallelism);
@@ -718,6 +745,11 @@ public class Main {
         }
 
         copyKafkaClientOverride(pt, prefix, props, "client.id");
+        copyKafkaClientOverride(pt, prefix, props, "retries");
+        copyKafkaClientOverride(pt, prefix, props, "retry.backoff.ms");
+        copyKafkaClientOverride(pt, prefix, props, "reconnect.backoff.ms");
+        copyKafkaClientOverride(pt, prefix, props, "reconnect.backoff.max.ms");
+        copyKafkaClientOverride(pt, prefix, props, "delivery.timeout.ms");
         copyKafkaClientOverride(pt, prefix, props, "request.timeout.ms");
         copyKafkaClientOverride(pt, prefix, props, "default.api.timeout.ms");
         copyKafkaClientOverride(pt, prefix, props, "metadata.max.age.ms");
