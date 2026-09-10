@@ -4,6 +4,8 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.utils.ParameterTool;
@@ -65,6 +67,8 @@ public class Main {
     // private static final String DEFAULT_DETAIL_KAFKA_TOPIC = "detail-answer";
     private static final String DEFAULT_MESSAGING_BACKEND = "mq";
     private static final int DEFAULT_PARALLELISM = 1;
+    private static final int DEFAULT_RESTART_ATTEMPTS = Integer.MAX_VALUE;
+    private static final long DEFAULT_RESTART_DELAY_MS = 30_000L;
 
     private static final long DEFAULT_CHECKPOINT_INTERVAL_MS = 5000L;
     private static final long DEFAULT_CHECKPOINT_TIMEOUT_MS = 60000L;
@@ -90,10 +94,32 @@ public class Main {
         int parallelism = pt.getInt("parallelism", DEFAULT_PARALLELISM);
         env.setParallelism(parallelism);
 
+        int restartAttempts = pt.getInt(
+                "flink.restart.attempts",
+                DEFAULT_RESTART_ATTEMPTS
+        );
+
+        long restartDelayMs = pt.getLong(
+                "flink.restart.delay.ms",
+                DEFAULT_RESTART_DELAY_MS
+        );
+
+        env.setRestartStrategy(
+                RestartStrategies.fixedDelayRestart(
+                        restartAttempts,
+                        Time.milliseconds(restartDelayMs)
+                )
+        );
+
+        log.info(
+                "[MAIN] restart strategy: fixed delay, attempts={}, delayMs={}",
+                restartAttempts,
+                restartDelayMs
+        );
+
         int sourceParallelism = pt.getInt("parallelism.source", parallelism);
         int processParallelism = pt.getInt("parallelism.process", parallelism);
         int sinkParallelism = pt.getInt("parallelism.sink", parallelism);
-        int shadowKafkaParallelism = pt.getInt("parallelism.shadow.kafka", parallelism);
 
         // boolean detailKafkaEnabled = pt.getBoolean("detail.kafka.enabled", false);
         boolean checkpointingEnabled = pt.getBoolean("flink.checkpoint.enabled", true);
@@ -206,19 +232,12 @@ public class Main {
         String auditKafkaBootstrap = pt.get("audit.kafka.bootstrap", kafkaBootstrap);
         String auditKafkaTopic = pt.get("audit.kafka.topic", "datafirewall.processing.audit");
 
-        boolean dotnetShadowKafkaEnabled = pt.getBoolean("handler.dotnet.shadow.kafka.enabled", true);
-        String dotnetShadowKafkaBootstrap = pt.get("handler.dotnet.shadow.kafka.bootstrap", kafkaBootstrap);
-        String dotnetShadowKafkaTopic = firstNotBlank(
-                pt.get("handler.dotnet.shadow.kafka.topic", null),
-                pt.get("shadow.kafka.topic", null)
-        );
-
         if (startupHandler == DynamicHandler.DOTNET) {
-            requireNotBlank(pt.get("handler.dotnet.url", pt.get("dotnet.handler.url", null)), "handler.dotnet.url/dotnet.handler.url");
+            requireNotBlank(
+                    pt.get("handler.dotnet.url", pt.get("dotnet.handler.url", null)),
+                    "handler.dotnet.url/dotnet.handler.url"
+            );
             requireNotBlank(vaultSecrets.dotnetJwt(), "dotnetJwt in vault");
-            if (dotnetShadowKafkaEnabled) {
-                requireNotBlank(dotnetShadowKafkaTopic, "handler.dotnet.shadow.kafka.topic/shadow.kafka.topic");
-            }
         }
 
         if ("artemis".equals(backend)) {
@@ -324,7 +343,6 @@ public class Main {
 
         Properties kafkaClientProps = buildKafkaClientProperties(pt, "kafka", vaultSecrets);
         Properties auditKafkaClientProps = buildKafkaClientProperties(pt, "audit.kafka", vaultSecrets);
-        Properties dotnetShadowKafkaClientProps = buildKafkaClientProperties(pt, "handler.dotnet.shadow.kafka", vaultSecrets);
 
         try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
             publishKafkaConnectionCheck(jobAuditPublisher, cefAuditConfig, "rules-kafka", kafkaBootstrap, kafkaClientProps, vaultSecrets.kafkaUser());
@@ -371,52 +389,31 @@ public class Main {
                 .uid("process-with-rules-reload")
                 .setParallelism(processParallelism);
 
-        if (dotnetShadowKafkaEnabled && dotnetShadowKafkaTopic != null && !dotnetShadowKafkaTopic.isBlank()) {
-            KafkaSink<String> dotnetShadowKafkaSink = KafkaSink.<String>builder()
-                    .setBootstrapServers(dotnetShadowKafkaBootstrap)
-                    .setKafkaProducerConfig(dotnetShadowKafkaClientProps)
-                    .setRecordSerializer(
-                            KafkaRecordSerializationSchema.builder()
-                                    .setTopic(dotnetShadowKafkaTopic)
-                                    .setValueSerializationSchema(new SimpleStringSchema())
-                                    .build()
-                    )
-                    .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
-                    .build();
-
-            processed
-                    .getSideOutput(RulesReloadBroadcastProcessFunction.DOTNET_SHADOW_REQUEST_TAG)
-                    .sinkTo(dotnetShadowKafkaSink)
-                    .name("dotnet-shadow-kafka-sink")
-                    .uid("dotnet-shadow-kafka-sink")
-                    .setParallelism(shadowKafkaParallelism);
-
-            log.info("[MAIN] dotnet shadow kafka sink enabled: bootstrap={}, topic={}",
-                    dotnetShadowKafkaBootstrap, dotnetShadowKafkaTopic);
-        } else {
-            log.info("[MAIN] dotnet shadow kafka sink disabled");
-        }
+        DataStream<ProcessingResult> flinkAuditResults =
+                processed.getSideOutput(
+                        RulesReloadBroadcastProcessFunction.FLINK_AUDIT_RESULT_TAG
+                );
 
         if ("mq".equals(backend)) {
             DataStream<MessageReply> shortReplies = processed
-                .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
-                    @Override
-                    public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
-                        if (result == null) {
-                            return;
-                        }
+                    .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
+                        @Override
+                        public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
+                            if (result == null) {
+                                return;
+                            }
 
-                        String shortJson = result.getShortJson();
-                        if (shortJson == null || shortJson.isBlank()) {
-                            return;
-                        }
+                            String shortJson = result.getShortJson();
+                            if (shortJson == null || shortJson.isBlank()) {
+                                return;
+                            }
 
-                        out.collect(MessageReply.forMq(result.getMqCorrelationId(), shortJson));
-                    }
-                })
-                .returns(Types.POJO(MessageReply.class))
-                .name("build-short-reply")
-                .uid("build-short-reply");
+                            out.collect(MessageReply.forMq(result.getMqCorrelationId(), shortJson));
+                        }
+                    })
+                    .returns(Types.POJO(MessageReply.class))
+                    .name("build-short-reply")
+                    .uid("build-short-reply");
 
             shortReplies
                     .addSink(new MqSink(
@@ -442,24 +439,24 @@ public class Main {
             log.info("[MAIN] MQ output sink enabled");
         } else if ("artemis".equals(backend)) {
             DataStream<MessageReply> shortReplies = processed
-                .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
-                    @Override
-                    public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
-                        if (result == null) {
-                            return;
-                        }
+                    .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
+                        @Override
+                        public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
+                            if (result == null) {
+                                return;
+                            }
 
-                        String shortJson = result.getShortJson();
-                        if (shortJson == null || shortJson.isBlank()) {
-                            return;
-                        }
+                            String shortJson = result.getShortJson();
+                            if (shortJson == null || shortJson.isBlank()) {
+                                return;
+                            }
 
-                        out.collect(MessageReply.forJms(result.getJmsCorrelationId(), shortJson));
-                    }
-                })
-                .returns(Types.POJO(MessageReply.class))
-                .name("build-short-reply")
-                .uid("build-short-reply");
+                            out.collect(MessageReply.forJms(result.getJmsCorrelationId(), shortJson));
+                        }
+                    })
+                    .returns(Types.POJO(MessageReply.class))
+                    .name("build-short-reply")
+                    .uid("build-short-reply");
 
             shortReplies
                     .addSink(new ArtemisSink(
@@ -490,7 +487,7 @@ public class Main {
                     .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
                     .build();
 
-            processed
+            flinkAuditResults
                     .flatMap(new RichFlatMapFunction<ProcessingResult, String>() {
                         private transient ObjectMapper mapper;
 
@@ -521,19 +518,19 @@ public class Main {
 
                                 out.collect(mapper.writeValueAsString(audit));
                             } catch (Exception e) {
-                                log.warn("Failed to serialize audit record", e);
+                                log.warn("Failed to serialize Flink audit record", e);
                             }
                         }
                     })
                     .returns(Types.STRING)
-                    .name("build-audit-record-json")
-                    .uid("build-audit-record-json")
+                    .name("build-flink-audit-record-json")
+                    .uid("build-flink-audit-record-json")
                     .sinkTo(auditKafkaSink)
-                    .name("audit-kafka-sink")
-                    .uid("audit-kafka-sink");
-                    
-            log.info("[MAIN] audit kafka sink enabled: bootstrap={}, topic={}",
-                auditKafkaBootstrap, auditKafkaTopic);
+                    .name("flink-audit-kafka-sink")
+                    .uid("flink-audit-kafka-sink");
+
+            log.info("[MAIN] Flink audit Kafka sink enabled: bootstrap={}, topic={}",
+                    auditKafkaBootstrap, auditKafkaTopic);
         } else {
             log.info("[MAIN] audit kafka sink is disabled.");
         }
@@ -748,6 +745,11 @@ public class Main {
         }
 
         copyKafkaClientOverride(pt, prefix, props, "client.id");
+        copyKafkaClientOverride(pt, prefix, props, "retries");
+        copyKafkaClientOverride(pt, prefix, props, "retry.backoff.ms");
+        copyKafkaClientOverride(pt, prefix, props, "reconnect.backoff.ms");
+        copyKafkaClientOverride(pt, prefix, props, "reconnect.backoff.max.ms");
+        copyKafkaClientOverride(pt, prefix, props, "delivery.timeout.ms");
         copyKafkaClientOverride(pt, prefix, props, "request.timeout.ms");
         copyKafkaClientOverride(pt, prefix, props, "default.api.timeout.ms");
         copyKafkaClientOverride(pt, prefix, props, "metadata.max.age.ms");

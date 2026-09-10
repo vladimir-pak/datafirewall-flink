@@ -1,17 +1,16 @@
 package com.gpb.datafirewall.mq;
 
-import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.audit.AuditEventType;
 import com.gpb.datafirewall.audit.CefAuditEvent;
 import com.gpb.datafirewall.audit.CefAuditPublisher;
+import com.gpb.datafirewall.services.MessageRecord;
 import com.ibm.mq.MQException;
 import com.ibm.mq.MQGetMessageOptions;
 import com.ibm.mq.MQMessage;
 import com.ibm.mq.MQQueue;
 import com.ibm.mq.MQQueueManager;
 import com.ibm.mq.constants.MQConstants;
-
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
 import org.slf4j.Logger;
@@ -28,6 +27,9 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
 
     private static final Logger log = LoggerFactory.getLogger(MqSource.class);
 
+    private static final long RECONNECT_INITIAL_DELAY_MS = 5_000;
+    private static final long RECONNECT_MAX_DELAY_MS = 60_000;
+
     private static final Map<Integer, Charset> CCSID_MAP = Map.ofEntries(
             Map.entry(1208, StandardCharsets.UTF_8),
             Map.entry(1200, StandardCharsets.UTF_16),
@@ -40,7 +42,6 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
 
     private final boolean logPayloads;
     private final int logPreviewLen;
-
     private final String host;
     private final int port;
     private final String channel;
@@ -49,7 +50,6 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
     private final String user;
     private final String password;
     private final int waitIntervalMs;
-
     private final boolean tlsEnabled;
     private final String tlsCipherSuite;
     private final String trustStore;
@@ -57,75 +57,26 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
     private final AuditConfig auditConfig;
 
     private transient volatile boolean running;
+    private transient volatile Thread runThread;
     private transient CefAuditPublisher auditPublisher;
     private transient MQQueueManager qMgr;
     private transient MQQueue queue;
 
-    public MqSource(
-            String host,
-            int port,
-            String channel,
-            String qmgr,
-            String queueName,
-            String user,
-            String password
-    ) {
-        this(
-                host,
-                port,
-                channel,
-                qmgr,
-                queueName,
-                user,
-                password,
-                false,
-                600,
-                1000,
-                false,
-                null,
-                null,
-                null,
-                null
-        );
+    public MqSource(String host, int port, String channel, String qmgr, String queueName, String user, String password) {
+        this(host, port, channel, qmgr, queueName, user, password, false, 600, 1000,
+                false, null, null, null, null);
     }
 
-    public MqSource(
-            String host,
-            int port,
-            String channel,
-            String qmgr,
-            String queueName,
-            String user,
-            String password,
-            boolean logPayloads,
-            int logPreviewLen,
-            int waitIntervalMs,
-            boolean tlsEnabled,
-            String tlsCipherSuite,
-            String trustStore,
-            String trustStorePassword
-    ) {
+    public MqSource(String host, int port, String channel, String qmgr, String queueName, String user, String password,
+                    boolean logPayloads, int logPreviewLen, int waitIntervalMs, boolean tlsEnabled,
+                    String tlsCipherSuite, String trustStore, String trustStorePassword) {
         this(host, port, channel, qmgr, queueName, user, password, logPayloads, logPreviewLen, waitIntervalMs,
                 tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword, null);
     }
 
-    public MqSource(
-            String host,
-            int port,
-            String channel,
-            String qmgr,
-            String queueName,
-            String user,
-            String password,
-            boolean logPayloads,
-            int logPreviewLen,
-            int waitIntervalMs,
-            boolean tlsEnabled,
-            String tlsCipherSuite,
-            String trustStore,
-            String trustStorePassword,
-            AuditConfig auditConfig
-    ) {
+    public MqSource(String host, int port, String channel, String qmgr, String queueName, String user, String password,
+                    boolean logPayloads, int logPreviewLen, int waitIntervalMs, boolean tlsEnabled,
+                    String tlsCipherSuite, String trustStore, String trustStorePassword, AuditConfig auditConfig) {
         this.host = host;
         this.port = port;
         this.channel = channel;
@@ -144,148 +95,139 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
     }
 
     @Override
-    public void open(Configuration parameters) throws Exception {
+    public void open(Configuration parameters) {
         running = true;
+        auditPublisher = new CefAuditPublisher(auditConfig);
 
-        int openOptions = MQConstants.MQOO_INPUT_SHARED | MQConstants.MQOO_FAIL_IF_QUIESCING;
-
-        try {
-            auditPublisher = new CefAuditPublisher(auditConfig);
-            publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTING, "SUCCESS", null);
-            log.info(
-                    "MqSource connecting: subtask={} host={} port={} qmgr={} channel={} queue={} user={} tls={} cipherSuite={} trustStore={}",
-                    getRuntimeContext().getIndexOfThisSubtask(),
-                    host,
-                    port,
-                    qmgr,
-                    channel,
-                    queueName,
-                    user,
-                    tlsEnabled,
-                    tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite,
-                    trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore
-            );
-
-            qMgr = MqConnect.connect(
-                    qmgr,
-                    host,
-                    port,
-                    channel,
-                    user,
-                    password,
-                    tlsEnabled,
-                    tlsCipherSuite,
-                    trustStore,
-                    trustStorePassword
-            );
-
-            queue = qMgr.accessQueue(queueName, openOptions);
-
-            log.info(
-                    "MqSource opened queue={} subtask={} log.payloads={} log.preview.len={} wait.ms={}",
-                    queueName,
-                    getRuntimeContext().getIndexOfThisSubtask(),
-                    logPayloads,
-                    logPreviewLen,
-                    waitIntervalMs
-            );
-            publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTED, "SUCCESS", null);
-        } catch (Exception e) {
-            publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTION_FAILED, "FAILED", e);
-            close();
-            throw new RuntimeException(
-                    "Failed to open MqSource. host=" + host +
-                            ", port=" + port +
-                            ", qmgr=" + qmgr +
-                            ", channel=" + channel +
-                            ", queue=" + queueName +
-                            ", tlsEnabled=" + tlsEnabled,
-                    e
-            );
-        }
+        log.info("MqSource initialized: subtask={} host={} port={} qmgr={} channel={} queue={} user={} tls={} waitMs={}",
+                getRuntimeContext().getIndexOfThisSubtask(), host, port, qmgr, channel, queueName, user,
+                tlsEnabled, waitIntervalMs);
     }
 
     @Override
     public void run(SourceContext<MessageRecord> ctx) throws Exception {
+        runThread = Thread.currentThread();
+
         MQGetMessageOptions gmo = new MQGetMessageOptions();
         gmo.options = MQConstants.MQGMO_WAIT | MQConstants.MQGMO_FAIL_IF_QUIESCING;
         gmo.waitInterval = waitIntervalMs;
 
-        while (running) {
-            MQMessage msg = new MQMessage();
+        long reconnectDelay = RECONNECT_INITIAL_DELAY_MS;
 
-            try {
-                queue.get(msg, gmo);
+        try {
+            while (running) {
+                try {
+                    ensureConnected();
 
-                int messageLength = msg.getMessageLength();
-                int dataLength = msg.getDataLength();
+                    MQMessage msg = new MQMessage();
+                    queue.get(msg, gmo);
 
-                Long createdDttm = extractMqPutTimestamp(msg);
-                Long readedDttm = currentTimestampMs();
+                    reconnectDelay = RECONNECT_INITIAL_DELAY_MS;
 
-                log.debug(
-                        "MQ message props: ccsid={} encoding={} format={} dataLength={} msgLength={}",
-                        msg.characterSet,
-                        msg.encoding,
-                        msg.format,
-                        dataLength,
-                        messageLength
-                );
+                    int messageLength = msg.getMessageLength();
+                    int dataLength = msg.getDataLength();
+                    Long createdDttm = extractMqPutTimestamp(msg);
+                    Long readedDttm = currentTimestampMs();
 
-                byte[] buf = new byte[dataLength];
-                msg.readFully(buf);
+                    log.debug("MQ message props: ccsid={} encoding={} format={} dataLength={} msgLength={}",
+                            msg.characterSet, msg.encoding, msg.format, dataLength, messageLength);
 
-                Charset cs = detectCharset(msg);
-                String body = new String(buf, cs);
+                    byte[] buf = new byte[dataLength];
+                    msg.readFully(buf);
 
-                byte[] msgIdBytes = Arrays.copyOf(msg.messageId, msg.messageId.length);
-                String msgIdHex = toHexSafe(msgIdBytes);
+                    Charset cs = detectCharset(msg);
+                    String body = new String(buf, cs);
 
-                if (logPayloads) {
-                    log.info("MQ READ msgId={} BODY:\n{}", msgIdHex, body);
+                    byte[] msgIdBytes = Arrays.copyOf(msg.messageId, msg.messageId.length);
+                    String msgIdHex = toHexSafe(msgIdBytes);
+
+                    if (logPayloads) {
+                        log.info("MQ READ msgId={} BODY:\n{}", msgIdHex, body);
+                    }
+
+                    synchronized (ctx.getCheckpointLock()) {
+                        ctx.collect(MessageRecord.fromMq(msgIdBytes, body, createdDttm, readedDttm));
+                    }
+
+                } catch (MQException e) {
+                    if (!running) {
+                        return;
+                    }
+
+                    if (e.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) {
+                        continue;
+                    }
+
+                    if (!isReconnectable(e)) {
+                        log.error("MQ GET/connect fatal error completionCode={} reasonCode={}",
+                                e.completionCode, e.reasonCode, e);
+                        publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTION_FAILED, "FAILED", e);
+                        throw e;
+                    }
+
+                    log.warn("MqSource MQ unavailable completionCode={} reasonCode={}. Reconnect in {} ms",
+                            e.completionCode, e.reasonCode, reconnectDelay);
+
+                    publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTION_FAILED, "FAILED", e);
+                    disconnectMqQuietly();
+
+                    if (!sleepReconnect(reconnectDelay)) {
+                        return;
+                    }
+
+                    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
                 }
-
-                synchronized (ctx.getCheckpointLock()) {
-                    ctx.collect(MessageRecord.fromMq(msgIdBytes, body, createdDttm, readedDttm));
-                }
-
-            } catch (MQException mqe) {
-                if (!running) {
-                    log.info("MqSource stopped during shutdown.");
-                    return;
-                }
-
-                if (mqe.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) {
-                    continue;
-                }
-
-                log.error(
-                        "MQ GET failed (completionCode={}, reasonCode={})",
-                        mqe.completionCode,
-                        mqe.reasonCode,
-                        mqe
-                );
-
-                throw mqe;
             }
+        } finally {
+            runThread = null;
         }
     }
 
-    @Override
-    public void cancel() {
-        running = false;
-        close();
+    private void ensureConnected() throws MQException {
+        if (qMgr != null && queue != null) {
+            return;
+        }
+
+        log.info("MqSource connecting: subtask={} host={}:{} qmgr={} queue={}",
+                getRuntimeContext().getIndexOfThisSubtask(), host, port, qmgr, queueName);
+
+        publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTING, "SUCCESS", null);
+
+        qMgr = MqConnect.connect(qmgr, host, port, channel, user, password,
+                tlsEnabled, tlsCipherSuite, trustStore, trustStorePassword);
+
+        int openOptions = MQConstants.MQOO_INPUT_SHARED | MQConstants.MQOO_FAIL_IF_QUIESCING;
+        queue = qMgr.accessQueue(queueName, openOptions);
+
+        log.info("MqSource connected: subtask={} host={}:{} qmgr={} queue={}",
+                getRuntimeContext().getIndexOfThisSubtask(), host, port, qmgr, queueName);
+
+        publishAudit(AuditEventType.IBM_MQ_SOURCE_CONNECTED, "SUCCESS", null);
     }
 
-    @Override
-    public void close() {
-        publishAudit(AuditEventType.IBM_MQ_SOURCE_DISCONNECTED, "SUCCESS", null);
+    private boolean isReconnectable(MQException e) {
+        return e.reasonCode == MQConstants.MQRC_CONNECTION_BROKEN
+                || e.reasonCode == MQConstants.MQRC_Q_MGR_NOT_AVAILABLE
+                || e.reasonCode == MQConstants.MQRC_HOST_NOT_AVAILABLE;
+    }
+
+    private boolean sleepReconnect(long delay) {
+        try {
+            Thread.sleep(delay);
+            return running;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private void disconnectMqQuietly() {
         try {
             if (queue != null) {
                 queue.close();
             }
         } catch (Exception e) {
-            log.warn("Failed to close MQQueue", e);
+            log.debug("Failed to close MQQueue during reconnect: {}", e.getMessage());
         } finally {
             queue = null;
         }
@@ -295,17 +237,36 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
                 qMgr.disconnect();
             }
         } catch (Exception e) {
-            log.warn("Failed to disconnect MQQueueManager", e);
+            log.debug("Failed to disconnect MQQueueManager during reconnect: {}", e.getMessage());
         } finally {
             qMgr = null;
         }
+    }
+
+    @Override
+    public void cancel() {
+        running = false;
+
+        Thread thread = runThread;
+        if (thread != null) {
+            thread.interrupt();
+        }
+
+        disconnectMqQuietly();
+    }
+
+    @Override
+    public void close() {
+        running = false;
+        publishAudit(AuditEventType.IBM_MQ_SOURCE_DISCONNECTED, "SUCCESS", null);
+        disconnectMqQuietly();
 
         try {
             if (auditPublisher != null) {
                 auditPublisher.close();
             }
         } catch (Exception e) {
-            log.warn("Failed to close BusinessAuditPublisher", e);
+            log.warn("Failed to close CefAuditPublisher", e);
         } finally {
             auditPublisher = null;
         }
@@ -315,6 +276,7 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         if (auditPublisher == null || auditConfig == null || !auditConfig.enabled()) {
             return;
         }
+
         CefAuditEvent.Builder builder = auditConfig.enrich(CefAuditEvent.builder(type))
                 .status(status)
                 .subtaskIndex(getRuntimeContext().getIndexOfThisSubtask())
@@ -330,10 +292,11 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
                 .put("protocol", tlsEnabled ? "TLS" : "TCP")
                 .put("cipherSuite", tlsCipherSuite == null || tlsCipherSuite.isBlank() ? "<empty>" : tlsCipherSuite)
                 .put("trustStore", trustStore == null || trustStore.isBlank() ? "<empty>" : trustStore);
+
         if (error != null) {
-            builder.put("errorClass", error.getClass().getName())
-                    .put("errorMessage", error.getMessage());
+            builder.put("errorClass", error.getClass().getName()).put("errorMessage", error.getMessage());
         }
+
         auditPublisher.publish(builder.build());
     }
 
@@ -345,6 +308,7 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         }
 
         Charset mapped = CCSID_MAP.get(ccsid);
+
         if (mapped != null) {
             return mapped;
         }
@@ -374,11 +338,13 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         }
 
         String n = name.trim();
+
         if (n.isEmpty()) {
             return null;
         }
 
         boolean hasDigit = false;
+
         for (int i = 0; i < n.length(); i++) {
             if (Character.isDigit(n.charAt(i))) {
                 hasDigit = true;
@@ -387,7 +353,6 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         }
 
         if (!hasDigit) {
-            log.debug("Skip charset candidate (no digits): '{}'", n);
             return null;
         }
 
@@ -399,25 +364,17 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         }
     }
 
-    private static String preview(String s, int max) {
-        if (s == null) {
-            return "null";
-        }
-        if (s.length() <= max) {
-            return s;
-        }
-        return s.substring(0, max) + "...(+" + (s.length() - max) + " chars)";
-    }
-
     private static String toHexSafe(byte[] bytes) {
         if (bytes == null) {
             return "null";
         }
 
         StringBuilder sb = new StringBuilder(bytes.length * 2);
+
         for (byte b : bytes) {
             sb.append(String.format(Locale.ROOT, "%02X", b));
         }
+
         return sb.toString();
     }
 

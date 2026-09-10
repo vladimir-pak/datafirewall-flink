@@ -1,5 +1,6 @@
 package com.gpb.datafirewall.mq;
 
+import com.ibm.mq.MQException;
 import com.ibm.mq.MQQueueManager;
 import com.ibm.mq.constants.MQConstants;
 import org.slf4j.Logger;
@@ -14,18 +15,9 @@ public final class MqConnect {
     private MqConnect() {
     }
 
-    public static MQQueueManager connect(
-            String qmgr,
-            String host,
-            int port,
-            String channel,
-            String user,
-            String password,
-            boolean tlsEnabled,
-            String cipherSuite,
-            String trustStore,
-            String trustStorePassword
-    ) throws Exception {
+    public static MQQueueManager connect(String qmgr, String host, int port, String channel, String user, String password,
+                                         boolean tlsEnabled, String cipherSuite, String trustStore,
+                                         String trustStorePassword) throws MQException {
 
         if (qmgr == null || qmgr.isBlank()) {
             throw new IllegalArgumentException("IBM MQ queue manager name must be provided");
@@ -37,7 +29,6 @@ public final class MqConnect {
         }
 
         Hashtable<String, Object> props = new Hashtable<>();
-
         props.put(MQConstants.HOST_NAME_PROPERTY, host);
         props.put(MQConstants.PORT_PROPERTY, port);
         props.put(MQConstants.CHANNEL_PROPERTY, channel);
@@ -55,10 +46,8 @@ public final class MqConnect {
             props.put(MQConstants.SSL_CIPHER_SUITE_PROPERTY, cipherSuite);
         }
 
-        log.info(
-                "Connecting to MQ qmgr={} {}:{} channel={} auth={} tls={} cipherSuite={}",
-                qmgr, host, port, channel, authEnabled, tlsEnabled, cipherSuite
-        );
+        log.info("Connecting to MQ qmgr={} {}:{} channel={} auth={} tls={} cipherSuite={}",
+                qmgr, host, port, channel, authEnabled, tlsEnabled, cipherSuite);
 
         return new MQQueueManager(qmgr, props);
     }
