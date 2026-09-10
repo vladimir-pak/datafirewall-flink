@@ -146,7 +146,16 @@ public final class MessageProcessingService {
 
             Map<String, Set<String>> mainEffectiveFieldToRules = buildEffectiveFieldToRules(controlArea, mainEffectiveNormalizedMap, mainFieldToRules);
 
-            ValidationResult mainValidation = validationService.validate(compiledRules, mainEffectiveNormalizedMap, mainEffectiveFieldToRules, errorMessagesByRule);
+            Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
+
+            ValidationResult mainValidation = 
+                    validationService.validate(
+                        compiledRules, 
+                        mainEffectiveNormalizedMap,
+                        mainEffectiveFieldToRules, 
+                        errorMessagesByRule,
+                        filterFlag
+                    );
 
             Map<String, Map<String, String>> mergedDetailByField = new LinkedHashMap<>();
 
@@ -195,7 +204,14 @@ public final class MessageProcessingService {
 
                 Map<String, Set<String>> blockEffectiveFieldToRules = buildEffectiveFieldToRules(blockControlArea, blockEffectiveNormalizedMap, blockFieldToRules);
 
-                ValidationResult blockValidation = validationService.validate(compiledRules, blockEffectiveNormalizedMap, blockEffectiveFieldToRules, errorMessagesByRule);
+                ValidationResult blockValidation = 
+                        validationService.validate(
+                            compiledRules, 
+                            blockEffectiveNormalizedMap, 
+                            blockEffectiveFieldToRules, 
+                            errorMessagesByRule,
+                            filterFlag
+                        );
 
                 if (blockValidation.detailByField() != null) {
                     mergedDetailByField.putAll(blockValidation.detailByField());

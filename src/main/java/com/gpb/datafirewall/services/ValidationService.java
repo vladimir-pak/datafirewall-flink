@@ -11,6 +11,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -43,13 +44,15 @@ public final class ValidationService {
     public ValidationResult validate(
             Map<String, Rule> compiledRules,
             Map<String, String> normalizedMap,
-            Map<String, Set<String>> fieldToRuleIds
+            Map<String, Set<String>> fieldToRuleIds,
+            Boolean filterFlag
     ) {
         return validate(
                 compiledRules,
                 normalizedMap,
                 fieldToRuleIds,
-                Map.of()
+                Map.of(),
+                filterFlag
         );
     }
 
@@ -57,7 +60,8 @@ public final class ValidationService {
             Map<String, Rule> compiledRules,
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRuleIds,
-            Map<String, Map<String, String>> errorMessagesByRule
+            Map<String, Map<String, String>> errorMessagesByRule,
+            Boolean filterFlag
     ) {
 
         if (compiledRules == null) {
@@ -193,6 +197,25 @@ public final class ValidationService {
                             triggered
                     );
 
+                } catch (NoSuchElementException ex) {
+                    triggered = false;
+                    anyException = true;
+
+                    if (Boolean.TRUE.equals(filterFlag)) {
+                        continue;
+                    }
+
+                    log.error(
+                            "[RULE-DIAG] APPLY EXCEPTION field='{}' rule={} containsKey={} inputState={} implClass={}",
+                            logicalField,
+                            ruleName,
+                            ruleInput.containsKey(logicalField),
+                            valueState(ruleInput.get(logicalField)),
+                            rule == null
+                                    ? null
+                                    : rule.getClass().getName(),
+                            ex
+                    );
                 } catch (Exception ex) {
 
                     triggered = false;
