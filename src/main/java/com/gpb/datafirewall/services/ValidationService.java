@@ -197,6 +197,9 @@ public final class ValidationService {
                     );
 
                 } catch (NoSuchElementException ex) {
+                    /*
+                     * Если NoSuchElementException и filterFlag = true, то проверку пропускаем. Нет всех нужных атрибутов.
+                     */
                     triggered = false;
                     anyException = true;
 
