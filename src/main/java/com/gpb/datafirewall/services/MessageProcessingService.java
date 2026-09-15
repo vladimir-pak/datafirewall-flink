@@ -65,7 +65,7 @@ public final class MessageProcessingService {
                 qid = eventId;
             }
 
-            log.info("[PIPE][{}][eventId={}] handler=flink", qid, eventId);
+            log.debug("[PIPE][{}][eventId={}] handler=flink", qid, eventId);
 
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}][eventId={}] 1) INBOUND:\n{}", qid, eventId, maskJsonPretty(raw));
@@ -77,7 +77,7 @@ public final class MessageProcessingService {
                 return null;
             }
 
-            log.info("[PIPE][{}][eventId={}] resolved datasetCode={}", qid, eventId, datasetCode);
+            log.debug("[PIPE][{}][eventId={}] resolved datasetCode={}", qid, eventId, datasetCode);
 
             String controlArea = cacheRuntime.controlAreaByDataset(datasetCode);
 

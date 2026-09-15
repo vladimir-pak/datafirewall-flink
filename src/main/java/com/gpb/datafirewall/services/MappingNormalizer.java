@@ -99,10 +99,16 @@ public final class MappingNormalizer {
             String logical =
                     v.asText(null);
 
-
             if (logical == null
                     || logical.isBlank()
                     || "none".equalsIgnoreCase(logical.trim())) {
+                continue;
+            }
+
+            // ВАЖНО:
+            // mapping есть, но самого физического атрибута нет.
+            // В normalizedMap такое поле добавлять нельзя.
+            if (!obj.has(rawField)) {
                 continue;
             }
 

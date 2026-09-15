@@ -179,7 +179,6 @@ public final class ValidationService {
                 boolean triggered;
 
                 try {
-
                     /*
                      * true = правило сработало = ошибка найдена.
                      *
