@@ -80,7 +80,7 @@ public final class ValidationService {
             errorMessagesByRule = Map.of();
         }
 
-        log.info(
+        log.debug(
                 "[RULE-DIAG] validate START compiledRules={} normalizedFields={} fieldToRules.fields={} fieldToRules.ruleRefs={}",
                 compiledRules.size(),
                 normalizedMap.size(),
@@ -136,7 +136,7 @@ public final class ValidationService {
                             normalizedMap
                     );
 
-            log.info(
+            log.debug(
                     "[RULE-DIAG] FIELD field='{}' containsKey={} inputState={} configuredRules={}",
                     logicalField,
                     ruleInput.containsKey(logicalField),
@@ -164,7 +164,7 @@ public final class ValidationService {
                  * - конкретный класс правила;
                  * - какое состояние значения пришло в правило.
                  */
-                log.info(
+                log.debug(
                         "[RULE-DIAG] BEFORE field='{}' rule={} resolved={} implClass={} containsKey={} inputState={}",
                         logicalField,
                         ruleName,
@@ -189,7 +189,7 @@ public final class ValidationService {
                             rule != null
                                     && rule.apply(ruleInput);
 
-                    log.info(
+                    log.debug(
                             "[RULE-DIAG] APPLY field='{}' rule={} returnedTriggered={}",
                             logicalField,
                             ruleName,
@@ -269,7 +269,7 @@ public final class ValidationService {
                 /*
                  * Финальная диагностика конкретного правила.
                  */
-                log.info(
+                log.debug(
                         "[RULE-DIAG] AFTER field='{}' rule={} resolved={} triggered={} status={} classification={}",
                         logicalField,
                         ruleName,
@@ -336,7 +336,7 @@ public final class ValidationService {
                         ? "RULE_EXCEPTION"
                         : "OK";
 
-        log.info(
+        log.debug(
                 "[RULE-DIAG] validate END allResult={} processStatus={} detailFields={} errorFields={}",
                 all,
                 processStatus,
