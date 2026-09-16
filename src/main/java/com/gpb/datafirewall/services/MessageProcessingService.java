@@ -1,5 +1,4 @@
 package com.gpb.datafirewall.services;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -8,7 +7,6 @@ import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.validation.ValidationResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -19,15 +17,12 @@ import java.util.Map;
 import java.util.Set;
 
 public final class MessageProcessingService {
-
     private static final Logger log = LoggerFactory.getLogger(MessageProcessingService.class);
-
     private static final String RESULT_ERROR = "ERROR";
     private static final String RESULT_WARNING = "WARNING";
     private static final String RESULT_SUCCESS = "SUCCESS";
     private static final String PROCESS_RULE_EXCEPTION = "RULE_EXCEPTION";
     private static final String PROCESS_OK = "OK";
-
     private final ObjectMapper mapper;
     private final RulesCacheRuntime cacheRuntime;
     private final ValidationService validationService;
@@ -51,184 +46,157 @@ public final class MessageProcessingService {
             log.warn("[PIPE][no-qid] Empty input payload");
             return null;
         }
-
         String raw = in.payload;
         String eventId = extractEventId(in);
-
         try {
             JsonNode originalEvent = mapper.readTree(raw);
-
             normalizeEmptyStringsToNull(originalEvent);
-
             String qid = originalEvent.path("dfw_query_id").asText(null);
             if (qid == null || qid.isBlank()) {
                 qid = eventId;
             }
-
             log.debug("[PIPE][{}][eventId={}] handler=flink", qid, eventId);
-
-            if (logPayloads && log.isInfoEnabled()) {
-                log.info("[PIPE][{}][eventId={}] 1) INBOUND:\n{}", qid, eventId, maskJsonPretty(raw));
-            }
-
+            if (logPayloads && log.isInfoEnabled()) { log.info("[PIPE][{}][eventId={}] 1) INBOUND:\n{}", qid, eventId, maskJsonPretty(raw)); }
             String datasetCode = extractDatasetCode(originalEvent);
             if (datasetCode == null || datasetCode.isBlank()) {
                 log.warn("[PIPE][{}][eventId={}] dataset_code not found in input payload", qid, eventId);
                 return null;
             }
-
             log.debug("[PIPE][{}][eventId={}] resolved datasetCode={}", qid, eventId, datasetCode);
-
             String controlArea = cacheRuntime.controlAreaByDataset(datasetCode);
-
             if (controlArea == null || controlArea.isBlank()) {
                 log.warn("[PIPE][{}][eventId={}] controlArea not found for datasetCode={}", qid, eventId, datasetCode);
                 return null;
             }
-
             Map<String, Set<String>> allFieldToRules = cacheRuntime.fieldToRules(controlArea);
-
             if (allFieldToRules == null || allFieldToRules.isEmpty()) {
                 log.warn("[PIPE][{}][eventId={}] fieldToRules not found for controlArea={} datasetCode={}", qid, eventId, controlArea, datasetCode);
                 return null;
             }
-
             Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
-
             Map<String, Map<String, String>> errorMessagesByRule = cacheRuntime.errorMessagesSnapshot();
-
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}", qid, normalizedMap.size(), normalizedMap.keySet());
                 log.info("[PIPE][{}] 2) NORMALIZED_MAP full(masked):\n{}", qid, prettyObject(maskMap(normalizedMap)));
             }
-
             Map<String, Rule> compiledRules = cacheRuntime.rulesSnapshot();
-
             Set<String> excludedBlocks = cacheRuntime.excludedBlocks(controlArea);
-
             JsonNode dataNode = originalEvent.path("data");
-
             Map<String, JsonNode> blockNodes = collectTopLevelBlockNodes(dataNode);
-
+            Map<String, JsonNode> arrayBlocks = collectTopLevelArrayBlocks(dataNode);
+            Set<String> arrayLogicalFields = collectLogicalFieldsFromArrays(arrayBlocks);
             Map<String, Map<String, String>> excludedBlockNormalizedMaps = new LinkedHashMap<>();
-
             Map<String, String> excludedBlockDatasetCodes = new LinkedHashMap<>();
-
             Set<String> excludedLogicalFields = new LinkedHashSet<>();
-
             for (String blockName : excludedBlocks) {
                 JsonNode blockNode = blockNodes.get(blockName);
-
                 if (blockNode == null || !blockNode.isObject()) {
                     continue;
                 }
-
                 Map<String, String> blockNormalized = normalizeSingleBlock(blockName, blockNode);
-
                 excludedBlockNormalizedMaps.put(blockName, blockNormalized);
-
                 excludedLogicalFields.addAll(blockNormalized.keySet());
-
                 String blockDatasetCode = text(blockNode, "dataset_code", blockName);
-
                 excludedBlockDatasetCodes.put(blockName, blockDatasetCode);
-
                 if (logPayloads && log.isInfoEnabled()) {
                     log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", qid, blockName, blockDatasetCode, prettyObject(maskMap(blockNormalized)));
                 }
             }
-
-            Map<String, String> mainNormalizedMap = removeKeys(normalizedMap, excludedLogicalFields);
-
-            Map<String, Set<String>> mainFieldToRules = removeKeys(allFieldToRules, excludedLogicalFields);
-
+            Set<String> separatedLogicalFields = new LinkedHashSet<>(excludedLogicalFields);
+            separatedLogicalFields.addAll(arrayLogicalFields);
+            Map<String, String> mainNormalizedMap = removeKeys(normalizedMap, separatedLogicalFields);
+            Map<String, Set<String>> mainFieldToRules = removeKeys(allFieldToRules, separatedLogicalFields);
             Map<String, String> mainEffectiveNormalizedMap = buildEffectiveNormalizedMap(controlArea, mainNormalizedMap, mainFieldToRules);
-
             Map<String, Set<String>> mainEffectiveFieldToRules = buildEffectiveFieldToRules(controlArea, mainEffectiveNormalizedMap, mainFieldToRules);
-
             Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
-
-            ValidationResult mainValidation = 
+            ValidationResult mainValidation =
                     validationService.validate(
-                        compiledRules, 
-                        mainEffectiveNormalizedMap,
-                        mainEffectiveFieldToRules, 
-                        errorMessagesByRule,
-                        filterFlag
+                            compiledRules,
+                            mainEffectiveNormalizedMap,
+                            mainEffectiveFieldToRules,
+                            errorMessagesByRule,
+                            filterFlag
                     );
-
             Map<String, Map<String, String>> mergedDetailByField = new LinkedHashMap<>();
-
             if (mainValidation.detailByField() != null) {
                 mergedDetailByField.putAll(mainValidation.detailByField());
             }
 
             Map<String, List<String>> mergedErrorsByField = new LinkedHashMap<>();
-
             mergeErrors(mergedErrorsByField, mainValidation.errorsByField());
-
             Map<String, Map<String, Map<String, String>>> mergedDetailByDataset = new LinkedHashMap<>();
-
             mergedDetailByDataset.put(datasetCode, safeFieldMap(mainValidation.detailByField()));
-
             boolean anyError = RESULT_ERROR.equalsIgnoreCase(mainValidation.allResult());
-
             boolean anyWarning = RESULT_WARNING.equalsIgnoreCase(mainValidation.allResult());
-
             boolean anyRuleException = PROCESS_RULE_EXCEPTION.equalsIgnoreCase(mainValidation.processStatus());
-
             for (String blockName : excludedBlocks) {
                 JsonNode blockNode = blockNodes.get(blockName);
-
                 if (blockNode == null || !blockNode.isObject()) {
                     continue;
                 }
-
                 String blockDatasetCode = excludedBlockDatasetCodes.getOrDefault(blockName, blockName);
-
                 String blockControlArea = cacheRuntime.controlAreaByDataset(blockDatasetCode);
-
                 if (blockControlArea == null || blockControlArea.isBlank()) {
                     blockControlArea = controlArea;
                 }
-
                 Map<String, String> blockNormalizedMap = excludedBlockNormalizedMaps.getOrDefault(blockName, Map.of());
-
                 Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
-
                 blockLogicalFields.addAll(blockNormalizedMap.keySet());
-
                 Map<String, Set<String>> blockFieldToRules = selectKeys(allFieldToRules, blockLogicalFields);
-
                 Map<String, String> blockEffectiveNormalizedMap = buildEffectiveNormalizedMap(blockControlArea, blockNormalizedMap, blockFieldToRules);
-
                 Map<String, Set<String>> blockEffectiveFieldToRules = buildEffectiveFieldToRules(blockControlArea, blockEffectiveNormalizedMap, blockFieldToRules);
 
-                ValidationResult blockValidation = 
+                ValidationResult blockValidation =
                         validationService.validate(
-                            compiledRules, 
-                            blockEffectiveNormalizedMap, 
-                            blockEffectiveFieldToRules, 
-                            errorMessagesByRule,
-                            filterFlag
+                                compiledRules,
+                                blockEffectiveNormalizedMap,
+                                blockEffectiveFieldToRules,
+                                errorMessagesByRule,
+                                filterFlag
                         );
 
                 if (blockValidation.detailByField() != null) {
                     mergedDetailByField.putAll(blockValidation.detailByField());
                 }
-
                 mergeErrors(mergedErrorsByField, blockValidation.errorsByField());
-
                 mergedDetailByDataset.put(blockDatasetCode, safeFieldMap(blockValidation.detailByField()));
-
                 if (RESULT_ERROR.equalsIgnoreCase(blockValidation.allResult())) {
                     anyError = true;
                 } else if (RESULT_WARNING.equalsIgnoreCase(blockValidation.allResult())) {
                     anyWarning = true;
                 }
-
                 if (PROCESS_RULE_EXCEPTION.equalsIgnoreCase(blockValidation.processStatus())) {
                     anyRuleException = true;
+                }
+            }
+
+            for (Map.Entry<String, JsonNode> arrayEntry : arrayBlocks.entrySet()) {
+                String blockName = arrayEntry.getKey();
+                JsonNode arrayNode = arrayEntry.getValue();
+                if (arrayNode == null || !arrayNode.isArray()) continue;
+                int index = 0;
+                for (JsonNode itemNode : arrayNode) {
+                    if (itemNode == null || !itemNode.isObject()) { index++; continue; }
+                    String itemDatasetCode = text(itemNode, "dataset_code", datasetCode);
+                    String itemControlArea = cacheRuntime.controlAreaByDataset(itemDatasetCode);
+                    if (itemControlArea == null || itemControlArea.isBlank()) itemControlArea = controlArea;
+                    Map<String, String> itemNormalized = normalizeSingleBlock(blockName, itemNode);
+                    Set<String> itemLogicalFields = collectLogicalFieldsFromBlock(itemNode);
+                    itemLogicalFields.addAll(itemNormalized.keySet());
+                    Map<String, Set<String>> itemAllFieldToRules = cacheRuntime.fieldToRules(itemControlArea);
+                    if (itemAllFieldToRules == null || itemAllFieldToRules.isEmpty()) itemAllFieldToRules = allFieldToRules;
+                    Map<String, Set<String>> itemFieldToRules = selectKeys(itemAllFieldToRules, itemLogicalFields);
+                    Map<String, String> itemEffectiveNormalized = buildEffectiveNormalizedMap(itemControlArea, itemNormalized, itemFieldToRules);
+                    Map<String, Set<String>> itemEffectiveFieldToRules = buildEffectiveFieldToRules(itemControlArea, itemEffectiveNormalized, itemFieldToRules);
+                    Boolean itemFilterFlag = cacheRuntime.filterFlag(itemControlArea);
+                    ValidationResult itemValidation = validationService.validate(compiledRules, itemEffectiveNormalized, itemEffectiveFieldToRules, errorMessagesByRule, itemFilterFlag);
+                    String instanceKey = arrayInstanceKey(itemDatasetCode, blockName, index);
+                    mergedDetailByDataset.put(instanceKey, safeFieldMap(itemValidation.detailByField()));
+                    mergeErrorsWithPrefix(mergedErrorsByField, instanceKey, itemValidation.errorsByField());
+                    if (RESULT_ERROR.equalsIgnoreCase(itemValidation.allResult())) anyError = true;
+                    else if (RESULT_WARNING.equalsIgnoreCase(itemValidation.allResult())) anyWarning = true;
+                    if (PROCESS_RULE_EXCEPTION.equalsIgnoreCase(itemValidation.processStatus())) anyRuleException = true;
+                    index++;
                 }
             }
 
@@ -243,10 +211,7 @@ public final class MessageProcessingService {
 
             String shortJson = shortAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm);
 
-            if (shortJson == null) {
-                log.warn("[PIPE][{}][eventId={}] ShortAnswerService returned null.", qid, eventId);
-                return null;
-            }
+            if (shortJson == null) { log.warn("[PIPE][{}][eventId={}] ShortAnswerService returned null.", qid, eventId); return null; }
 
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}] 3) ANSWER_SHORT:\n{}", qid, maskJsonPretty(shortJson));
@@ -261,40 +226,31 @@ public final class MessageProcessingService {
             } else {
                 log.warn("[PIPE][{}][eventId={}] DetailAnswerService returned null.", qid, eventId);
             }
-
             return buildProcessingResult(in, shortJson, detailJson, raw);
-
         } catch (Exception e) {
             log.error("[PIPE][eventId={}] Failed to build answers.", eventId, e);
             return null;
         }
     }
-
     private static String resolveAllResult(boolean anyError, boolean anyWarning) {
         if (anyError) {
             return RESULT_ERROR;
         }
-
         if (anyWarning) {
             return RESULT_WARNING;
         }
-
         return RESULT_SUCCESS;
     }
 
     private String extractDatasetCode(JsonNode root) {
         DatasetCodeCandidate candidate = new DatasetCodeCandidate();
-
         findDatasetCodes(root, candidate);
-
         String datasetCode = candidate.preferred != null
                 ? candidate.preferred
                 : candidate.first;
-
         if (datasetCode == null || datasetCode.isBlank()) {
             return null;
         }
-
         return normalizeDatasetCode(datasetCode);
     }
 
@@ -302,35 +258,26 @@ public final class MessageProcessingService {
         if (node == null || node.isNull()) {
             return;
         }
-
         if (node.isObject()) {
             JsonNode datasetCodeNode = node.get("dataset_code");
-
             if (datasetCodeNode != null && !datasetCodeNode.isNull()) {
                 String datasetCode = datasetCodeNode.asText(null);
-
                 if (datasetCode != null && !datasetCode.isBlank()) {
                     String value = datasetCode.trim();
-
                     if (candidate.first == null) {
                         candidate.first = value;
                     }
-
                     if (candidate.preferred == null && !isExcludedAddressDataset(value)) {
                         candidate.preferred = value;
                     }
                 }
             }
-
             Iterator<JsonNode> elements = node.elements();
-
             while (elements.hasNext()) {
                 findDatasetCodes(elements.next(), candidate);
             }
-
             return;
         }
-
         if (node.isArray()) {
             for (JsonNode child : node) {
                 findDatasetCodes(child, candidate);
@@ -342,37 +289,28 @@ public final class MessageProcessingService {
         if (datasetCode == null || datasetCode.isBlank()) {
             return false;
         }
-
         return datasetCode.endsWith(".Адрес проживания")
                 || datasetCode.endsWith(".Адрес регистрации");
     }
 
     private String normalizeDatasetCode(String datasetCode) {
         String value = datasetCode.trim();
-
         String firstPart = value;
         int dotIndex = value.indexOf('.');
-
         if (dotIndex >= 0) {
             firstPart = value.substring(0, dotIndex);
         }
-
         if ("ДБО".equals(firstPart) || "CRM Infor".equals(firstPart)) {
             if (isExcludedAddressDataset(value)) {
                 return value;
             }
-
             return firstPart;
         }
-
         value = value.replace("УС.ЛиК", "УС ЛИК");
-
         dotIndex = value.indexOf('.');
-
         String system = dotIndex >= 0
                 ? value.substring(0, dotIndex)
                 : value;
-
         return "Дашборд." + system;
     }
 
@@ -383,65 +321,71 @@ public final class MessageProcessingService {
 
     private Map<String, JsonNode> collectTopLevelBlockNodes(JsonNode dataNode) {
         Map<String, JsonNode> result = new LinkedHashMap<>();
-
         if (dataNode == null || !dataNode.isObject()) {
             return result;
         }
-
         Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
-
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> entry = fields.next();
-
             if (entry.getValue() != null && entry.getValue().isObject()) {
                 result.put(entry.getKey(), entry.getValue());
             }
         }
-
         return result;
+    }
+
+    private Map<String, JsonNode> collectTopLevelArrayBlocks(JsonNode dataNode) {
+        Map<String, JsonNode> result = new LinkedHashMap<>();
+        if (dataNode == null || !dataNode.isObject()) return result;
+        Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry.getValue() != null && entry.getValue().isArray()) result.put(entry.getKey(), entry.getValue());
+        }
+        return result;
+    }
+
+    private Set<String> collectLogicalFieldsFromArrays(Map<String, JsonNode> arrayBlocks) {
+        Set<String> result = new LinkedHashSet<>();
+        if (arrayBlocks == null || arrayBlocks.isEmpty()) return result;
+        for (JsonNode arrayNode : arrayBlocks.values()) {
+            if (arrayNode == null || !arrayNode.isArray()) continue;
+            for (JsonNode item : arrayNode) if (item != null && item.isObject()) result.addAll(collectLogicalFieldsFromBlock(item));
+        }
+        return result;
+    }
+
+    private String arrayInstanceKey(String datasetCode, String blockName, int index) {
+        return (datasetCode == null ? "" : datasetCode) + "#" + blockName + "#" + index;
     }
 
     private Map<String, String> normalizeSingleBlock(String blockName, JsonNode blockNode) {
         ObjectNode root = mapper.createObjectNode();
-
         ObjectNode data = mapper.createObjectNode();
-
         data.set(blockName, blockNode);
-
         root.set("data", data);
-
         return normalizer.normalize(root);
     }
 
     private Set<String> collectLogicalFieldsFromBlock(JsonNode blockNode) {
         Set<String> out = new LinkedHashSet<>();
-
         if (blockNode == null || !blockNode.isObject()) {
             return out;
         }
-
         Iterator<Map.Entry<String, JsonNode>> it = blockNode.fields();
-
         while (it.hasNext()) {
             Map.Entry<String, JsonNode> e = it.next();
-
             String key = e.getKey();
-
             JsonNode value = e.getValue();
-
             if (key == null || !key.startsWith("mapping.") || value == null || value.isNull()) {
                 continue;
             }
-
             String logical = isNullLikeText(value) ? null : value.asText(null);
-
             if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical.trim())) {
                 continue;
             }
-
             out.add(logical.trim());
         }
-
         return out;
     }
 
@@ -449,35 +393,28 @@ public final class MessageProcessingService {
         if (source == null || source.isEmpty()) {
             return new LinkedHashMap<>();
         }
-
         if (keysToRemove == null || keysToRemove.isEmpty()) {
             return new LinkedHashMap<>(source);
         }
-
         Map<String, V> result = new LinkedHashMap<>();
-
         for (Map.Entry<String, V> entry : source.entrySet()) {
             if (!keysToRemove.contains(entry.getKey())) {
                 result.put(entry.getKey(), entry.getValue());
             }
         }
-
         return result;
     }
 
     private <V> Map<String, V> selectKeys(Map<String, V> source, Set<String> allowedKeys) {
         Map<String, V> result = new LinkedHashMap<>();
-
         if (source == null || source.isEmpty() || allowedKeys == null || allowedKeys.isEmpty()) {
             return result;
         }
-
         for (Map.Entry<String, V> entry : source.entrySet()) {
             if (allowedKeys.contains(entry.getKey())) {
                 result.put(entry.getKey(), entry.getValue());
             }
         }
-
         return result;
     }
 
@@ -486,30 +423,23 @@ public final class MessageProcessingService {
             Map<String, String> normalizedMap
     ) {
         Map<String, Set<String>> result = new LinkedHashMap<>();
-
         if (fieldToRules == null || fieldToRules.isEmpty() || normalizedMap == null || normalizedMap.isEmpty()) {
             return result;
         }
-
         for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
             String logicalField = entry.getKey();
-
             if (logicalField == null || logicalField.isBlank()) {
                 continue;
             }
-
             if (normalizedMap.containsKey(logicalField)) {
                 result.put(logicalField, entry.getValue());
                 continue;
             }
-
             String alt = logicalField.replace('.', ',');
-
             if (normalizedMap.containsKey(alt)) {
                 result.put(logicalField, entry.getValue());
             }
         }
-
         return result;
     }
 
@@ -521,51 +451,33 @@ public final class MessageProcessingService {
         Map<String, String> safeNormalized = normalizedMap == null
                 ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(normalizedMap);
-
         Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
-
-        log.info(
-                "[FILTER-FLAG] controlArea={} filterFlag={} normalizedFields={} fieldToRulesFields={}",
-                controlArea,
-                filterFlag,
-                safeNormalized.size(),
-                fieldToRules == null ? 0 : fieldToRules.size()
-        );
-
         if (Boolean.TRUE.equals(filterFlag)) {
             return safeNormalized;
         }
-
         Map<String, String> effective = new LinkedHashMap<>();
-
         if (fieldToRules == null || fieldToRules.isEmpty()) {
             return safeNormalized;
         }
-
         for (String logicalField : fieldToRules.keySet()) {
             if (logicalField == null || logicalField.isBlank()) {
                 continue;
             }
-
             if (safeNormalized.containsKey(logicalField)) {
                 effective.put(logicalField, safeNormalized.get(logicalField));
                 continue;
             }
-
             String alt = logicalField.replace('.', ',');
-
             if (safeNormalized.containsKey(alt)) {
                 effective.put(logicalField, safeNormalized.get(alt));
                 continue;
             }
-
             effective.put(logicalField, null);
         }
 
         for (Map.Entry<String, String> entry : safeNormalized.entrySet()) {
             effective.putIfAbsent(entry.getKey(), entry.getValue());
         }
-
         return effective;
     }
 
@@ -575,46 +487,45 @@ public final class MessageProcessingService {
             Map<String, Set<String>> fieldToRules
     ) {
         Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
-
         if (!Boolean.TRUE.equals(filterFlag)) {
             return fieldToRules == null
                     ? new LinkedHashMap<>()
                     : new LinkedHashMap<>(fieldToRules);
         }
-
         return filterFieldToRulesByNormalizedMap(fieldToRules, effectiveNormalizedMap);
     }
-
     private Map<String, Map<String, String>> safeFieldMap(Map<String, Map<String, String>> source) {
         return source == null
                 ? Map.of()
                 : source;
     }
 
+    private void mergeErrorsWithPrefix(Map<String, List<String>> target, String instanceKey, Map<String, List<String>> source) {
+        if (source == null || source.isEmpty()) return;
+        for (Map.Entry<String, List<String>> entry : source.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank() || entry.getValue() == null || entry.getValue().isEmpty()) continue;
+            target.put(instanceKey + "::" + entry.getKey(), List.copyOf(new LinkedHashSet<>(entry.getValue())));
+        }
+    }
+
     private void mergeErrors(Map<String, List<String>> target, Map<String, List<String>> source) {
         if (source == null || source.isEmpty()) {
             return;
         }
-
         for (Map.Entry<String, List<String>> entry : source.entrySet()) {
             String logicalField = entry.getKey();
-
             List<String> messages = entry.getValue();
-
             if (logicalField == null || logicalField.isBlank() || messages == null || messages.isEmpty()) {
                 continue;
             }
-
             LinkedHashSet<String> merged = new LinkedHashSet<>(
                     target.getOrDefault(logicalField, List.of())
             );
-
             for (String msg : messages) {
                 if (msg != null && !msg.isBlank()) {
                     merged.add(msg);
                 }
             }
-
             if (!merged.isEmpty()) {
                 target.put(logicalField, new ArrayList<>(merged));
             }
@@ -625,21 +536,16 @@ public final class MessageProcessingService {
         if (source == null || source.isEmpty()) {
             return Map.of();
         }
-
         Map<String, List<String>> result = new LinkedHashMap<>();
-
         for (Map.Entry<String, List<String>> entry : source.entrySet()) {
             if (entry.getKey() == null || entry.getKey().isBlank()) {
                 continue;
             }
-
             List<String> messages = entry.getValue() == null
                     ? List.of()
                     : entry.getValue();
-
             result.put(entry.getKey(), List.copyOf(messages));
         }
-
         return Map.copyOf(result);
     }
 
@@ -657,7 +563,6 @@ public final class MessageProcessingService {
         if (s == null) {
             return null;
         }
-
         return s
                 .replaceAll("(\"birthdate\"\\s*:\\s*\")[^\"]*(\")", "$1***$2")
                 .replaceAll("(\"clientSnils\"\\s*:\\s*\")[^\"]*(\")", "$1***$2")
@@ -671,15 +576,12 @@ public final class MessageProcessingService {
         if (json == null || json.isBlank()) {
             return json;
         }
-
         try {
             JsonNode root = mapper.readTree(json);
             maskNode(root);
-
             return mapper
                     .writerWithDefaultPrettyPrinter()
                     .writeValueAsString(root);
-
         } catch (Exception e) {
             return maskInline(json);
         }
@@ -689,22 +591,17 @@ public final class MessageProcessingService {
         if (node == null) {
             return;
         }
-
         if (node.isObject()) {
             Iterator<String> it = node.fieldNames();
-
             while (it.hasNext()) {
                 String fn = it.next();
-
                 JsonNode child = node.get(fn);
-
                 if (isSensitiveKey(fn) && node instanceof ObjectNode obj) {
                     obj.put(fn, "***");
                 } else {
                     maskNode(child);
                 }
             }
-
         } else if (node.isArray()) {
             for (JsonNode child : node) {
                 maskNode(child);
@@ -716,9 +613,7 @@ public final class MessageProcessingService {
         if (key == null) {
             return false;
         }
-
         String k = key.toLowerCase(Locale.ROOT);
-
         return k.equals("birthdate")
                 || k.equals("clientsnils")
                 || k.equals("snils")
@@ -732,14 +627,10 @@ public final class MessageProcessingService {
         if (m == null) {
             return Map.of();
         }
-
         Map<String, String> out = new LinkedHashMap<>();
-
         for (Map.Entry<String, String> e : m.entrySet()) {
             String k = e.getKey();
-
             String v = e.getValue();
-
             if (k != null && (
                     isSensitiveKey(k)
                             || k.toLowerCase(Locale.ROOT).contains("snils")
@@ -752,7 +643,6 @@ public final class MessageProcessingService {
                 out.put(k, v);
             }
         }
-
         return out;
     }
 
@@ -760,9 +650,7 @@ public final class MessageProcessingService {
         if (node == null) {
             return def;
         }
-
         JsonNode v = node.get(field);
-
         return v == null || v.isNull()
                 ? def
                 : v.asText(def);
@@ -777,7 +665,6 @@ public final class MessageProcessingService {
         if (in == null) {
             throw new IllegalArgumentException("MessageRecord is null");
         }
-
         if (in.mqMessageId != null) {
             return ProcessingResult.forMq(
                     in.mqMessageId,
@@ -786,7 +673,6 @@ public final class MessageProcessingService {
                     originalJson
             );
         }
-
         if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
             return ProcessingResult.forJms(
                     in.jmsMessageId,
@@ -795,7 +681,6 @@ public final class MessageProcessingService {
                     originalJson
             );
         }
-
         throw new IllegalStateException(
                 "MessageRecord has neither mqMessageId nor jmsMessageId. Cannot build ProcessingResult. " + in
         );
@@ -805,15 +690,12 @@ public final class MessageProcessingService {
         if (in == null) {
             return "unknown";
         }
-
         if (in.mqMessageId != null) {
             return MessageRecord.mqIdToHex(in.mqMessageId);
         }
-
         if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
             return in.jmsMessageId;
         }
-
         return "unknown";
     }
 
@@ -821,42 +703,31 @@ public final class MessageProcessingService {
         if (node == null || node.isNull()) {
             return 0;
         }
-
         int converted = 0;
-
         if (node.isObject()) {
             ObjectNode objectNode = (ObjectNode) node;
-
             Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
-
             List<String> fieldsToNull = new ArrayList<>();
-
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = fields.next();
-
                 JsonNode child = entry.getValue();
-
                 if (isNullLikeText(child)) {
                     fieldsToNull.add(entry.getKey());
                 } else {
                     converted += normalizeEmptyStringsToNull(child);
                 }
             }
-
             for (String fieldName : fieldsToNull) {
                 objectNode.set(fieldName, mapper.nullNode());
                 converted++;
             }
-
             return converted;
         }
-
         if (node.isArray()) {
             for (JsonNode child : node) {
                 converted += normalizeEmptyStringsToNull(child);
             }
         }
-
         return converted;
     }
 
@@ -864,9 +735,7 @@ public final class MessageProcessingService {
         if (node == null || !node.isTextual()) {
             return false;
         }
-
         String text = node.asText();
-
         return text == null || text.isEmpty();
     }
 }

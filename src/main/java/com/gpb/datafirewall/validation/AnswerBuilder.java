@@ -4,26 +4,23 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import java.time.Instant;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
 public final class AnswerBuilder {
-
     private final ObjectMapper mapper;
-
     public AnswerBuilder(ObjectMapper mapper) {
         this.mapper = mapper;
     }
 
     public ObjectNode buildAnswer(
-        JsonNode originalEvent,
-        ValidationResult validation,
-        String qid,
-        Long createdDttm,
-        Long readedDttm
+            JsonNode originalEvent,
+            ValidationResult validation,
+            String qid,
+            Long createdDttm,
+            Long readedDttm
     ) {
         ObjectNode out = mapper.createObjectNode();
         copyIfExists(originalEvent, out, List.of(
@@ -34,14 +31,11 @@ public final class AnswerBuilder {
                 "dfw_readed_from_mq_dttm",
                 "dfw_created_dttm"
         ));
-
         out.put("dfw_action_type", "ANSWER");
-
         String now = Instant.now().toString();
         // out.put("dfw_readed_buf_dttm", now);
         // out.put("dfw_sending_to_mq_dttm", now);
         // out.put("dfw_action_dttm", now);
-
         // if (out.get("dfw_created_dttm") == null) {
         //     out.put("dfw_created_dttm", now);
         // }
@@ -49,117 +43,103 @@ public final class AnswerBuilder {
         out.put("dfw_readed_dttm", readedDttm);
         out.put("dfw_action_dttm", now);
         out.put("dfw_query_id", qid);
-
         String processStatus = (validation == null || validation.processStatus() == null)
                 ? "ERROR"
                 : validation.processStatus();
         out.put("PROCESS_STATUS", processStatus);
-
         ObjectNode details = buildShortDetails(originalEvent, validation);
         details.set("errors", buildErrors(originalEvent, validation));
         out.set("details", details);
-
         ObjectNode wrapped = mapper.createObjectNode();
         wrapped.set("data", out);
-
         return wrapped;
     }
 
     private ObjectNode buildShortDetails(JsonNode originalEvent, ValidationResult validation) {
         ObjectNode details = mapper.createObjectNode();
-
         Map<String, Map<String, String>> general =
                 (validation == null || validation.detailByField() == null)
                         ? Map.of()
                         : validation.detailByField();
-
         Map<String, Map<String, Map<String, String>>> byDataset =
                 (validation == null || validation.detailByDataset() == null)
                         ? Map.of()
                         : validation.detailByDataset();
-
         JsonNode data = (originalEvent == null) ? null : originalEvent.get("data");
-
         String all = (validation == null || validation.allResult() == null)
                 ? "ERROR"
                 : validation.allResult();
         details.put("ALL_RESULT", all);
-
         appendDynamicShortDetails(
                 details,
                 data,
                 general,
                 byDataset
         );
-
         return details;
     }
 
     private ObjectNode buildErrors(JsonNode originalEvent, ValidationResult validation) {
         ObjectNode errors = mapper.createObjectNode();
-
         Map<String, List<String>> errorsByField =
                 (validation == null || validation.errorsByField() == null)
                         ? Map.of()
                         : validation.errorsByField();
-
         if (errorsByField.isEmpty()) {
             return errors;
         }
-
         JsonNode data = (originalEvent == null) ? null : originalEvent.get("data");
         if (data == null || !data.isObject()) {
             return errors;
         }
-
         Iterator<Map.Entry<String, JsonNode>> it = data.fields();
         while (it.hasNext()) {
             Map.Entry<String, JsonNode> blockEntry = it.next();
             String blockName = blockEntry.getKey();
             JsonNode blockNode = blockEntry.getValue();
-
-            if (blockName == null || blockNode == null || !blockNode.isObject()) {
+            if (blockName == null || blockNode == null) continue;
+            if (blockNode.isArray()) {
+                ArrayNode arrayErrors = mapper.createArrayNode();
+                int index = 0;
+                for (JsonNode item : blockNode) {
+                    if (item != null && item.isObject()) {
+                        String datasetCode = text(item, "dataset_code", null);
+                        String instanceKey = arrayInstanceKey(datasetCode, blockName, index);
+                        ObjectNode itemErrors = buildBlockErrors(item, errorsByField, instanceKey);
+                        arrayErrors.add(itemErrors);
+                    }
+                    index++;
+                }
+                if (arrayErrors.size() > 0) errors.set(blockName, arrayErrors);
                 continue;
             }
-
-            ObjectNode blockErrors = buildBlockErrors(blockNode, errorsByField);
-
+            if (!blockNode.isObject()) continue;
+            ObjectNode blockErrors = buildBlockErrors(blockNode, errorsByField, null);
             if ("documents".equals(blockName)) {
                 ArrayNode cardsErrors = buildClientIdCardErrors(blockNode, errorsByField);
-                if (cardsErrors.size() > 0) {
-                    blockErrors.set("clientIdCard", cardsErrors);
-                }
+                if (cardsErrors.size() > 0) blockErrors.set("clientIdCard", cardsErrors);
             }
-
-            if (blockErrors.size() > 0) {
-                errors.set(blockName, blockErrors);
-            }
+            if (blockErrors.size() > 0) errors.set(blockName, blockErrors);
         }
-
         return errors;
     }
 
-    private ObjectNode buildBlockErrors(JsonNode blockNode, Map<String, List<String>> errorsByField) {
+    private ObjectNode buildBlockErrors(JsonNode blockNode, Map<String, List<String>> errorsByField, String instanceKey) {
         ObjectNode blockErrors = mapper.createObjectNode();
-
         Iterator<Map.Entry<String, JsonNode>> fields = blockNode.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> e = fields.next();
             String key = e.getKey();
             JsonNode value = e.getValue();
-
             if (key == null || !key.startsWith("mapping.") || value == null || value.isNull()) {
                 continue;
             }
-
             String localFieldName = key.substring("mapping.".length()).trim();
             String logicalField = value.asText(null);
-
             if (logicalField == null || logicalField.isBlank() || "none".equalsIgnoreCase(logicalField)) {
                 continue;
             }
-
-            List<String> fieldErrors = findErrorsByLogicalField(errorsByField, logicalField);
+            List<String> fieldErrors = findErrorsByLogicalField(errorsByField, logicalField, instanceKey);
             if (fieldErrors != null && !fieldErrors.isEmpty()) {
                 ArrayNode arr = mapper.createArrayNode();
                 for (String msg : fieldErrors) {
@@ -172,29 +152,24 @@ public final class AnswerBuilder {
                 }
             }
         }
-
         return blockErrors;
     }
 
     private ArrayNode buildClientIdCardErrors(JsonNode documentsNode, Map<String, List<String>> errorsByField) {
         ArrayNode result = mapper.createArrayNode();
-
         JsonNode cards = documentsNode == null ? null : documentsNode.get("clientIdCard");
         if (cards == null || !cards.isArray() || cards.isEmpty()) {
             return result;
         }
-
         for (JsonNode cardNode : cards) {
             if (cardNode == null || !cardNode.isObject()) {
                 continue;
             }
-
-            ObjectNode cardErrors = buildBlockErrors(cardNode, errorsByField);
+            ObjectNode cardErrors = buildBlockErrors(cardNode, errorsByField, null);
             if (cardErrors.size() > 0) {
                 result.add(cardErrors);
             }
         }
-
         return result;
     }
 
@@ -207,26 +182,25 @@ public final class AnswerBuilder {
         if (details == null || data == null || !data.isObject()) {
             return;
         }
-
         Iterator<Map.Entry<String, JsonNode>> blocks = data.fields();
         while (blocks.hasNext()) {
             Map.Entry<String, JsonNode> blockEntry = blocks.next();
             String blockName = blockEntry.getKey();
             JsonNode blockNode = blockEntry.getValue();
-
-            if (blockName == null || blockNode == null || !blockNode.isObject()) {
+            if (blockName == null || blockNode == null) continue;
+            if (blockNode.isArray()) {
+                ArrayNode blockShortArray = buildGenericShortArray(blockNode, blockName, general, byDataset);
+                if (blockShortArray.size() > 0) details.set(blockName, blockShortArray);
                 continue;
             }
-
-            ObjectNode blockShortNode = buildGenericShortNode(blockNode, general, byDataset);
-            if (blockShortNode.size() > 0) {
-                details.set(blockName, blockShortNode);
-            }
+            if (!blockNode.isObject()) continue;
+            ObjectNode blockShortNode = buildGenericShortNode(blockNode, null, general, byDataset);
+            if (blockShortNode.size() > 0) details.set(blockName, blockShortNode);
         }
     }
-
     private ObjectNode buildGenericShortNode(
             JsonNode sourceNode,
+            String instanceKey,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
@@ -234,20 +208,15 @@ public final class AnswerBuilder {
         if (sourceNode == null || !sourceNode.isObject()) {
             return result;
         }
-
         String datasetCode = text(sourceNode, "dataset_code", null);
-
-        appendMappedFieldStatuses(result, sourceNode, datasetCode, general, byDataset);
-        appendNestedShortNodes(result, sourceNode, general, byDataset);
-
+        appendMappedFieldStatuses(result, sourceNode, datasetCode, instanceKey, general, byDataset);
+        appendNestedShortNodes(result, sourceNode, instanceKey, general, byDataset);
         if (result.size() == 0) {
             return result;
         }
-
         if (datasetCode == null) {
             return result;
         }
-
         ObjectNode withDatasetCode = mapper.createObjectNode();
         withDatasetCode.put("dataset_code", datasetCode);
         withDatasetCode.setAll(result);
@@ -258,6 +227,7 @@ public final class AnswerBuilder {
             ObjectNode result,
             JsonNode sourceNode,
             String datasetCode,
+            String instanceKey,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
@@ -265,17 +235,14 @@ public final class AnswerBuilder {
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> fieldEntry = fields.next();
             String key = fieldEntry.getKey();
-
             if (key == null || !key.startsWith("mapping.")) {
                 continue;
             }
-
             String localFieldName = key.substring("mapping.".length()).trim();
             if (localFieldName.isEmpty()) {
                 continue;
             }
-
-            String status = statusByMappingFlexibleOrNull(sourceNode, key, datasetCode, general, byDataset);
+            String status = statusByMappingFlexibleOrNull(sourceNode, key, datasetCode, instanceKey, general, byDataset);
             if (status != null) {
                 result.put(localFieldName, status);
             }
@@ -285,6 +252,7 @@ public final class AnswerBuilder {
     private void appendNestedShortNodes(
             ObjectNode result,
             JsonNode sourceNode,
+            String path,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
@@ -293,24 +261,21 @@ public final class AnswerBuilder {
             Map.Entry<String, JsonNode> fieldEntry = fields.next();
             String key = fieldEntry.getKey();
             JsonNode value = fieldEntry.getValue();
-
             if (key == null || key.startsWith("mapping.") || "dataset_code".equals(key)) {
                 continue;
             }
             if (value == null || value.isNull()) {
                 continue;
             }
-
             if (value.isObject()) {
-                ObjectNode child = buildGenericShortNode(value, general, byDataset);
+                ObjectNode child = buildGenericShortNode(value, null, general, byDataset);
                 if (child.size() > 0) {
                     result.set(key, child);
                 }
                 continue;
             }
-
             if (value.isArray()) {
-                ArrayNode children = buildGenericShortArray(value, general, byDataset);
+                ArrayNode children = buildGenericShortArray(value, key, general, byDataset);
                 if (children.size() > 0) {
                     result.set(key, children);
                 }
@@ -320,6 +285,7 @@ public final class AnswerBuilder {
 
     private ArrayNode buildGenericShortArray(
             JsonNode arrayNode,
+            String blockName,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
@@ -327,44 +293,39 @@ public final class AnswerBuilder {
         if (arrayNode == null || !arrayNode.isArray()) {
             return result;
         }
-
+        int index = 0;
         for (JsonNode item : arrayNode) {
-            if (item == null || !item.isObject()) {
-                continue;
-            }
-
-            ObjectNode child = buildGenericShortNode(item, general, byDataset);
-            if (child.size() == 0) {
-                continue;
-            }
-
+            if (item == null || !item.isObject()) { index++; continue; }
+            String datasetCode = text(item, "dataset_code", null);
+            String instanceKey = arrayInstanceKey(datasetCode, blockName, index);
+            ObjectNode child = buildGenericShortNode(item, instanceKey, general, byDataset);
+            if (child.size() == 0) { index++; continue; }
             String elemId = text(item, "elemId", null);
             if (elemId != null && !child.has("elemId")) {
                 child.put("elemId", elemId);
             }
-
             result.add(child);
+            index++;
         }
-
         return result;
     }
 
-    private List<String> findErrorsByLogicalField(Map<String, List<String>> errorsByField, String logicalField) {
-        if (logicalField == null || logicalField.isBlank() || errorsByField == null || errorsByField.isEmpty()) {
-            return null;
+    private List<String> findErrorsByLogicalField(Map<String, List<String>> errorsByField, String logicalField, String instanceKey) {
+        if (logicalField == null || logicalField.isBlank() || errorsByField == null || errorsByField.isEmpty()) return null;
+        if (instanceKey != null) {
+            List<String> instanceErrors = errorsByField.get(instanceKey + "::" + logicalField);
+            if (instanceErrors == null) instanceErrors = errorsByField.get(instanceKey + "::" + logicalField.replace('.', ','));
+            if (instanceErrors != null && !instanceErrors.isEmpty()) return instanceErrors;
         }
-
         List<String> errors = errorsByField.get(logicalField);
         if (errors != null && !errors.isEmpty()) {
             return errors;
         }
-
         String alt = logicalField.replace('.', ',');
         errors = errorsByField.get(alt);
         if (errors != null && !errors.isEmpty()) {
             return errors;
         }
-
         return null;
     }
 
@@ -372,10 +333,11 @@ public final class AnswerBuilder {
             JsonNode node,
             String mappingKey,
             String datasetCode,
+            String instanceKey,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
-        Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, general, byDataset);
+        Map<String, String> rules = findRulesByMapping(node, mappingKey, datasetCode, instanceKey, general, byDataset);
         return rules == null ? null : aggregateFieldStatus(rules);
     }
 
@@ -383,27 +345,27 @@ public final class AnswerBuilder {
             JsonNode node,
             String mappingKey,
             String datasetCode,
+            String instanceKey,
             Map<String, Map<String, String>> general,
             Map<String, Map<String, Map<String, String>>> byDataset
     ) {
         if (!hasMappingKey(node, mappingKey)) {
             return null;
         }
-
         String logical = text(node, mappingKey, null);
         String localFieldName = localFieldName(mappingKey);
-
         Map<String, String> rules = null;
-
-        if (datasetCode != null && byDataset != null && !byDataset.isEmpty()) {
+        if (instanceKey != null && byDataset != null && !byDataset.isEmpty()) {
+            Map<String, Map<String, String>> instanceDetail = byDataset.get(instanceKey);
+            rules = findRulesInDetail(instanceDetail, logical, localFieldName, mappingKey);
+        }
+        if (rules == null && datasetCode != null && byDataset != null && !byDataset.isEmpty()) {
             Map<String, Map<String, String>> datasetDetail = byDataset.get(datasetCode);
             rules = findRulesInDetail(datasetDetail, logical, localFieldName, mappingKey);
         }
-
         if (rules == null && general != null && !general.isEmpty()) {
             rules = findRulesInDetail(general, logical, localFieldName, mappingKey);
         }
-
         return rules;
     }
 
@@ -411,26 +373,24 @@ public final class AnswerBuilder {
         if (rules == null || rules.isEmpty()) {
             return "ERROR";
         }
-
         boolean hasWarning = false;
-
         for (String v : rules.values()) {
             if (v == null || v.isBlank()) {
                 continue;
             }
-
             if ("ERROR".equalsIgnoreCase(v)) {
                 return "ERROR";
             }
-
             if ("WARNING".equalsIgnoreCase(v)) {
                 hasWarning = true;
             }
         }
-
         return hasWarning ? "WARNING" : "SUCCESS";
     }
 
+    private String arrayInstanceKey(String datasetCode, String blockName, int index) {
+        return (datasetCode == null ? "" : datasetCode) + "#" + blockName + "#" + index;
+    }
 
     private static void copyIfExists(JsonNode src, ObjectNode dst, List<String> fields) {
         if (src == null || dst == null || fields == null) return;
@@ -456,17 +416,14 @@ public final class AnswerBuilder {
         if (detail == null || detail.isEmpty()) {
             return null;
         }
-
         Map<String, String> rules = findRulesByKey(detail, logical);
         if (rules != null) {
             return rules;
         }
-
         rules = findRulesByKey(detail, localFieldName);
         if (rules != null) {
             return rules;
         }
-
         return findRulesByKey(detail, mappingKey);
     }
 
@@ -474,12 +431,10 @@ public final class AnswerBuilder {
         if (key == null || key.isBlank()) {
             return null;
         }
-
         Map<String, String> rules = detail.get(key);
         if (rules != null) {
             return rules;
         }
-
         return detail.get(key.replace('.', ','));
     }
 
