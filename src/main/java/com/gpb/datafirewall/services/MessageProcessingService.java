@@ -103,6 +103,7 @@ public final class MessageProcessingService {
             // Reuse these immutable snapshots for all blocks of this message.
             Map<String, String> genderMapping = cacheRuntime.genderMappingSnapshot();
             Map<String, String> typeDulMapping = cacheRuntime.typeDulMappingSnapshot();
+            Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
             Map<String, String> normalizedMap = normalizer.normalize(
                     originalEvent,
                     genderMapping,
@@ -110,8 +111,8 @@ public final class MessageProcessingService {
             );
 
             if (logPayloads && log.isInfoEnabled()) {
-                log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}", qid, normalizedMap.size(), normalizedMap.keySet());
-                log.info("[PIPE][{}] 2) NORMALIZED_MAP full(masked):\n{}", qid, prettyObject(maskMap(normalizedMap)));
+                log.info("[PIPE][{}] 2) RAW_NORMALIZED_MAP size={} keys={}", qid, normalizedMap.size(), normalizedMap.keySet());
+                log.info("[PIPE][{}] 2) RAW_NORMALIZED_MAP full(masked):\n{}", qid, prettyObject(maskMap(normalizedMap)));
             }
 
             Map<String, Rule> compiledRules = cacheRuntime.rulesSnapshot();
@@ -120,15 +121,32 @@ public final class MessageProcessingService {
 
             Map<String, JsonNode> blockNodes = collectTopLevelBlockNodes(dataNode);
             Map<String, JsonNode> arrayBlocks = collectTopLevelArrayBlocks(dataNode);
-            Set<String> arrayLogicalFields = collectLogicalFieldsFromArrays(arrayBlocks);
+            Set<String> arrayLogicalFields = collectLogicalFieldsFromArrays(
+                    arrayBlocks,
+                    datasetCode,
+                    controlArea,
+                    allFieldToRules
+            );
 
             Map<String, Map<String, String>> excludedBlockNormalizedMaps = new LinkedHashMap<>();
             Map<String, String> excludedBlockDatasetCodes = new LinkedHashMap<>();
+            Map<String, Map<String, Set<String>>> excludedBlockFieldToRules = new LinkedHashMap<>();
             Set<String> excludedLogicalFields = new LinkedHashSet<>();
 
             for (String blockName : excludedBlocks) {
                 JsonNode blockNode = blockNodes.get(blockName);
                 if (blockNode == null || !blockNode.isObject()) continue;
+
+                String blockDatasetCode = text(blockNode, "dataset_code", blockName);
+                String blockControlArea = cacheRuntime.controlAreaByDataset(blockDatasetCode);
+                if (blockControlArea == null || blockControlArea.isBlank()) blockControlArea = controlArea;
+
+                Map<String, Set<String>> blockAllFieldToRules = cacheRuntime.fieldToRules(blockControlArea);
+                if (blockAllFieldToRules == null || blockAllFieldToRules.isEmpty()) {
+                    blockAllFieldToRules = allFieldToRules;
+                }
+
+                Boolean blockFilterFlag = cacheRuntime.filterFlag(blockControlArea);
 
                 Map<String, String> blockNormalized = normalizeSingleBlock(
                         blockName,
@@ -136,14 +154,27 @@ public final class MessageProcessingService {
                         genderMapping,
                         typeDulMapping
                 );
-                excludedBlockNormalizedMaps.put(blockName, blockNormalized);
-                excludedLogicalFields.addAll(blockNormalized.keySet());
 
-                String blockDatasetCode = text(blockNode, "dataset_code", blockName);
+                Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
+                blockLogicalFields.addAll(blockNormalized.keySet());
+
+                Map<String, Set<String>> blockExpectedFieldToRules = Boolean.TRUE.equals(blockFilterFlag)
+                        ? blockAllFieldToRules
+                        : selectKeys(blockAllFieldToRules, blockLogicalFields);
+
+                EffectiveNormalization blockEffective = buildEffectiveNormalization(
+                        blockFilterFlag,
+                        blockNormalized,
+                        blockExpectedFieldToRules
+                );
+
+                excludedBlockNormalizedMaps.put(blockName, blockEffective.normalizedMap());
                 excludedBlockDatasetCodes.put(blockName, blockDatasetCode);
+                excludedBlockFieldToRules.put(blockName, blockEffective.fieldToRules());
+                excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
 
                 if (logPayloads && log.isInfoEnabled()) {
-                    log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", qid, blockName, blockDatasetCode, prettyObject(maskMap(blockNormalized)));
+                    log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", qid, blockName, blockDatasetCode, prettyObject(maskMap(blockEffective.normalizedMap())));
                 }
             }
 
@@ -152,13 +183,20 @@ public final class MessageProcessingService {
 
             Map<String, String> mainNormalizedMap = removeKeys(normalizedMap, separatedLogicalFields);
             Map<String, Set<String>> mainFieldToRules = removeKeys(allFieldToRules, separatedLogicalFields);
-            Map<String, String> mainEffectiveNormalizedMap = buildEffectiveNormalizedMap(controlArea, mainNormalizedMap, mainFieldToRules);
-            Map<String, Set<String>> mainEffectiveFieldToRules = buildEffectiveFieldToRules(controlArea, mainEffectiveNormalizedMap, mainFieldToRules);
+            EffectiveNormalization mainEffective = buildEffectiveNormalization(
+                    filterFlag,
+                    mainNormalizedMap,
+                    mainFieldToRules
+            );
 
-            Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
+            if (logPayloads && log.isInfoEnabled()) {
+                log.info("[PIPE][{}] 2) MAIN_NORMALIZED_MAP size={} keys={}", qid, mainEffective.normalizedMap().size(), mainEffective.normalizedMap().keySet());
+                log.info("[PIPE][{}] 2) MAIN_NORMALIZED_MAP full(masked):\n{}", qid, prettyObject(maskMap(mainEffective.normalizedMap())));
+            }
+
             ValidationResult mainValidation = validationService.validate(
-                    compiledRules, mainEffectiveNormalizedMap, mainEffectiveFieldToRules,
-                    errorMessagesByRule, filterFlag);
+                    compiledRules, mainEffective.normalizedMap(), mainEffective.fieldToRules(),
+                    errorMessagesByRule);
 
             Map<String, Map<String, String>> mergedDetailByField = new LinkedHashMap<>();
             if (mainValidation.detailByField() != null) mergedDetailByField.putAll(mainValidation.detailByField());
@@ -178,24 +216,11 @@ public final class MessageProcessingService {
                 if (blockNode == null || !blockNode.isObject()) continue;
 
                 String blockDatasetCode = excludedBlockDatasetCodes.getOrDefault(blockName, blockName);
-                String blockControlArea = cacheRuntime.controlAreaByDataset(blockDatasetCode);
-                if (blockControlArea == null || blockControlArea.isBlank()) blockControlArea = controlArea;
-
                 Map<String, String> blockNormalizedMap = excludedBlockNormalizedMaps.getOrDefault(blockName, Map.of());
-                Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
-                blockLogicalFields.addAll(blockNormalizedMap.keySet());
-
-                Map<String, Set<String>> blockAllFieldToRules = cacheRuntime.fieldToRules(blockControlArea);
-                if (blockAllFieldToRules == null || blockAllFieldToRules.isEmpty()) blockAllFieldToRules = allFieldToRules;
-
-                Map<String, Set<String>> blockFieldToRules = selectKeys(blockAllFieldToRules, blockLogicalFields);
-                Map<String, String> blockEffectiveNormalizedMap = buildEffectiveNormalizedMap(blockControlArea, blockNormalizedMap, blockFieldToRules);
-                Map<String, Set<String>> blockEffectiveFieldToRules = buildEffectiveFieldToRules(blockControlArea, blockEffectiveNormalizedMap, blockFieldToRules);
-
-                Boolean blockFilterFlag = cacheRuntime.filterFlag(blockControlArea);
+                Map<String, Set<String>> blockFieldToRules = excludedBlockFieldToRules.getOrDefault(blockName, Map.of());
                 ValidationResult blockValidation = validationService.validate(
-                        compiledRules, blockEffectiveNormalizedMap, blockEffectiveFieldToRules,
-                        errorMessagesByRule, blockFilterFlag);
+                        compiledRules, blockNormalizedMap, blockFieldToRules,
+                        errorMessagesByRule);
 
                 if (blockValidation.detailByField() != null) mergedDetailByField.putAll(blockValidation.detailByField());
 
@@ -238,14 +263,19 @@ public final class MessageProcessingService {
                     Map<String, Set<String>> itemAllFieldToRules = cacheRuntime.fieldToRules(itemControlArea);
                     if (itemAllFieldToRules == null || itemAllFieldToRules.isEmpty()) itemAllFieldToRules = allFieldToRules;
 
-                    Map<String, Set<String>> itemFieldToRules = selectKeys(itemAllFieldToRules, itemLogicalFields);
-                    Map<String, String> itemEffectiveNormalized = buildEffectiveNormalizedMap(itemControlArea, itemNormalized, itemFieldToRules);
-                    Map<String, Set<String>> itemEffectiveFieldToRules = buildEffectiveFieldToRules(itemControlArea, itemEffectiveNormalized, itemFieldToRules);
-
                     Boolean itemFilterFlag = cacheRuntime.filterFlag(itemControlArea);
+                    Map<String, Set<String>> itemExpectedFieldToRules = Boolean.TRUE.equals(itemFilterFlag)
+                            ? itemAllFieldToRules
+                            : selectKeys(itemAllFieldToRules, itemLogicalFields);
+                    EffectiveNormalization itemEffective = buildEffectiveNormalization(
+                            itemFilterFlag,
+                            itemNormalized,
+                            itemExpectedFieldToRules
+                    );
+
                     ValidationResult itemValidation = validationService.validate(
-                            compiledRules, itemEffectiveNormalized, itemEffectiveFieldToRules,
-                            errorMessagesByRule, itemFilterFlag);
+                            compiledRules, itemEffective.normalizedMap(), itemEffective.fieldToRules(),
+                            errorMessagesByRule);
 
                     String instanceKey = arrayInstanceKey(itemDatasetCode, blockName, index);
                     mergedDetailByDataset.put(instanceKey, safeFieldMap(itemValidation.detailByField()));
@@ -372,15 +402,44 @@ public final class MessageProcessingService {
         return result;
     }
 
-    private Set<String> collectLogicalFieldsFromArrays(Map<String, JsonNode> arrayBlocks) {
+    private Set<String> collectLogicalFieldsFromArrays(
+            Map<String, JsonNode> arrayBlocks,
+            String defaultDatasetCode,
+            String defaultControlArea,
+            Map<String, Set<String>> defaultFieldToRules
+    ) {
         Set<String> result = new LinkedHashSet<>();
         if (arrayBlocks == null || arrayBlocks.isEmpty()) return result;
+
+        Set<String> completedControlAreas = new LinkedHashSet<>();
 
         for (JsonNode arrayNode : arrayBlocks.values()) {
             if (arrayNode == null || !arrayNode.isArray()) continue;
 
             for (JsonNode item : arrayNode) {
-                if (item != null && item.isObject()) result.addAll(collectLogicalFieldsFromBlock(item));
+                if (item == null || !item.isObject()) continue;
+
+                result.addAll(collectLogicalFieldsFromBlock(item));
+
+                String itemDatasetCode = text(item, "dataset_code", defaultDatasetCode);
+                String itemControlArea = cacheRuntime.controlAreaByDataset(itemDatasetCode);
+                if (itemControlArea == null || itemControlArea.isBlank()) {
+                    itemControlArea = defaultControlArea;
+                }
+
+                if (!Boolean.TRUE.equals(cacheRuntime.filterFlag(itemControlArea))
+                        || !completedControlAreas.add(itemControlArea)) {
+                    continue;
+                }
+
+                Map<String, Set<String>> itemFieldToRules = cacheRuntime.fieldToRules(itemControlArea);
+                if (itemFieldToRules == null || itemFieldToRules.isEmpty()) {
+                    itemFieldToRules = defaultFieldToRules;
+                }
+
+                if (itemFieldToRules != null) {
+                    result.addAll(itemFieldToRules.keySet());
+                }
             }
         }
 
@@ -452,39 +511,30 @@ public final class MessageProcessingService {
         return result;
     }
 
-    private Map<String, Set<String>> filterFieldToRulesByNormalizedMap(Map<String, Set<String>> fieldToRules, Map<String, String> normalizedMap) {
-        Map<String, Set<String>> result = new LinkedHashMap<>();
-        if (fieldToRules == null || fieldToRules.isEmpty() || normalizedMap == null || normalizedMap.isEmpty()) return result;
-
-        for (Map.Entry<String, Set<String>> entry : fieldToRules.entrySet()) {
-            String logicalField = entry.getKey();
-            if (logicalField == null || logicalField.isBlank()) continue;
-
-            if (normalizedMap.containsKey(logicalField)) {
-                result.put(logicalField, entry.getValue());
-                continue;
-            }
-
-            String alt = logicalField.replace('.', ',');
-
-            if (normalizedMap.containsKey(alt)) result.put(logicalField, entry.getValue());
-        }
-
-        return result;
-    }
-
-    private Map<String, String> buildEffectiveNormalizedMap(String controlArea, Map<String, String> normalizedMap, Map<String, Set<String>> fieldToRules) {
+    private EffectiveNormalization buildEffectiveNormalization(
+            Boolean filterFlag,
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRules
+    ) {
         Map<String, String> safeNormalized = normalizedMap == null ? new LinkedHashMap<>() : new LinkedHashMap<>(normalizedMap);
+        Map<String, Set<String>> safeFieldToRules = fieldToRules == null ? Map.of() : fieldToRules;
 
-        Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
-
-        if (Boolean.TRUE.equals(filterFlag)) return safeNormalized;
+        if (Boolean.TRUE.equals(filterFlag)) {
+            Map<String, Set<String>> presentFieldToRules =
+                    normalizer.completeMissingFieldsAndSelectPresent(
+                            safeNormalized,
+                            safeFieldToRules
+                    );
+            return new EffectiveNormalization(safeNormalized, presentFieldToRules);
+        }
 
         Map<String, String> effective = new LinkedHashMap<>();
 
-        if (fieldToRules == null || fieldToRules.isEmpty()) return safeNormalized;
+        if (safeFieldToRules.isEmpty()) {
+            return new EffectiveNormalization(safeNormalized, safeFieldToRules);
+        }
 
-        for (String logicalField : fieldToRules.keySet()) {
+        for (String logicalField : safeFieldToRules.keySet()) {
             if (logicalField == null || logicalField.isBlank()) continue;
 
             if (safeNormalized.containsKey(logicalField)) {
@@ -506,17 +556,13 @@ public final class MessageProcessingService {
             effective.putIfAbsent(entry.getKey(), entry.getValue());
         }
 
-        return effective;
+        return new EffectiveNormalization(effective, safeFieldToRules);
     }
 
-    private Map<String, Set<String>> buildEffectiveFieldToRules(String controlArea, Map<String, String> effectiveNormalizedMap, Map<String, Set<String>> fieldToRules) {
-        Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
-
-        if (!Boolean.TRUE.equals(filterFlag)) {
-            return fieldToRules == null ? new LinkedHashMap<>() : new LinkedHashMap<>(fieldToRules);
-        }
-
-        return filterFieldToRulesByNormalizedMap(fieldToRules, effectiveNormalizedMap);
+    private record EffectiveNormalization(
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRules
+    ) {
     }
 
     private Map<String, Map<String, String>> safeFieldMap(Map<String, Map<String, String>> source) {

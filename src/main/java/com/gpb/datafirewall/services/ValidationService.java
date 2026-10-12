@@ -35,20 +35,29 @@ public final class ValidationService {
     public ValidationResult validate(
             Map<String, Rule> compiledRules,
             Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRuleIds
+    ) {
+        return validate(compiledRules, normalizedMap, fieldToRuleIds, Map.of());
+    }
+
+    /**
+     * Совместимый вход для старых вызовов. Обработка filterFlag выполняется
+     * до валидации, на этапе нормализации.
+     */
+    public ValidationResult validate(
+            Map<String, Rule> compiledRules,
+            Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRuleIds,
             Boolean filterFlag
     ) {
-
-        return validate(compiledRules, normalizedMap, fieldToRuleIds,
-                Map.of(), filterFlag);
+        return validate(compiledRules, normalizedMap, fieldToRuleIds, Map.of());
     }
 
     public ValidationResult validate(
             Map<String, Rule> compiledRules,
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRuleIds,
-            Map<String, Map<String, String>> errorMessagesByRule,
-            Boolean filterFlag
+            Map<String, Map<String, String>> errorMessagesByRule
     ) {
         if (compiledRules == null) {
             compiledRules = Map.of();
@@ -180,14 +189,13 @@ public final class ValidationService {
 
                 } catch (NoSuchElementException ex) {
                     /*
-                     * Если NoSuchElementException и filterFlag = true, то проверку пропускаем. Нет всех нужных атрибутов.
+                     * Ожидаемые отсутствующие атрибуты уже должны быть
+                     * добавлены в normalizedMap со значением null. Поэтому
+                     * NoSuchElementException здесь означает несогласованность
+                     * правила и PoliticsControlAreaRulesCache.
                      */
                     triggered = false;
                     anyException = true;
-
-                    if (Boolean.TRUE.equals(filterFlag)) {
-                        continue;
-                    }
 
                     log.error(
                             "[RULE-DIAG] APPLY EXCEPTION field='{}' rule={} containsKey={} inputState={} implClass={}",
@@ -336,6 +344,25 @@ public final class ValidationService {
                 Collections.unmodifiableMap(detailByField),
                 Collections.emptyMap(),
                 Collections.unmodifiableMap(errorsByField)
+        );
+    }
+
+    /**
+     * Совместимый вход для старых вызовов. filterFlag намеренно не участвует
+     * в применении правил: normalizedMap уже подготовлена вызывающим кодом.
+     */
+    public ValidationResult validate(
+            Map<String, Rule> compiledRules,
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRuleIds,
+            Map<String, Map<String, String>> errorMessagesByRule,
+            Boolean filterFlag
+    ) {
+        return validate(
+                compiledRules,
+                normalizedMap,
+                fieldToRuleIds,
+                errorMessagesByRule
         );
     }
 

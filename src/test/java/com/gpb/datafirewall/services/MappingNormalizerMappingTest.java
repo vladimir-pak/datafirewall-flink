@@ -6,10 +6,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MappingNormalizerMappingTest {
 
@@ -112,6 +114,71 @@ class MappingNormalizerMappingTest {
 
         assertEquals("exact", result.get(PASSPORT_TYPE));
         assertFalse(result.containsKey("  " + PASSPORT_TYPE + "  "));
+    }
+
+    @Test
+    void addsAllMissingControlAreaFieldsAsNullWhenFilterFlagIsTrue() {
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode passport = root.putObject("data").putObject("documents");
+        passport.put("series", "0000");
+        passport.put("mapping.series", "ДУЛ.Паспорт РФ.Серия");
+
+        Map<String, Set<String>> fieldToRules = Map.of(
+                "ДУЛ.Паспорт РФ.Серия", Set.of("Rule10220"),
+                PASSPORT_TYPE, Set.of("Rule10220"),
+                "ДУЛ.Паспорт РФ.Номер", Set.of("RuleOther")
+        );
+
+        Map<String, String> result = normalizer.normalize(
+                root,
+                Map.of(),
+                Map.of("PASSPORT_RU", "21"),
+                fieldToRules,
+                true
+        );
+
+        assertEquals("0000", result.get("ДУЛ.Паспорт РФ.Серия"));
+        assertTrue(result.containsKey(PASSPORT_TYPE));
+        assertNull(result.get(PASSPORT_TYPE));
+        assertTrue(result.containsKey("ДУЛ.Паспорт РФ.Номер"));
+        assertNull(result.get("ДУЛ.Паспорт РФ.Номер"));
+    }
+
+    @Test
+    void doesNotAddMissingControlAreaFieldsWhenFilterFlagIsFalse() {
+        ObjectNode root = mapper.createObjectNode();
+        root.putObject("data").putObject("documents");
+
+        Map<String, String> result = normalizer.normalize(
+                root,
+                Map.of(),
+                Map.of(),
+                Map.of(PASSPORT_TYPE, Set.of("Rule10220")),
+                false
+        );
+
+        assertFalse(result.containsKey(PASSPORT_TYPE));
+    }
+
+    @Test
+    void selectsRulesOnlyForFieldsPresentBeforeNullCompletion() {
+        String series = "ДУЛ.Паспорт РФ.Серия";
+        Map<String, String> normalized = new java.util.LinkedHashMap<>();
+        normalized.put(series, "0000");
+
+        Map<String, Set<String>> presentFieldToRules =
+                normalizer.completeMissingFieldsAndSelectPresent(
+                        normalized,
+                        Map.of(
+                                series, Set.of("Rule10220"),
+                                PASSPORT_TYPE, Set.of("RuleMissingType")
+                        )
+                );
+
+        assertTrue(normalized.containsKey(PASSPORT_TYPE));
+        assertNull(normalized.get(PASSPORT_TYPE));
+        assertTrue(presentFieldToRules.containsKey(series));
+        assertFalse(presentFieldToRules.containsKey(PASSPORT_TYPE));
     }
 
     private void addDocument(ArrayNode cards, String type, String logicalField) {
