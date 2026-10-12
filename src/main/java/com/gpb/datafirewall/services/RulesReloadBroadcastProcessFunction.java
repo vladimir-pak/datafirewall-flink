@@ -113,8 +113,8 @@ public class RulesReloadBroadcastProcessFunction
         this.pendingPolitics = new AtomicReference<>();
         this.compiledRulesRetryActive = new AtomicBoolean(false);
         this.politicsRetryActive = new AtomicBoolean(false);
-        this.appliedCompiledRulesVersion = new AtomicLong(0L);
-        this.appliedPoliticsVersion = new AtomicLong(0L);
+        this.appliedCompiledRulesVersion = new AtomicLong(cacheRuntime.compiledRulesVersion());
+        this.appliedPoliticsVersion = new AtomicLong(cacheRuntime.politicsVersion());
         this.cacheReloadLock = new Object();
         this.cacheRetryInitialDelayMs = Math.max(1_000L, pt.getLong("cache.reload.retry.initial.ms", 5_000L));
         this.cacheRetryMaxDelayMs = Math.max(cacheRetryInitialDelayMs, pt.getLong("cache.reload.retry.max.ms", 60_000L));
@@ -177,7 +177,8 @@ public class RulesReloadBroadcastProcessFunction
                 "[INIT] subtask={} handler.default={} dotnetUrl={} dotnetTimeoutMs={} "
                         + "dotnetSslVerify={} rulesLoaded={} dataset2controlAreaLoaded={} "
                         + "controlAreaRulesLoaded={} errorMessagesLoaded={} "
-                        + "datasetExclusionLoaded={} filterFlagLoaded={}",
+                        + "datasetExclusionLoaded={} filterFlagLoaded={} "
+                        + "genderMappingLoaded={} typeDulMappingLoaded={}",
                 rc.getIndexOfThisSubtask(),
                 defaultHandler.value(),
                 dotnetUrl,
@@ -188,7 +189,9 @@ public class RulesReloadBroadcastProcessFunction
                 cacheRuntime.controlAreaRulesSize(),
                 cacheRuntime.errorMessagesSize(),
                 cacheRuntime.datasetExclusionSize(),
-                cacheRuntime.filterFlagSize()
+                cacheRuntime.filterFlagSize(),
+                cacheRuntime.genderMappingSize(),
+                cacheRuntime.typeDulMappingSize()
         );
 
         log.info(
@@ -449,7 +452,7 @@ public class RulesReloadBroadcastProcessFunction
             return;
         }
         long appliedVersion = appliedVersion(ev.cacheName);
-        long stateVersion = current == null ? 0L : current.version;
+        long stateVersion = current == null ? -1L : current.version;
         long effectiveCurrentVersion = Math.max(appliedVersion, stateVersion);
         if (ev.version <= effectiveCurrentVersion) {
             log.info("[CACHE][KAFKA] ignore cacheName={} version={} currentVersion={}", ev.cacheName, ev.version, effectiveCurrentVersion);

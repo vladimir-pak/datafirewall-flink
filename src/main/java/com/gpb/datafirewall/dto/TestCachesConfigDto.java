@@ -11,6 +11,24 @@ public class TestCachesConfigDto {
     private Map<String, Map<String, String>> errorMessages;
     private Map<String, List<String>> datasetExclusion;
     private Map<String, Boolean> filterFlag;
+    private Map<String, String> genderMapping;
+    private Map<String, String> typeDulMapping;
+
+    public Map<String, String> getGenderMapping() {
+        return genderMapping;
+    }
+
+    public void setGenderMapping(Map<String, String> genderMapping) {
+        this.genderMapping = genderMapping;
+    }
+
+    public Map<String, String> getTypeDulMapping() {
+        return typeDulMapping;
+    }
+
+    public void setTypeDulMapping(Map<String, String> typeDulMapping) {
+        this.typeDulMapping = typeDulMapping;
+    }
 
     public String getVersion() {
         return version;

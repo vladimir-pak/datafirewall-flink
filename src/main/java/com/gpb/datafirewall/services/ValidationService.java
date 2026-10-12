@@ -9,15 +9,11 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.function.Function;
 
-import com.gpb.datafirewall.enums.DocType;
-import com.gpb.datafirewall.enums.Gender;
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.validation.ValidationResult;
 
@@ -28,11 +24,6 @@ public final class ValidationService {
 
     private static final Logger log =
             LoggerFactory.getLogger(ValidationService.class);
-
-    private static final Map<String, Function<String, String>> mappingAttributes = Map.of(
-            "ОСНОВНЫЕ СВЕДЕНИЯ.Пол", Gender::map,
-            "ДУЛ.Паспорт РФ.Тип ДУЛ", DocType::map
-    );
 
     private static final String WARNING = "WARNING";
 
@@ -47,13 +38,9 @@ public final class ValidationService {
             Map<String, Set<String>> fieldToRuleIds,
             Boolean filterFlag
     ) {
-        return validate(
-                compiledRules,
-                normalizedMap,
-                fieldToRuleIds,
-                Map.of(),
-                filterFlag
-        );
+
+        return validate(compiledRules, normalizedMap, fieldToRuleIds,
+                Map.of(), filterFlag);
     }
 
     public ValidationResult validate(
@@ -63,7 +50,6 @@ public final class ValidationService {
             Map<String, Map<String, String>> errorMessagesByRule,
             Boolean filterFlag
     ) {
-
         if (compiledRules == null) {
             compiledRules = Map.of();
         }
@@ -130,11 +116,7 @@ public final class ValidationService {
                     Comparator.naturalOrder()
             );
 
-            Map<String, String> ruleInput =
-                    mapLogicalFieldValueIfRequired(
-                            logicalField,
-                            normalizedMap
-                    );
+            Map<String, String> ruleInput = normalizedMap;
 
             log.debug(
                     "[RULE-DIAG] FIELD field='{}' containsKey={} inputState={} configuredRules={}",
@@ -355,70 +337,6 @@ public final class ValidationService {
                 Collections.emptyMap(),
                 Collections.unmodifiableMap(errorsByField)
         );
-    }
-
-    private Map<String, String> mapLogicalFieldValueIfRequired(
-            String logicalField,
-            Map<String, String> normalizedMap
-    ) {
-
-        if (logicalField == null
-                || logicalField.isBlank()
-                || normalizedMap == null
-                || normalizedMap.isEmpty()) {
-
-            return normalizedMap;
-        }
-
-        Function<String, String> mapper =
-                mappingAttributes.get(logicalField);
-
-        if (mapper == null
-                || !normalizedMap.containsKey(logicalField)) {
-
-            return normalizedMap;
-        }
-
-        String currentValue =
-                normalizedMap.get(logicalField);
-
-        if (currentValue == null
-                || currentValue.isBlank()) {
-
-            return normalizedMap;
-        }
-
-        String normalizedValue =
-                currentValue.trim();
-
-        String mappedValue =
-                mapper.apply(normalizedValue);
-
-        if (mappedValue == null) {
-
-            mappedValue =
-                    mapper.apply(
-                            normalizedValue.toUpperCase(
-                                    Locale.ROOT
-                            )
-                    );
-        }
-
-        if (mappedValue == null
-                || mappedValue.equals(currentValue)) {
-
-            return normalizedMap;
-        }
-
-        Map<String, String> mapped =
-                new LinkedHashMap<>(normalizedMap);
-
-        mapped.put(
-                logicalField,
-                mappedValue
-        );
-
-        return Collections.unmodifiableMap(mapped);
     }
 
     private String resolveErrorMessage(

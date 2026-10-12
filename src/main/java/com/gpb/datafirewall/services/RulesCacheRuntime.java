@@ -2,6 +2,8 @@ package com.gpb.datafirewall.services;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.cache.CompiledRulesRegistry;
+import com.gpb.datafirewall.cache.GenderMappingCache;
+import com.gpb.datafirewall.cache.TypeDulMappingCache;
 import com.gpb.datafirewall.cache.PoliticsControlAreaRulesCache;
 import com.gpb.datafirewall.cache.PoliticsDatasetControlAreaCache;
 import com.gpb.datafirewall.cache.PoliticsDatasetExclusionCache;
@@ -39,6 +41,8 @@ public final class RulesCacheRuntime implements AutoCloseable {
 
     public static final String CACHE_COMPILED_RULES = "compiled_rules";
     public static final String CACHE_POLITICS = "politics";
+    public static final String CACHE_GENDER_MAPPING = "gender_mapping";
+    public static final String CACHE_TYPE_DUL_MAPPING = "type_dul_mapping";
 
     private static final String CACHE_POLITICS_DATASET2CONTROL_AREA =
             "politics_dataset2control_area";
@@ -66,6 +70,8 @@ public final class RulesCacheRuntime implements AutoCloseable {
     private PoliticsErrorMessagesCache errorMessagesCache;
     private PoliticsDatasetExclusionCache datasetExclusionCache;
     private PoliticsFilterFlagCache filterFlagCache;
+    private GenderMappingCache genderMappingCache;
+    private TypeDulMappingCache typeDulMappingCache;
 
     public RulesCacheRuntime(ObjectMapper mapper, String jwt) {
         this.mapper = mapper;
@@ -81,6 +87,8 @@ public final class RulesCacheRuntime implements AutoCloseable {
         this.errorMessagesCache = new PoliticsErrorMessagesCache();
         this.datasetExclusionCache = new PoliticsDatasetExclusionCache();
         this.filterFlagCache = new PoliticsFilterFlagCache();
+        this.genderMappingCache = new GenderMappingCache();
+        this.typeDulMappingCache = new TypeDulMappingCache();
 
         initRulesLoader(pt);
 
@@ -99,7 +107,11 @@ public final class RulesCacheRuntime implements AutoCloseable {
         boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
 
         if (bootstrapEnabled) {
-            CacheBootstrapService bootstrapService = new CacheBootstrapService(igniteApiClient, reloader, rulesRegistry, dataset2ControlAreaCache, controlAreaRulesCache, errorMessagesCache, datasetExclusionCache, filterFlagCache, politicsBootstrapEnabled);
+            CacheBootstrapService bootstrapService = new CacheBootstrapService(
+                    igniteApiClient, reloader, rulesRegistry, dataset2ControlAreaCache,
+                    controlAreaRulesCache, errorMessagesCache, datasetExclusionCache,
+                    filterFlagCache, genderMappingCache, typeDulMappingCache,
+                    politicsBootstrapEnabled);
             initializeBootstrapWithRetry(bootstrapService, pt);
         } else {
             log.info("[INIT] startup cache bootstrap is disabled. Waiting for Kafka cache update events.");
@@ -221,6 +233,8 @@ public final class RulesCacheRuntime implements AutoCloseable {
         String errorMessagesName = CACHE_POLITICS_ERROR_MESSAGES + "_" + version;
         String datasetExclusionName = CACHE_POLITICS_DATASET_EXCLUSION + "_" + version;
         String filterFlagName = CACHE_POLITICS_FILTER_FLAG + "_" + version;
+        String genderMappingName = CACHE_GENDER_MAPPING + "_" + version;
+        String typeDulMappingName = CACHE_TYPE_DUL_MAPPING + "_" + version;
 
         log.info("[CACHE] Reloading politics bundle for version={}", version);
 
@@ -238,6 +252,10 @@ public final class RulesCacheRuntime implements AutoCloseable {
 
         CacheResponseDto<String, Object> filterFlagResponse =
                 igniteApiClient.getVersionedCache(filterFlagName);
+        CacheResponseDto<String, Object> genderMappingResponse =
+                igniteApiClient.getVersionedCache(genderMappingName);
+        CacheResponseDto<String, Object> typeDulMappingResponse =
+                igniteApiClient.getVersionedCache(typeDulMappingName);
 
         Map<String, String> dataset2ControlArea =
                 cachePayloadConverter.toStringMap(dataset2ControlAreaResponse.getCache(), dataset2ControlAreaName);
@@ -253,21 +271,33 @@ public final class RulesCacheRuntime implements AutoCloseable {
 
         Map<String, Boolean> filterFlags =
                 cachePayloadConverter.toBooleanMap(filterFlagResponse.getCache(), filterFlagName);
+        Map<String, String> genderMapping =
+                cachePayloadConverter.toStringMap(genderMappingResponse.getCache(), genderMappingName);
+        Map<String, String> typeDulMapping =
+                cachePayloadConverter.toStringMap(typeDulMappingResponse.getCache(), typeDulMappingName);
 
-        dataset2ControlAreaCache.replaceAll(dataset2ControlArea, versionStr);
-        controlAreaRulesCache.replaceAll(controlAreaRules, versionStr);
-        errorMessagesCache.replaceAll(errorMessages, versionStr);
-        datasetExclusionCache.replaceAll(datasetExclusion, versionStr);
-        filterFlagCache.replaceAll(filterFlags, versionStr);
+        // Network calls and conversion finish before locking publication.
+        // MessageProcessingService uses this same monitor for message processing.
+        synchronized (this) {
+            dataset2ControlAreaCache.replaceAll(dataset2ControlArea, versionStr);
+            controlAreaRulesCache.replaceAll(controlAreaRules, versionStr);
+            errorMessagesCache.replaceAll(errorMessages, versionStr);
+            datasetExclusionCache.replaceAll(datasetExclusion, versionStr);
+            filterFlagCache.replaceAll(filterFlags, versionStr);
+            genderMappingCache.replaceAll(genderMapping, versionStr);
+            typeDulMappingCache.replaceAll(typeDulMapping, versionStr);
+        }
 
         log.info(
-                "[CACHE] politics reloaded: version={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}",
+                "[CACHE] politics reloaded: version={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}, genderMapping={}, typeDulMapping={}",
                 version,
                 dataset2ControlArea.size(),
                 controlAreaRules.size(),
                 errorMessages.size(),
                 datasetExclusion.size(),
-                filterFlags.size()
+                filterFlags.size(),
+                genderMapping.size(),
+                typeDulMapping.size()
         );
     }
 
@@ -276,7 +306,7 @@ public final class RulesCacheRuntime implements AutoCloseable {
 
         if (path.isBlank()) {
             throw new IllegalArgumentException(
-                    "test.caches.path must be provided for test caches initialization"
+                    "test.politic.caches.path must be provided for test caches initialization"
             );
         }
 
@@ -341,9 +371,13 @@ public final class RulesCacheRuntime implements AutoCloseable {
                     cfg.getFilterFlag() == null ? Map.of() : cfg.getFilterFlag(),
                     version
             );
+            genderMappingCache.replaceAll(
+                    cfg.getGenderMapping() == null ? Map.of() : cfg.getGenderMapping(), version);
+            typeDulMappingCache.replaceAll(
+                    cfg.getTypeDulMapping() == null ? Map.of() : cfg.getTypeDulMapping(), version);
 
             log.info(
-                    "[TEST] caches initialized from file: path={}, version={}, rules={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}",
+                    "[TEST] caches initialized from file: path={}, version={}, rules={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}, genderMapping={}, typeDulMapping={}",
                     path,
                     version,
                     rulesRegistry.size(),
@@ -351,7 +385,9 @@ public final class RulesCacheRuntime implements AutoCloseable {
                     controlAreaRulesCache.size(),
                     errorMessagesCache.size(),
                     datasetExclusionCache.size(),
-                    filterFlagCache.size()
+                    filterFlagCache.size(),
+                    genderMappingCache.size(),
+                    typeDulMappingCache.size()
             );
 
         } catch (Exception e) {
@@ -407,6 +443,39 @@ public final class RulesCacheRuntime implements AutoCloseable {
 
     public int filterFlagSize() {
         return filterFlagCache == null ? 0 : filterFlagCache.size();
+    }
+
+    public Map<String, String> genderMappingSnapshot() {
+        return genderMappingCache.snapshot();
+    }
+
+    public Map<String, String> typeDulMappingSnapshot() {
+        return typeDulMappingCache.snapshot();
+    }
+
+    public int genderMappingSize() {
+        return genderMappingCache == null ? 0 : genderMappingCache.size();
+    }
+
+    public int typeDulMappingSize() {
+        return typeDulMappingCache == null ? 0 : typeDulMappingCache.size();
+    }
+
+    public long compiledRulesVersion() {
+        return numericVersion(rulesRegistry.version());
+    }
+
+    public long politicsVersion() {
+        return numericVersion(dataset2ControlAreaCache.version());
+    }
+
+    private static long numericVersion(String version) {
+        if (version == null) return -1L;
+        try {
+            return Long.parseLong(version);
+        } catch (NumberFormatException ignored) {
+            return -1L; // Test configurations can use a non-numeric version.
+        }
     }
 
     @Override

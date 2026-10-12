@@ -47,6 +47,14 @@ public final class MessageProcessingService {
     }
 
     public ProcessingResult process(MessageRecord in) {
+        // Background retries may publish politics caches concurrently.
+        // Keep one politics version throughout processing of this message.
+        synchronized (cacheRuntime) {
+            return processMessage(in);
+        }
+    }
+
+    private ProcessingResult processMessage(MessageRecord in) {
         if (in == null || in.payload == null || in.payload.isBlank()) {
             log.warn("[PIPE][no-qid] Empty input payload");
             return null;
@@ -91,8 +99,15 @@ public final class MessageProcessingService {
                 return null;
             }
 
-            Map<String, String> normalizedMap = normalizer.normalize(originalEvent);
             Map<String, Map<String, String>> errorMessagesByRule = cacheRuntime.errorMessagesSnapshot();
+            // Reuse these immutable snapshots for all blocks of this message.
+            Map<String, String> genderMapping = cacheRuntime.genderMappingSnapshot();
+            Map<String, String> typeDulMapping = cacheRuntime.typeDulMappingSnapshot();
+            Map<String, String> normalizedMap = normalizer.normalize(
+                    originalEvent,
+                    genderMapping,
+                    typeDulMapping
+            );
 
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}] 2) NORMALIZED_MAP size={} keys={}", qid, normalizedMap.size(), normalizedMap.keySet());
@@ -115,7 +130,12 @@ public final class MessageProcessingService {
                 JsonNode blockNode = blockNodes.get(blockName);
                 if (blockNode == null || !blockNode.isObject()) continue;
 
-                Map<String, String> blockNormalized = normalizeSingleBlock(blockName, blockNode);
+                Map<String, String> blockNormalized = normalizeSingleBlock(
+                        blockName,
+                        blockNode,
+                        genderMapping,
+                        typeDulMapping
+                );
                 excludedBlockNormalizedMaps.put(blockName, blockNormalized);
                 excludedLogicalFields.addAll(blockNormalized.keySet());
 
@@ -136,7 +156,9 @@ public final class MessageProcessingService {
             Map<String, Set<String>> mainEffectiveFieldToRules = buildEffectiveFieldToRules(controlArea, mainEffectiveNormalizedMap, mainFieldToRules);
 
             Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
-            ValidationResult mainValidation = validationService.validate(compiledRules, mainEffectiveNormalizedMap, mainEffectiveFieldToRules, errorMessagesByRule, filterFlag);
+            ValidationResult mainValidation = validationService.validate(
+                    compiledRules, mainEffectiveNormalizedMap, mainEffectiveFieldToRules,
+                    errorMessagesByRule, filterFlag);
 
             Map<String, Map<String, String>> mergedDetailByField = new LinkedHashMap<>();
             if (mainValidation.detailByField() != null) mergedDetailByField.putAll(mainValidation.detailByField());
@@ -171,7 +193,9 @@ public final class MessageProcessingService {
                 Map<String, Set<String>> blockEffectiveFieldToRules = buildEffectiveFieldToRules(blockControlArea, blockEffectiveNormalizedMap, blockFieldToRules);
 
                 Boolean blockFilterFlag = cacheRuntime.filterFlag(blockControlArea);
-                ValidationResult blockValidation = validationService.validate(compiledRules, blockEffectiveNormalizedMap, blockEffectiveFieldToRules, errorMessagesByRule, blockFilterFlag);
+                ValidationResult blockValidation = validationService.validate(
+                        compiledRules, blockEffectiveNormalizedMap, blockEffectiveFieldToRules,
+                        errorMessagesByRule, blockFilterFlag);
 
                 if (blockValidation.detailByField() != null) mergedDetailByField.putAll(blockValidation.detailByField());
 
@@ -202,7 +226,12 @@ public final class MessageProcessingService {
                     String itemControlArea = cacheRuntime.controlAreaByDataset(itemDatasetCode);
                     if (itemControlArea == null || itemControlArea.isBlank()) itemControlArea = controlArea;
 
-                    Map<String, String> itemNormalized = normalizeSingleBlock(blockName, itemNode);
+                    Map<String, String> itemNormalized = normalizeSingleBlock(
+                            blockName,
+                            itemNode,
+                            genderMapping,
+                            typeDulMapping
+                    );
                     Set<String> itemLogicalFields = collectLogicalFieldsFromBlock(itemNode);
                     itemLogicalFields.addAll(itemNormalized.keySet());
 
@@ -214,7 +243,9 @@ public final class MessageProcessingService {
                     Map<String, Set<String>> itemEffectiveFieldToRules = buildEffectiveFieldToRules(itemControlArea, itemEffectiveNormalized, itemFieldToRules);
 
                     Boolean itemFilterFlag = cacheRuntime.filterFlag(itemControlArea);
-                    ValidationResult itemValidation = validationService.validate(compiledRules, itemEffectiveNormalized, itemEffectiveFieldToRules, errorMessagesByRule, itemFilterFlag);
+                    ValidationResult itemValidation = validationService.validate(
+                            compiledRules, itemEffectiveNormalized, itemEffectiveFieldToRules,
+                            errorMessagesByRule, itemFilterFlag);
 
                     String instanceKey = arrayInstanceKey(itemDatasetCode, blockName, index);
                     mergedDetailByDataset.put(instanceKey, safeFieldMap(itemValidation.detailByField()));
@@ -360,14 +391,19 @@ public final class MessageProcessingService {
         return (datasetCode == null ? "" : datasetCode) + "#" + blockName + "#" + index;
     }
 
-    private Map<String, String> normalizeSingleBlock(String blockName, JsonNode blockNode) {
+    private Map<String, String> normalizeSingleBlock(
+            String blockName,
+            JsonNode blockNode,
+            Map<String, String> genderMapping,
+            Map<String, String> typeDulMapping
+    ) {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode data = mapper.createObjectNode();
 
         data.set(blockName, blockNode);
         root.set("data", data);
 
-        return normalizer.normalize(root);
+        return normalizer.normalize(root, genderMapping, typeDulMapping);
     }
 
     private Set<String> collectLogicalFieldsFromBlock(JsonNode blockNode) {
