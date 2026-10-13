@@ -9,13 +9,16 @@ import com.gpb.datafirewall.validation.ValidationResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 public final class MessageProcessingService {
@@ -132,9 +135,8 @@ public final class MessageProcessingService {
             Map<String, JsonNode> blockNodes = topLevelPreparation.objectBlocks();
             Set<String> arrayLogicalFields = topLevelPreparation.arrayLogicalFields();
 
-            Map<String, Map<String, String>> excludedBlockNormalizedMaps = new LinkedHashMap<>();
-            Map<String, String> excludedBlockDatasetCodes = new LinkedHashMap<>();
-            Map<String, Map<String, Set<String>>> excludedBlockFieldToRules = new LinkedHashMap<>();
+            List<PreparedExcludedBlock> preparedExcludedBlocks =
+                    new ArrayList<>(excludedBlocks.size());
             Set<String> excludedLogicalFields = new LinkedHashSet<>();
 
             for (String blockName : excludedBlocks) {
@@ -172,9 +174,11 @@ public final class MessageProcessingService {
                         blockExpectedFieldToRules
                 );
 
-                excludedBlockNormalizedMaps.put(blockName, blockEffective.normalizedMap());
-                excludedBlockDatasetCodes.put(blockName, blockDatasetCode);
-                excludedBlockFieldToRules.put(blockName, blockEffective.fieldToRules());
+                preparedExcludedBlocks.add(new PreparedExcludedBlock(
+                        blockDatasetCode,
+                        blockEffective.normalizedMap(),
+                        blockEffective.fieldToRules()
+                ));
                 excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
 
                 if (logPayloads && log.isInfoEnabled()) {
@@ -193,13 +197,27 @@ public final class MessageProcessingService {
                     mainFieldToRules
             );
 
+            /*
+             * fieldToRules определяет только набор запускаемых правил, а
+             * Rule.apply всегда получает полный контекст сообщения. Карта
+             * строится один раз и дополняется отсутствующими зависимостями из
+             * всех обнаруженных control area. Для отдельных блоков и
+             * элементов массива ниже используется дешёвый overlay-view.
+             */
+            Map<String, String> completeRuleInput = buildCompleteRuleInput(
+                    normalizedMap,
+                    mainEffective,
+                    preparedExcludedBlocks,
+                    topLevelPreparation.arrayItems()
+            );
+
             if (logPayloads && log.isInfoEnabled()) {
                 log.info("[PIPE][{}] 2) MAIN_NORMALIZED_MAP size={} keys={}", qid, mainEffective.normalizedMap().size(), mainEffective.normalizedMap().keySet());
                 log.info("[PIPE][{}] 2) MAIN_NORMALIZED_MAP full(masked):\n{}", qid, prettyObject(maskMap(mainEffective.normalizedMap())));
             }
 
             ValidationResult mainValidation = validationService.validate(
-                    compiledRules, mainEffective.normalizedMap(), mainEffective.fieldToRules(),
+                    compiledRules, completeRuleInput, mainEffective.fieldToRules(),
                     errorMessagesByRule);
 
             Map<String, Map<String, String>> mergedDetailByField = new LinkedHashMap<>();
@@ -215,21 +233,19 @@ public final class MessageProcessingService {
             boolean anyWarning = RESULT_WARNING.equalsIgnoreCase(mainValidation.allResult());
             boolean anyRuleException = PROCESS_RULE_EXCEPTION.equalsIgnoreCase(mainValidation.processStatus());
 
-            for (String blockName : excludedBlocks) {
-                JsonNode blockNode = blockNodes.get(blockName);
-                if (blockNode == null || !blockNode.isObject()) continue;
-
-                String blockDatasetCode = excludedBlockDatasetCodes.getOrDefault(blockName, blockName);
-                Map<String, String> blockNormalizedMap = excludedBlockNormalizedMaps.getOrDefault(blockName, Map.of());
-                Map<String, Set<String>> blockFieldToRules = excludedBlockFieldToRules.getOrDefault(blockName, Map.of());
+            for (PreparedExcludedBlock block : preparedExcludedBlocks) {
+                Map<String, String> blockRuleInput = scopedRuleInput(
+                        completeRuleInput,
+                        block.normalizedMap()
+                );
                 ValidationResult blockValidation = validationService.validate(
-                        compiledRules, blockNormalizedMap, blockFieldToRules,
+                        compiledRules, blockRuleInput, block.fieldToRules(),
                         errorMessagesByRule);
 
                 if (blockValidation.detailByField() != null) mergedDetailByField.putAll(blockValidation.detailByField());
 
                 mergeErrors(mergedErrorsByField, blockValidation.errorsByField());
-                mergedDetailByDataset.put(blockDatasetCode, safeFieldMap(blockValidation.detailByField()));
+                mergedDetailByDataset.put(block.datasetCode(), safeFieldMap(blockValidation.detailByField()));
 
                 if (RESULT_ERROR.equalsIgnoreCase(blockValidation.allResult())) anyError = true;
                 else if (RESULT_WARNING.equalsIgnoreCase(blockValidation.allResult())) anyWarning = true;
@@ -238,8 +254,12 @@ public final class MessageProcessingService {
             }
 
             for (PreparedArrayItem item : topLevelPreparation.arrayItems()) {
+                Map<String, String> itemRuleInput = scopedRuleInput(
+                        completeRuleInput,
+                        item.normalizedMap()
+                );
                 ValidationResult itemValidation = validationService.validate(
-                        compiledRules, item.normalizedMap(), item.fieldToRules(),
+                        compiledRules, itemRuleInput, item.fieldToRules(),
                         errorMessagesByRule);
 
                 String instanceKey = item.instanceKey();
@@ -577,7 +597,93 @@ public final class MessageProcessingService {
         return new EffectiveNormalization(effective, safeFieldToRules);
     }
 
+    /**
+     * Собирает единый контекст Rule.apply без дополнительной копии полной
+     * нормализованной карты. Значения из исходного JSON имеют приоритет, а
+     * подготовленные карты добавляют только отсутствующие ключи (обычно null).
+     */
+    private Map<String, String> buildCompleteRuleInput(
+            Map<String, String> normalizedMap,
+            EffectiveNormalization mainEffective,
+            List<PreparedExcludedBlock> excludedBlocks,
+            List<PreparedArrayItem> arrayItems
+    ) {
+        Map<String, String> result = normalizedMap == null
+                ? new LinkedHashMap<>()
+                : normalizedMap;
+
+        putAbsentEntries(result, mainEffective == null ? null : mainEffective.normalizedMap());
+
+        if (excludedBlocks != null) {
+            for (PreparedExcludedBlock block : excludedBlocks) {
+                if (block != null) putAbsentEntries(result, block.normalizedMap());
+            }
+        }
+
+        if (arrayItems != null) {
+            for (PreparedArrayItem item : arrayItems) {
+                if (item != null) putAbsentEntries(result, item.normalizedMap());
+            }
+        }
+
+        return result;
+    }
+
+    private void putAbsentEntries(
+            Map<String, String> target,
+            Map<String, String> additions
+    ) {
+        if (target == null || additions == null || additions.isEmpty()) return;
+
+        for (Map.Entry<String, String> entry : additions.entrySet()) {
+            // containsKey обязателен: физическое значение null не должно быть
+            // заменено значением из другого блока или элемента массива.
+            if (!target.containsKey(entry.getKey())) {
+                target.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    /**
+     * Возвращает полный контекст с локальными значениями текущего блока.
+     * Полная Map не копируется: get/containsKey работают через два lookup.
+     * Материализация выполняется лениво, только если конкретное Rule начнёт
+     * итерировать entrySet/keySet/values.
+     */
+    private Map<String, String> scopedRuleInput(
+            Map<String, String> completeRuleInput,
+            Map<String, String> scopedValues
+    ) {
+        Map<String, String> base = completeRuleInput == null ? Map.of() : completeRuleInput;
+
+        if (scopedValues == null || scopedValues.isEmpty()) {
+            return base;
+        }
+
+        boolean differs = false;
+
+        for (Map.Entry<String, String> entry : scopedValues.entrySet()) {
+            String field = entry.getKey();
+            if (!base.containsKey(field)
+                    || !Objects.equals(base.get(field), entry.getValue())) {
+                differs = true;
+                break;
+            }
+        }
+
+        return differs
+                ? new ScopedRuleInputMap(base, scopedValues)
+                : base;
+    }
+
     private record EffectiveNormalization(
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRules
+    ) {
+    }
+
+    private record PreparedExcludedBlock(
+            String datasetCode,
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRules
     ) {
@@ -595,6 +701,59 @@ public final class MessageProcessingService {
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRules
     ) {
+    }
+
+    private static final class ScopedRuleInputMap
+            extends AbstractMap<String, String> {
+
+        private final Map<String, String> base;
+        private final Map<String, String> scopedValues;
+        private Set<Entry<String, String>> materializedEntrySet;
+
+        private ScopedRuleInputMap(
+                Map<String, String> base,
+                Map<String, String> scopedValues
+        ) {
+            this.base = base;
+            this.scopedValues = scopedValues;
+        }
+
+        @Override
+        public String get(Object key) {
+            return scopedValues.containsKey(key)
+                    ? scopedValues.get(key)
+                    : base.get(key);
+        }
+
+        @Override
+        public boolean containsKey(Object key) {
+            return scopedValues.containsKey(key) || base.containsKey(key);
+        }
+
+        @Override
+        public int size() {
+            int size = base.size();
+
+            for (String field : scopedValues.keySet()) {
+                if (!base.containsKey(field)) {
+                    size++;
+                }
+            }
+
+            return size;
+        }
+
+        @Override
+        public Set<Entry<String, String>> entrySet() {
+            if (materializedEntrySet == null) {
+                Map<String, String> materialized = new LinkedHashMap<>(base);
+                materialized.putAll(scopedValues);
+
+                materializedEntrySet = Collections.unmodifiableMap(materialized).entrySet();
+            }
+
+            return materializedEntrySet;
+        }
     }
 
     private Map<String, Map<String, String>> safeFieldMap(Map<String, Map<String, String>> source) {
