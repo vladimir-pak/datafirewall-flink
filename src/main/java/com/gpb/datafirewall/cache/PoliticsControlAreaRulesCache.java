@@ -2,9 +2,10 @@ package com.gpb.datafirewall.cache;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Versioned cache для politics_control_area_rules.
@@ -38,7 +39,7 @@ public final class PoliticsControlAreaRulesCache
             }
 
             Map<String, Set<String>> innerMap = outerEntry.getValue();
-            Map<String, Set<String>> innerCopy = new LinkedHashMap<>();
+            TreeMap<String, Set<String>> innerCopy = new TreeMap<>();
 
             if (innerMap != null) {
                 for (Map.Entry<String, Set<String>> innerEntry : innerMap.entrySet()) {
@@ -51,7 +52,7 @@ public final class PoliticsControlAreaRulesCache
 
                     Set<String> frozenSet = (rules == null || rules.isEmpty())
                             ? Set.of()
-                            : Collections.unmodifiableSet(new HashSet<>(rules));
+                            : Collections.unmodifiableNavigableSet(new TreeSet<>(rules));
 
                     innerCopy.put(field, frozenSet);
                 }
@@ -59,7 +60,7 @@ public final class PoliticsControlAreaRulesCache
 
             outerCopy.put(
                     controlArea,
-                    Collections.unmodifiableMap(innerCopy)
+                    Collections.unmodifiableNavigableMap(innerCopy)
             );
         }
 

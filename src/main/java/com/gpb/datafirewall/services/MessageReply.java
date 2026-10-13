@@ -1,5 +1,7 @@
 package com.gpb.datafirewall.services;
 
+import com.gpb.datafirewall.util.HexUtils;
+
 import java.io.Serializable;
 import java.util.Arrays;
 
@@ -78,11 +80,7 @@ public final class MessageReply implements Serializable {
             return "unknown";
         }
 
-        StringBuilder sb = new StringBuilder(id.length * 2);
-        for (byte b : id) {
-            sb.append(String.format("%02X", b));
-        }
-        return sb.toString();
+        return HexUtils.toUpperHex(id);
     }
 
     @Override

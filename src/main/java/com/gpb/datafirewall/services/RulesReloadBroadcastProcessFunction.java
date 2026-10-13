@@ -211,18 +211,18 @@ public class RulesReloadBroadcastProcessFunction
 
         DynamicHandler handler = handlerRoutingState.currentHandler();
 
-        log.info(
+        log.debug(
                 "[ROUTING][eventId={}] selected handler={}",
                 eventId,
                 handler.value()
         );
 
         if (handler == DynamicHandler.DOTNET) {
-            processWithDotnetHandler(in, ctx, out);
+            processWithDotnetHandler(in, eventId, ctx, out);
             return;
         }
 
-        processWithFlinkHandler(in, ctx, out);
+        processWithFlinkHandler(in, eventId, ctx, out);
     }
 
     /**
@@ -233,12 +233,11 @@ public class RulesReloadBroadcastProcessFunction
      */
     private void processWithFlinkHandler(
             MessageRecord in,
+            String eventId,
             ReadOnlyContext ctx,
             Collector<ProcessingResult> out
     ) {
-        String eventId = in == null ? "unknown" : in.eventId();
-
-        log.info(
+        log.debug(
                 "[FLINK][eventId={}] internal processing START",
                 eventId
         );
@@ -260,7 +259,7 @@ public class RulesReloadBroadcastProcessFunction
                 return;
             }
 
-            log.info(
+            log.debug(
                     "[FLINK][eventId={}] internal processing SUCCESS durationMs={}",
                     eventId,
                     durationMs
@@ -269,7 +268,7 @@ public class RulesReloadBroadcastProcessFunction
             // Основной выход: ответ обратно в MQ/Artemis.
             out.collect(flinkResult);
 
-            log.info(
+            log.debug(
                     "[FLINK][eventId={}] result sent to main output -> MQ/Artemis",
                     eventId
             );
@@ -277,7 +276,7 @@ public class RulesReloadBroadcastProcessFunction
             // Отдельный выход: внутренний результат в Kafka audit.
             ctx.output(FLINK_AUDIT_RESULT_TAG, flinkResult);
 
-            log.info(
+            log.debug(
                     "[FLINK][eventId={}] result sent to Kafka audit side output",
                     eventId
             );
@@ -303,15 +302,14 @@ public class RulesReloadBroadcastProcessFunction
      */
     private void processWithDotnetHandler(
             MessageRecord in,
+            String eventId,
             ReadOnlyContext ctx,
             Collector<ProcessingResult> out
     ) {
-        String eventId = in == null ? "unknown" : in.eventId();
-
         /*
          * Внешний .NET handler.
          */
-        log.info(
+        log.debug(
                 "[DOTNET][eventId={}] external processing START",
                 eventId
         );
@@ -326,7 +324,7 @@ public class RulesReloadBroadcastProcessFunction
                     (System.nanoTime() - externalStartedAtNs) / 1_000_000L;
 
             if (externalResult != null) {
-                log.info(
+                log.debug(
                         "[DOTNET][eventId={}] external processing SUCCESS durationMs={}",
                         eventId,
                         externalDurationMs
@@ -334,7 +332,7 @@ public class RulesReloadBroadcastProcessFunction
 
                 out.collect(externalResult);
 
-                log.info(
+                log.debug(
                         "[DOTNET][eventId={}] external result sent to main output -> MQ/Artemis",
                         eventId
                 );
@@ -362,7 +360,7 @@ public class RulesReloadBroadcastProcessFunction
          * Внутренняя Flink-обработка выполняется независимо
          * от результата внешнего .NET handler.
          */
-        log.info(
+        log.debug(
                 "[FLINK-AUDIT][eventId={}] internal processing START",
                 eventId
         );
@@ -377,7 +375,7 @@ public class RulesReloadBroadcastProcessFunction
                     (System.nanoTime() - flinkStartedAtNs) / 1_000_000L;
 
             if (flinkResult != null) {
-                log.info(
+                log.debug(
                         "[FLINK-AUDIT][eventId={}] internal processing SUCCESS durationMs={}",
                         eventId,
                         flinkDurationMs
@@ -388,7 +386,7 @@ public class RulesReloadBroadcastProcessFunction
                         flinkResult
                 );
 
-                log.info(
+                log.debug(
                         "[FLINK-AUDIT][eventId={}] result sent to Kafka audit side output",
                         eventId
                 );

@@ -3,9 +3,11 @@ package com.gpb.datafirewall.services;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -170,25 +172,39 @@ public final class MappingNormalizer {
         }
 
         if (node.isObject()) {
-            extractMappings(node, out, genderMapping, typeDulMapping);
-
             Iterator<Map.Entry<String, JsonNode>> it = node.fields();
+            List<JsonNode> nestedNodes = null;
 
             while (it.hasNext()) {
                 Map.Entry<String, JsonNode> e = it.next();
-
+                String key = e.getKey();
                 JsonNode v = e.getValue();
 
-                if (v == null || v.isNull()) {
-                    continue;
+                if (key != null && key.startsWith("mapping.")) {
+                    extractMapping(
+                            node,
+                            key,
+                            v,
+                            out,
+                            genderMapping,
+                            typeDulMapping
+                    );
                 }
 
-                if (v.isTextual() && v.asText().isEmpty()) {
-                    v = mapper.nullNode();
+                if (v != null && !v.isNull() && (v.isObject() || v.isArray())) {
+                    if (nestedNodes == null) {
+                        nestedNodes = new ArrayList<>();
+                    }
+                    nestedNodes.add(v);
                 }
+            }
 
-                if (v.isObject() || v.isArray()) {
-                    walk(v, out, genderMapping, typeDulMapping);
+            // Как и раньше, сначала извлекаем mapping.* текущего объекта,
+            // затем обходим вложенные узлы. Это сохраняет порядок склейки
+            // повторяющихся logicalName, но не требует второго прохода fields().
+            if (nestedNodes != null) {
+                for (JsonNode nestedNode : nestedNodes) {
+                    walk(nestedNode, out, genderMapping, typeDulMapping);
                 }
             }
 
@@ -199,72 +215,58 @@ public final class MappingNormalizer {
         }
     }
 
-    private void extractMappings(
+    private void extractMapping(
             JsonNode obj,
+            String mappingKey,
+            JsonNode mappingNode,
             Map<String, String> out,
             Map<String, String> genderMapping,
             Map<String, String> typeDulMapping
     ) {
-        Iterator<Map.Entry<String, JsonNode>> it = obj.fields();
+        if (mappingNode == null || mappingNode.isNull()) {
+            return;
+        }
 
-        while (it.hasNext()) {
-            Map.Entry<String, JsonNode> e = it.next();
+        String rawField =
+                mappingKey.substring("mapping.".length());
 
-            String k = e.getKey();
-            JsonNode v = e.getValue();
+        String logical = mappingNode.asText(null);
 
-            if (k == null || !k.startsWith("mapping.")) {
-                continue;
-            }
+        if (logical == null
+                || logical.isBlank()
+                || "none".equalsIgnoreCase(logical.trim())) {
+            return;
+        }
 
-            if (v == null || v.isNull()) {
-                continue;
-            }
+        logical = logical.trim();
 
-            String rawField =
-                    k.substring("mapping.".length());
+        // mapping есть, но самого физического атрибута нет.
+        // В normalizedMap такое поле добавлять нельзя.
+        JsonNode valueNode = obj.get(rawField);
+        if (valueNode == null) {
+            return;
+        }
 
-            String logical = v.asText(null);
+        String value =
+                toFlatString(valueNode);
 
-            if (logical == null
-                    || logical.isBlank()
-                    || "none".equalsIgnoreCase(logical.trim())) {
-                continue;
-            }
+        value = mapReferenceValue(
+                logical,
+                value,
+                genderMapping,
+                typeDulMapping
+        );
 
-            logical = logical.trim();
+        String prev =
+                out.get(logical);
 
-            // ВАЖНО:
-            // mapping есть, но самого физического атрибута нет.
-            // В normalizedMap такое поле добавлять нельзя.
-            if (!obj.has(rawField)) {
-                continue;
-            }
-
-            JsonNode valueNode =
-                    obj.get(rawField);
-
-            String value =
-                    toFlatString(valueNode);
-
-            value = mapReferenceValue(
+        if (prev == null || prev.isBlank()) {
+            out.put(logical, value);
+        } else {
+            out.put(
                     logical,
-                    value,
-                    genderMapping,
-                    typeDulMapping
+                    prev + ";" + value
             );
-
-            String prev =
-                    out.get(logical);
-
-            if (prev == null || prev.isBlank()) {
-                out.put(logical, value);
-            } else {
-                out.put(
-                        logical,
-                        prev + ";" + value
-                );
-            }
         }
     }
 

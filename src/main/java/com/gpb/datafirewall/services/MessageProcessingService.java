@@ -47,14 +47,15 @@ public final class MessageProcessingService {
     }
 
     public ProcessingResult process(MessageRecord in) {
-        // Background retries may publish politics caches concurrently.
-        // Keep one politics version throughout processing of this message.
-        synchronized (cacheRuntime) {
-            return processMessage(in);
-        }
+        // Одна volatile-read на сообщение. Все дальнейшие lookup выполняются
+        // по одному immutable snapshot без блокировки потока обработки.
+        return processMessage(in, cacheRuntime.snapshot());
     }
 
-    private ProcessingResult processMessage(MessageRecord in) {
+    private ProcessingResult processMessage(
+            MessageRecord in,
+            RulesCacheSnapshot cacheSnapshot
+    ) {
         if (in == null || in.payload == null || in.payload.isBlank()) {
             log.warn("[PIPE][no-qid] Empty input payload");
             return null;
@@ -85,25 +86,25 @@ public final class MessageProcessingService {
 
             log.debug("[PIPE][{}][eventId={}] resolved datasetCode={}", qid, eventId, datasetCode);
 
-            String controlArea = cacheRuntime.controlAreaByDataset(datasetCode);
+            String controlArea = cacheSnapshot.controlAreaByDataset(datasetCode);
 
             if (controlArea == null || controlArea.isBlank()) {
                 log.warn("[PIPE][{}][eventId={}] controlArea not found for datasetCode={}", qid, eventId, datasetCode);
                 return null;
             }
 
-            Map<String, Set<String>> allFieldToRules = cacheRuntime.fieldToRules(controlArea);
+            Map<String, Set<String>> allFieldToRules = cacheSnapshot.fieldToRules(controlArea);
 
             if (allFieldToRules == null || allFieldToRules.isEmpty()) {
                 log.warn("[PIPE][{}][eventId={}] fieldToRules not found for controlArea={} datasetCode={}", qid, eventId, controlArea, datasetCode);
                 return null;
             }
 
-            Map<String, Map<String, String>> errorMessagesByRule = cacheRuntime.errorMessagesSnapshot();
+            Map<String, Map<String, String>> errorMessagesByRule = cacheSnapshot.errorMessagesByRule();
             // Reuse these immutable snapshots for all blocks of this message.
-            Map<String, String> genderMapping = cacheRuntime.genderMappingSnapshot();
-            Map<String, String> typeDulMapping = cacheRuntime.typeDulMappingSnapshot();
-            Boolean filterFlag = cacheRuntime.filterFlag(controlArea);
+            Map<String, String> genderMapping = cacheSnapshot.genderMapping();
+            Map<String, String> typeDulMapping = cacheSnapshot.typeDulMapping();
+            Boolean filterFlag = cacheSnapshot.filterFlag(controlArea);
             Map<String, String> normalizedMap = normalizer.normalize(
                     originalEvent,
                     genderMapping,
@@ -115,18 +116,21 @@ public final class MessageProcessingService {
                 log.info("[PIPE][{}] 2) RAW_NORMALIZED_MAP full(masked):\n{}", qid, prettyObject(maskMap(normalizedMap)));
             }
 
-            Map<String, Rule> compiledRules = cacheRuntime.rulesSnapshot();
-            Set<String> excludedBlocks = cacheRuntime.excludedBlocks(controlArea);
+            Map<String, Rule> compiledRules = cacheSnapshot.compiledRules();
+            Set<String> excludedBlocks = cacheSnapshot.excludedBlocks(controlArea);
             JsonNode dataNode = originalEvent.path("data");
 
-            Map<String, JsonNode> blockNodes = collectTopLevelBlockNodes(dataNode);
-            Map<String, JsonNode> arrayBlocks = collectTopLevelArrayBlocks(dataNode);
-            Set<String> arrayLogicalFields = collectLogicalFieldsFromArrays(
-                    arrayBlocks,
+            TopLevelPreparation topLevelPreparation = prepareTopLevelBlocks(
+                    dataNode,
                     datasetCode,
                     controlArea,
-                    allFieldToRules
+                    allFieldToRules,
+                    cacheSnapshot,
+                    genderMapping,
+                    typeDulMapping
             );
+            Map<String, JsonNode> blockNodes = topLevelPreparation.objectBlocks();
+            Set<String> arrayLogicalFields = topLevelPreparation.arrayLogicalFields();
 
             Map<String, Map<String, String>> excludedBlockNormalizedMaps = new LinkedHashMap<>();
             Map<String, String> excludedBlockDatasetCodes = new LinkedHashMap<>();
@@ -138,15 +142,15 @@ public final class MessageProcessingService {
                 if (blockNode == null || !blockNode.isObject()) continue;
 
                 String blockDatasetCode = text(blockNode, "dataset_code", blockName);
-                String blockControlArea = cacheRuntime.controlAreaByDataset(blockDatasetCode);
+                String blockControlArea = cacheSnapshot.controlAreaByDataset(blockDatasetCode);
                 if (blockControlArea == null || blockControlArea.isBlank()) blockControlArea = controlArea;
 
-                Map<String, Set<String>> blockAllFieldToRules = cacheRuntime.fieldToRules(blockControlArea);
+                Map<String, Set<String>> blockAllFieldToRules = cacheSnapshot.fieldToRules(blockControlArea);
                 if (blockAllFieldToRules == null || blockAllFieldToRules.isEmpty()) {
                     blockAllFieldToRules = allFieldToRules;
                 }
 
-                Boolean blockFilterFlag = cacheRuntime.filterFlag(blockControlArea);
+                Boolean blockFilterFlag = cacheSnapshot.filterFlag(blockControlArea);
 
                 Map<String, String> blockNormalized = normalizeSingleBlock(
                         blockName,
@@ -233,61 +237,19 @@ public final class MessageProcessingService {
                 if (PROCESS_RULE_EXCEPTION.equalsIgnoreCase(blockValidation.processStatus())) anyRuleException = true;
             }
 
-            for (Map.Entry<String, JsonNode> arrayEntry : arrayBlocks.entrySet()) {
-                String blockName = arrayEntry.getKey();
-                JsonNode arrayNode = arrayEntry.getValue();
+            for (PreparedArrayItem item : topLevelPreparation.arrayItems()) {
+                ValidationResult itemValidation = validationService.validate(
+                        compiledRules, item.normalizedMap(), item.fieldToRules(),
+                        errorMessagesByRule);
 
-                if (arrayNode == null || !arrayNode.isArray()) continue;
+                String instanceKey = item.instanceKey();
+                mergedDetailByDataset.put(instanceKey, safeFieldMap(itemValidation.detailByField()));
+                mergeErrorsWithPrefix(mergedErrorsByField, instanceKey, itemValidation.errorsByField());
 
-                int index = 0;
+                if (RESULT_ERROR.equalsIgnoreCase(itemValidation.allResult())) anyError = true;
+                else if (RESULT_WARNING.equalsIgnoreCase(itemValidation.allResult())) anyWarning = true;
 
-                for (JsonNode itemNode : arrayNode) {
-                    if (itemNode == null || !itemNode.isObject()) {
-                        index++;
-                        continue;
-                    }
-
-                    String itemDatasetCode = text(itemNode, "dataset_code", datasetCode);
-                    String itemControlArea = cacheRuntime.controlAreaByDataset(itemDatasetCode);
-                    if (itemControlArea == null || itemControlArea.isBlank()) itemControlArea = controlArea;
-
-                    Map<String, String> itemNormalized = normalizeSingleBlock(
-                            blockName,
-                            itemNode,
-                            genderMapping,
-                            typeDulMapping
-                    );
-                    Set<String> itemLogicalFields = collectLogicalFieldsFromBlock(itemNode);
-                    itemLogicalFields.addAll(itemNormalized.keySet());
-
-                    Map<String, Set<String>> itemAllFieldToRules = cacheRuntime.fieldToRules(itemControlArea);
-                    if (itemAllFieldToRules == null || itemAllFieldToRules.isEmpty()) itemAllFieldToRules = allFieldToRules;
-
-                    Boolean itemFilterFlag = cacheRuntime.filterFlag(itemControlArea);
-                    Map<String, Set<String>> itemExpectedFieldToRules = Boolean.TRUE.equals(itemFilterFlag)
-                            ? itemAllFieldToRules
-                            : selectKeys(itemAllFieldToRules, itemLogicalFields);
-                    EffectiveNormalization itemEffective = buildEffectiveNormalization(
-                            itemFilterFlag,
-                            itemNormalized,
-                            itemExpectedFieldToRules
-                    );
-
-                    ValidationResult itemValidation = validationService.validate(
-                            compiledRules, itemEffective.normalizedMap(), itemEffective.fieldToRules(),
-                            errorMessagesByRule);
-
-                    String instanceKey = arrayInstanceKey(itemDatasetCode, blockName, index);
-                    mergedDetailByDataset.put(instanceKey, safeFieldMap(itemValidation.detailByField()));
-                    mergeErrorsWithPrefix(mergedErrorsByField, instanceKey, itemValidation.errorsByField());
-
-                    if (RESULT_ERROR.equalsIgnoreCase(itemValidation.allResult())) anyError = true;
-                    else if (RESULT_WARNING.equalsIgnoreCase(itemValidation.allResult())) anyWarning = true;
-
-                    if (PROCESS_RULE_EXCEPTION.equalsIgnoreCase(itemValidation.processStatus())) anyRuleException = true;
-
-                    index++;
-                }
+                if (PROCESS_RULE_EXCEPTION.equalsIgnoreCase(itemValidation.processStatus())) anyRuleException = true;
             }
 
             ValidationResult finalValidation = new ValidationResult(
@@ -374,76 +336,130 @@ public final class MessageProcessingService {
         return null;
     }
 
-    private Map<String, JsonNode> collectTopLevelBlockNodes(JsonNode dataNode) {
-        Map<String, JsonNode> result = new LinkedHashMap<>();
-        if (dataNode == null || !dataNode.isObject()) return result;
-
-        Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
-
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> entry = fields.next();
-            if (entry.getValue() != null && entry.getValue().isObject()) result.put(entry.getKey(), entry.getValue());
-        }
-
-        return result;
-    }
-
-    private Map<String, JsonNode> collectTopLevelArrayBlocks(JsonNode dataNode) {
-        Map<String, JsonNode> result = new LinkedHashMap<>();
-        if (dataNode == null || !dataNode.isObject()) return result;
-
-        Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
-
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> entry = fields.next();
-            if (entry.getValue() != null && entry.getValue().isArray()) result.put(entry.getKey(), entry.getValue());
-        }
-
-        return result;
-    }
-
-    private Set<String> collectLogicalFieldsFromArrays(
-            Map<String, JsonNode> arrayBlocks,
+    private TopLevelPreparation prepareTopLevelBlocks(
+            JsonNode dataNode,
             String defaultDatasetCode,
             String defaultControlArea,
-            Map<String, Set<String>> defaultFieldToRules
+            Map<String, Set<String>> defaultFieldToRules,
+            RulesCacheSnapshot cacheSnapshot,
+            Map<String, String> genderMapping,
+            Map<String, String> typeDulMapping
     ) {
-        Set<String> result = new LinkedHashSet<>();
-        if (arrayBlocks == null || arrayBlocks.isEmpty()) return result;
-
+        Map<String, JsonNode> objectBlocks = new LinkedHashMap<>();
+        List<PreparedArrayItem> arrayItems = new ArrayList<>();
+        Set<String> arrayLogicalFields = new LinkedHashSet<>();
         Set<String> completedControlAreas = new LinkedHashSet<>();
 
-        for (JsonNode arrayNode : arrayBlocks.values()) {
-            if (arrayNode == null || !arrayNode.isArray()) continue;
+        if (dataNode == null || !dataNode.isObject()) {
+            return new TopLevelPreparation(objectBlocks, arrayItems, arrayLogicalFields);
+        }
 
-            for (JsonNode item : arrayNode) {
-                if (item == null || !item.isObject()) continue;
+        Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
 
-                result.addAll(collectLogicalFieldsFromBlock(item));
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            JsonNode value = entry.getValue();
+            if (value == null) continue;
 
-                String itemDatasetCode = text(item, "dataset_code", defaultDatasetCode);
-                String itemControlArea = cacheRuntime.controlAreaByDataset(itemDatasetCode);
-                if (itemControlArea == null || itemControlArea.isBlank()) {
-                    itemControlArea = defaultControlArea;
-                }
-
-                if (!Boolean.TRUE.equals(cacheRuntime.filterFlag(itemControlArea))
-                        || !completedControlAreas.add(itemControlArea)) {
-                    continue;
-                }
-
-                Map<String, Set<String>> itemFieldToRules = cacheRuntime.fieldToRules(itemControlArea);
-                if (itemFieldToRules == null || itemFieldToRules.isEmpty()) {
-                    itemFieldToRules = defaultFieldToRules;
-                }
-
-                if (itemFieldToRules != null) {
-                    result.addAll(itemFieldToRules.keySet());
-                }
+            if (value.isObject()) {
+                objectBlocks.put(entry.getKey(), value);
+            } else if (value.isArray()) {
+                prepareArrayBlock(
+                        entry.getKey(),
+                        value,
+                        defaultDatasetCode,
+                        defaultControlArea,
+                        defaultFieldToRules,
+                        cacheSnapshot,
+                        genderMapping,
+                        typeDulMapping,
+                        completedControlAreas,
+                        arrayLogicalFields,
+                        arrayItems
+                );
             }
         }
 
-        return result;
+        return new TopLevelPreparation(objectBlocks, arrayItems, arrayLogicalFields);
+    }
+
+    private void prepareArrayBlock(
+            String blockName,
+            JsonNode arrayNode,
+            String defaultDatasetCode,
+            String defaultControlArea,
+            Map<String, Set<String>> defaultFieldToRules,
+            RulesCacheSnapshot cacheSnapshot,
+            Map<String, String> genderMapping,
+            Map<String, String> typeDulMapping,
+            Set<String> completedControlAreas,
+            Set<String> arrayLogicalFields,
+            List<PreparedArrayItem> arrayItems
+    ) {
+        if (arrayNode == null || !arrayNode.isArray()) {
+            return;
+        }
+
+        int index = 0;
+
+        for (JsonNode itemNode : arrayNode) {
+            if (itemNode == null || !itemNode.isObject()) {
+                index++;
+                continue;
+            }
+
+            Set<String> mappedFields = collectLogicalFieldsFromBlock(itemNode);
+            arrayLogicalFields.addAll(mappedFields);
+
+            String itemDatasetCode = text(itemNode, "dataset_code", defaultDatasetCode);
+            String itemControlArea = cacheSnapshot.controlAreaByDataset(itemDatasetCode);
+            if (itemControlArea == null || itemControlArea.isBlank()) {
+                itemControlArea = defaultControlArea;
+            }
+
+            Map<String, Set<String>> itemAllFieldToRules = cacheSnapshot.fieldToRules(itemControlArea);
+            if (itemAllFieldToRules == null || itemAllFieldToRules.isEmpty()) {
+                itemAllFieldToRules = defaultFieldToRules;
+            }
+
+            Boolean itemFilterFlag = cacheSnapshot.filterFlag(itemControlArea);
+
+            // Ровно как в прежнем первом проходе: при filterFlag=true поля
+            // контрольной области исключаются из main-блока один раз.
+            if (Boolean.TRUE.equals(itemFilterFlag)
+                    && completedControlAreas.add(itemControlArea)
+                    && itemAllFieldToRules != null) {
+                arrayLogicalFields.addAll(itemAllFieldToRules.keySet());
+            }
+
+            Map<String, String> itemNormalized = normalizeSingleBlock(
+                    blockName,
+                    itemNode,
+                    genderMapping,
+                    typeDulMapping
+            );
+
+            Set<String> itemLogicalFields = new LinkedHashSet<>(mappedFields);
+            itemLogicalFields.addAll(itemNormalized.keySet());
+
+            Map<String, Set<String>> itemExpectedFieldToRules = Boolean.TRUE.equals(itemFilterFlag)
+                    ? itemAllFieldToRules
+                    : selectKeys(itemAllFieldToRules, itemLogicalFields);
+
+            EffectiveNormalization itemEffective = buildEffectiveNormalization(
+                    itemFilterFlag,
+                    itemNormalized,
+                    itemExpectedFieldToRules
+            );
+
+            arrayItems.add(new PreparedArrayItem(
+                    arrayInstanceKey(itemDatasetCode, blockName, index),
+                    itemEffective.normalizedMap(),
+                    itemEffective.fieldToRules()
+            ));
+
+            index++;
+        }
     }
 
     private String arrayInstanceKey(String datasetCode, String blockName, int index) {
@@ -516,7 +532,9 @@ public final class MessageProcessingService {
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRules
     ) {
-        Map<String, String> safeNormalized = normalizedMap == null ? new LinkedHashMap<>() : new LinkedHashMap<>(normalizedMap);
+        // Все вызовы передают только что созданную карту нормализации.
+        // Метод получает её во владение и может дополнять без полной копии.
+        Map<String, String> safeNormalized = normalizedMap == null ? new LinkedHashMap<>() : normalizedMap;
         Map<String, Set<String>> safeFieldToRules = fieldToRules == null ? Map.of() : fieldToRules;
 
         if (Boolean.TRUE.equals(filterFlag)) {
@@ -560,6 +578,20 @@ public final class MessageProcessingService {
     }
 
     private record EffectiveNormalization(
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRules
+    ) {
+    }
+
+    private record TopLevelPreparation(
+            Map<String, JsonNode> objectBlocks,
+            List<PreparedArrayItem> arrayItems,
+            Set<String> arrayLogicalFields
+    ) {
+    }
+
+    private record PreparedArrayItem(
+            String instanceKey,
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRules
     ) {
@@ -733,19 +765,27 @@ public final class MessageProcessingService {
         if (node.isObject()) {
             ObjectNode objectNode = (ObjectNode) node;
             Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
-            List<String> fieldsToNull = new ArrayList<>();
+            List<String> fieldsToNull = null;
 
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = fields.next();
                 JsonNode child = entry.getValue();
 
-                if (isNullLikeText(child)) fieldsToNull.add(entry.getKey());
-                else converted += normalizeEmptyStringsToNull(child);
+                if (isNullLikeText(child)) {
+                    if (fieldsToNull == null) {
+                        fieldsToNull = new ArrayList<>();
+                    }
+                    fieldsToNull.add(entry.getKey());
+                } else {
+                    converted += normalizeEmptyStringsToNull(child);
+                }
             }
 
-            for (String fieldName : fieldsToNull) {
-                objectNode.set(fieldName, mapper.nullNode());
-                converted++;
+            if (fieldsToNull != null) {
+                for (String fieldName : fieldsToNull) {
+                    objectNode.set(fieldName, mapper.nullNode());
+                    converted++;
+                }
             }
 
             return converted;

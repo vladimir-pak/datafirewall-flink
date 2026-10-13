@@ -5,6 +5,7 @@ import com.gpb.datafirewall.audit.AuditEventType;
 import com.gpb.datafirewall.audit.CefAuditEvent;
 import com.gpb.datafirewall.audit.CefAuditPublisher;
 import com.gpb.datafirewall.services.MessageRecord;
+import com.gpb.datafirewall.util.HexUtils;
 import com.ibm.mq.MQException;
 import com.ibm.mq.MQGetMessageOptions;
 import com.ibm.mq.MQMessage;
@@ -20,7 +21,6 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.Locale;
 import java.util.Map;
 
 public class MqSource extends RichParallelSourceFunction<MessageRecord> {
@@ -139,9 +139,9 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
                     String body = new String(buf, cs);
 
                     byte[] msgIdBytes = Arrays.copyOf(msg.messageId, msg.messageId.length);
-                    String msgIdHex = toHexSafe(msgIdBytes);
 
                     if (logPayloads) {
+                        String msgIdHex = toHexSafe(msgIdBytes);
                         log.info("MQ READ msgId={} BODY:\n{}", msgIdHex, body);
                     }
 
@@ -369,13 +369,7 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
             return "null";
         }
 
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-
-        for (byte b : bytes) {
-            sb.append(String.format(Locale.ROOT, "%02X", b));
-        }
-
-        return sb.toString();
+        return HexUtils.toUpperHex(bytes);
     }
 
     private Long extractMqPutTimestamp(MQMessage msg) {

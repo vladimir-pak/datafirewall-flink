@@ -92,19 +92,19 @@ public final class DotnetHandlerClient {
             throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
         }
 
-        log.info("[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",
+        log.debug("[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",
                 eventId, url, in.payload.length(), in.createdDttm, in.readedDttm);
 
         String dotnetPayload = addEventIdToPayload(in.payload, eventId);
 
-        log.info("[DOTNET][eventId={}] field {} added to request payload originalSize={} dotnetPayloadSize={}",
+        log.debug("[DOTNET][eventId={}] field {} added to request payload originalSize={} dotnetPayloadSize={}",
                 eventId, FIELD_DFW_EVENT_ID, in.payload.length(), dotnetPayload.length());
 
-        log.info("[DOTNET-PAYLOAD][eventId={}] outgoing payload={}", eventId, dotnetPayload);
+        log.debug("[DOTNET-PAYLOAD][eventId={}] outgoing payload={}", eventId, dotnetPayload);
 
         DotnetHttpResponse httpResponse = call(dotnetPayload, eventId);
 
-        log.info("[DOTNET][eventId={}] HTTP call SUCCESS status=2xx latencyMs={} responseSize={}",
+        log.debug("[DOTNET][eventId={}] HTTP call SUCCESS status=2xx latencyMs={} responseSize={}",
                 eventId, httpResponse.latencyMs(), httpResponse.body() == null ? 0 : httpResponse.body().length());
 
         DotnetHandlerResponse response = parseResponse(httpResponse.body(), eventId);
@@ -115,16 +115,16 @@ public final class DotnetHandlerClient {
         }
 
         if (in.mqMessageId != null) {
-            log.info("[DOTNET][eventId={}] building MQ ProcessingResult mqMessageIdPresent=true", eventId);
+            log.debug("[DOTNET][eventId={}] building MQ ProcessingResult mqMessageIdPresent=true", eventId);
             ProcessingResult result = ProcessingResult.forMq(in.mqMessageId, response.shortJson(), null, in.payload);
-            log.info("[DOTNET][eventId={}] processing SUCCESS transport=MQ", eventId);
+            log.debug("[DOTNET][eventId={}] processing SUCCESS transport=MQ", eventId);
             return result;
         }
 
         if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
-            log.info("[DOTNET][eventId={}] building JMS ProcessingResult jmsMessageId={}", eventId, in.jmsMessageId);
+            log.debug("[DOTNET][eventId={}] building JMS ProcessingResult jmsMessageId={}", eventId, in.jmsMessageId);
             ProcessingResult result = ProcessingResult.forJms(in.jmsMessageId, response.shortJson(), null, in.payload);
-            log.info("[DOTNET][eventId={}] processing SUCCESS transport=JMS", eventId);
+            log.debug("[DOTNET][eventId={}] processing SUCCESS transport=JMS", eventId);
             return result;
         }
 
@@ -158,7 +158,7 @@ public final class DotnetHandlerClient {
             return new DotnetHandlerResponse(null);
         }
 
-        log.info("[DOTNET-PARSE][eventId={}] parsing response START responseSize={}", eventId, responseJson.length());
+        log.debug("[DOTNET-PARSE][eventId={}] parsing response START responseSize={}", eventId, responseJson.length());
 
         try {
             JsonNode root = mapper.readTree(responseJson);
@@ -194,7 +194,7 @@ public final class DotnetHandlerClient {
 
             String shortJson = mapper.writeValueAsString(answerNode);
 
-            log.info("[DOTNET-PARSE][eventId={}] parsing SUCCESS resultSize={}", eventId, shortJson.length());
+            log.debug("[DOTNET-PARSE][eventId={}] parsing SUCCESS resultSize={}", eventId, shortJson.length());
 
             return new DotnetHandlerResponse(shortJson);
         } catch (Exception e) {
@@ -220,7 +220,7 @@ public final class DotnetHandlerClient {
         long requestStartDttm = System.currentTimeMillis();
         long startedAtNs = System.nanoTime();
 
-        log.info("[DOTNET-HTTP][eventId={}] POST START url={} timeoutMs={} payloadSize={}",
+        log.debug("[DOTNET-HTTP][eventId={}] POST START url={} timeoutMs={} payloadSize={}",
                 eventId, url, requestTimeout.toMillis(), payload == null ? 0 : payload.length());
 
         try {
@@ -231,7 +231,7 @@ public final class DotnetHandlerClient {
             int statusCode = response.statusCode();
             int responseSize = response.body() == null ? 0 : response.body().length();
 
-            log.info("[DOTNET-HTTP][eventId={}] RESPONSE RECEIVED url={} status={} latencyMs={} responseSize={}",
+            log.debug("[DOTNET-HTTP][eventId={}] RESPONSE RECEIVED url={} status={} latencyMs={} responseSize={}",
                     eventId, url, statusCode, latencyMs, responseSize);
 
             if (statusCode / 100 != 2) {
@@ -242,7 +242,7 @@ public final class DotnetHandlerClient {
                         + ", latencyMs=" + latencyMs + ": " + truncate(response.body(), 800));
             }
 
-            log.info("[DOTNET-HTTP][eventId={}] POST SUCCESS url={} status={} latencyMs={}", eventId, url, statusCode, latencyMs);
+            log.debug("[DOTNET-HTTP][eventId={}] POST SUCCESS url={} status={} latencyMs={}", eventId, url, statusCode, latencyMs);
 
             return new DotnetHttpResponse(response.body(), latencyMs, requestStartDttm, requestEndDttm);
         } catch (Exception e) {

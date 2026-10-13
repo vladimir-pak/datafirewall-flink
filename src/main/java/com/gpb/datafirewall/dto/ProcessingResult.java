@@ -1,8 +1,9 @@
 package com.gpb.datafirewall.dto;
 
+import com.gpb.datafirewall.util.HexUtils;
+
 import java.io.Serializable;
 import java.util.Arrays;
-import java.util.Locale;
 
 public class ProcessingResult implements Serializable {
 
@@ -138,11 +139,7 @@ public class ProcessingResult implements Serializable {
             return "unknown";
         }
 
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format(Locale.ROOT, "%02X", b));
-        }
-        return sb.toString();
+        return HexUtils.toUpperHex(bytes);
     }
 
     private static byte[] copyBytes(byte[] bytes) {

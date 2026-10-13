@@ -12,6 +12,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.SortedMap;
+import java.util.SortedSet;
 import java.util.TreeMap;
 
 import com.gpb.datafirewall.model.Rule;
@@ -75,13 +77,17 @@ public final class ValidationService {
             errorMessagesByRule = Map.of();
         }
 
-        log.debug(
-                "[RULE-DIAG] validate START compiledRules={} normalizedFields={} fieldToRules.fields={} fieldToRules.ruleRefs={}",
-                compiledRules.size(),
-                normalizedMap.size(),
-                fieldToRuleIds.size(),
-                countRuleReferences(fieldToRuleIds)
-        );
+        final boolean debugEnabled = log.isDebugEnabled();
+
+        if (debugEnabled) {
+            log.debug(
+                    "[RULE-DIAG] validate START compiledRules={} normalizedFields={} fieldToRules.fields={} fieldToRules.ruleRefs={}",
+                    compiledRules.size(),
+                    normalizedMap.size(),
+                    fieldToRuleIds.size(),
+                    countRuleReferences(fieldToRuleIds)
+            );
+        }
 
         boolean anyError = false;
         boolean anyWarning = false;
@@ -95,8 +101,11 @@ public final class ValidationService {
         Map<String, List<String>> errorsByField =
                 new LinkedHashMap<>();
 
-        Map<String, Set<String>> sortedFields =
-                new TreeMap<>(fieldToRuleIds);
+        Map<String, Set<String>> sortedFields = isNaturallyOrdered(fieldToRuleIds)
+                ? fieldToRuleIds
+                : new TreeMap<>(fieldToRuleIds);
+
+        Map<String, String> ruleInput = normalizedMap;
 
         for (Map.Entry<String, Set<String>> entry : sortedFields.entrySet()) {
 
@@ -115,25 +124,27 @@ public final class ValidationService {
             Map<String, String> perRules =
                     new LinkedHashMap<>();
 
-            Set<String> perFieldErrors =
-                    new LinkedHashSet<>();
+            Set<String> perFieldErrors = null;
 
-            List<String> sortedRuleNames =
-                    new ArrayList<>(ruleNames);
+            Iterable<String> sortedRuleNames;
+            if (ruleNames instanceof SortedSet<?> sortedSet
+                    && sortedSet.comparator() == null) {
+                sortedRuleNames = ruleNames;
+            } else {
+                List<String> names = new ArrayList<>(ruleNames);
+                names.sort(Comparator.naturalOrder());
+                sortedRuleNames = names;
+            }
 
-            sortedRuleNames.sort(
-                    Comparator.naturalOrder()
-            );
-
-            Map<String, String> ruleInput = normalizedMap;
-
-            log.debug(
-                    "[RULE-DIAG] FIELD field='{}' containsKey={} inputState={} configuredRules={}",
-                    logicalField,
-                    ruleInput.containsKey(logicalField),
-                    valueState(ruleInput.get(logicalField)),
-                    sortedRuleNames
-            );
+            if (debugEnabled) {
+                log.debug(
+                        "[RULE-DIAG] FIELD field='{}' containsKey={} inputState={} configuredRules={}",
+                        logicalField,
+                        ruleInput.containsKey(logicalField),
+                        valueState(ruleInput.get(logicalField)),
+                        sortedRuleNames
+                );
+            }
 
             for (String ruleName : sortedRuleNames) {
 
@@ -155,17 +166,19 @@ public final class ValidationService {
                  * - конкретный класс правила;
                  * - какое состояние значения пришло в правило.
                  */
-                log.debug(
-                        "[RULE-DIAG] BEFORE field='{}' rule={} resolved={} implClass={} containsKey={} inputState={}",
-                        logicalField,
-                        ruleName,
-                        rule != null,
-                        rule == null
-                                ? null
-                                : rule.getClass().getName(),
-                        ruleInput.containsKey(logicalField),
-                        valueState(ruleInput.get(logicalField))
-                );
+                if (debugEnabled) {
+                    log.debug(
+                            "[RULE-DIAG] BEFORE field='{}' rule={} resolved={} implClass={} containsKey={} inputState={}",
+                            logicalField,
+                            ruleName,
+                            rule != null,
+                            rule == null
+                                    ? null
+                                    : rule.getClass().getName(),
+                            ruleInput.containsKey(logicalField),
+                            valueState(ruleInput.get(logicalField))
+                    );
+                }
 
                 boolean triggered;
 
@@ -180,12 +193,14 @@ public final class ValidationService {
                             rule != null
                                     && rule.apply(ruleInput);
 
-                    log.debug(
-                            "[RULE-DIAG] APPLY field='{}' rule={} returnedTriggered={}",
-                            logicalField,
-                            ruleName,
-                            triggered
-                    );
+                    if (debugEnabled) {
+                        log.debug(
+                                "[RULE-DIAG] APPLY field='{}' rule={} returnedTriggered={}",
+                                logicalField,
+                                ruleName,
+                                triggered
+                        );
+                    }
 
                 } catch (NoSuchElementException ex) {
                     /*
@@ -227,13 +242,20 @@ public final class ValidationService {
                 }
 
                 String status = SUCCESS;
+                Map<String, String> errorInfo = null;
+                boolean errorInfoResolved = false;
 
                 if (triggered) {
 
+                    errorInfo = resolveErrorInfo(
+                            ruleName,
+                            errorMessagesByRule
+                    );
+                    errorInfoResolved = true;
+
                     status =
                             resolveTriggeredStatus(
-                                    ruleName,
-                                    errorMessagesByRule
+                                    errorInfo
                             );
 
                     if (ERROR.equals(status)) {
@@ -245,34 +267,41 @@ public final class ValidationService {
                         anyWarning = true;
                     }
 
+                    if (perFieldErrors == null) {
+                        perFieldErrors = new LinkedHashSet<>();
+                    }
+
                     perFieldErrors.add(
                             resolveErrorMessage(
                                     ruleName,
-                                    errorMessagesByRule
+                                    errorInfo
                             )
                     );
                 }
 
-                Map<String, String> errorInfo =
-                        resolveErrorInfo(
-                                ruleName,
-                                errorMessagesByRule
-                        );
-
                 /*
                  * Финальная диагностика конкретного правила.
                  */
-                log.debug(
-                        "[RULE-DIAG] AFTER field='{}' rule={} resolved={} triggered={} status={} classification={}",
-                        logicalField,
-                        ruleName,
-                        rule != null,
-                        triggered,
-                        status,
-                        errorInfo == null
-                                ? null
-                                : errorInfo.get(CLASSIFICATION)
-                );
+                if (debugEnabled) {
+                    if (!errorInfoResolved) {
+                        errorInfo = resolveErrorInfo(
+                                ruleName,
+                                errorMessagesByRule
+                        );
+                    }
+
+                    log.debug(
+                            "[RULE-DIAG] AFTER field='{}' rule={} resolved={} triggered={} status={} classification={}",
+                            logicalField,
+                            ruleName,
+                            rule != null,
+                            triggered,
+                            status,
+                            errorInfo == null
+                                    ? null
+                                    : errorInfo.get(CLASSIFICATION)
+                    );
+                }
 
                 /*
                  * Сейчас отсутствующее compiled rule автоматически
@@ -304,7 +333,7 @@ public final class ValidationService {
                 );
             }
 
-            if (!perFieldErrors.isEmpty()) {
+            if (perFieldErrors != null && !perFieldErrors.isEmpty()) {
 
                 errorsByField.put(
                         logicalField,
@@ -329,13 +358,15 @@ public final class ValidationService {
                         ? "RULE_EXCEPTION"
                         : "OK";
 
-        log.debug(
-                "[RULE-DIAG] validate END allResult={} processStatus={} detailFields={} errorFields={}",
-                all,
-                processStatus,
-                detailByField.size(),
-                errorsByField.size()
-        );
+        if (debugEnabled) {
+            log.debug(
+                    "[RULE-DIAG] validate END allResult={} processStatus={} detailFields={} errorFields={}",
+                    all,
+                    processStatus,
+                    detailByField.size(),
+                    errorsByField.size()
+            );
+        }
 
         return new ValidationResult(
                 null,
@@ -368,7 +399,7 @@ public final class ValidationService {
 
     private String resolveErrorMessage(
             String ruleName,
-            Map<String, Map<String, String>> errorMessagesByRule
+            Map<String, String> errorInfo
     ) {
 
         if (ruleName == null
@@ -379,10 +410,7 @@ public final class ValidationService {
 
         String errorDescr =
                 extractErrorDescr(
-                        resolveErrorInfo(
-                                ruleName,
-                                errorMessagesByRule
-                        )
+                        errorInfo
                 );
 
         if (errorDescr != null
@@ -503,16 +531,8 @@ public final class ValidationService {
     }
 
     private String resolveTriggeredStatus(
-            String ruleName,
-            Map<String, Map<String, String>> errorMessagesByRule
+            Map<String, String> errorInfo
     ) {
-
-        Map<String, String> errorInfo =
-                resolveErrorInfo(
-                        ruleName,
-                        errorMessagesByRule
-                );
-
         String classification =
                 errorInfo == null
                         ? null
@@ -527,6 +547,39 @@ public final class ValidationService {
         }
 
         return ERROR;
+    }
+
+    private static boolean isNaturallyOrdered(
+            Map<String, Set<String>> fields
+    ) {
+        if (fields == null || fields.isEmpty()) {
+            return true;
+        }
+
+        if (fields instanceof SortedMap<?, ?> sortedMap
+                && sortedMap.comparator() == null) {
+            return true;
+        }
+
+        String previous = null;
+        boolean hasPrevious = false;
+
+        for (String current : fields.keySet()) {
+            // TreeMap с natural order, который использовался раньше,
+            // также не допускает null-ключи.
+            if (current == null) {
+                return false;
+            }
+
+            if (hasPrevious && previous.compareTo(current) > 0) {
+                return false;
+            }
+
+            previous = current;
+            hasPrevious = true;
+        }
+
+        return true;
     }
 
     private static int countRuleReferences(

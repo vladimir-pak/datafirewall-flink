@@ -33,7 +33,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class RulesCacheRuntime implements AutoCloseable {
 
@@ -57,6 +59,8 @@ public final class RulesCacheRuntime implements AutoCloseable {
 
     private final ObjectMapper mapper;
     private final String jwt;
+    private final AtomicReference<RulesCacheSnapshot> activeSnapshot =
+            new AtomicReference<>(RulesCacheSnapshot.empty());
 
     private CompiledRulesRegistry rulesRegistry;
     private RulesReloader reloader;
@@ -116,6 +120,10 @@ public final class RulesCacheRuntime implements AutoCloseable {
         } else {
             log.info("[INIT] startup cache bootstrap is disabled. Waiting for Kafka cache update events.");
         }
+
+        // open() выполняется до начала обработки сообщений, поэтому стартовый
+        // набор правил и politics-кэшей публикуется одной заменой ссылки.
+        publishFullSnapshot();
     }
 
     private void initializeBootstrapWithRetry(CacheBootstrapService bootstrapService, ParameterTool pt) {
@@ -220,6 +228,7 @@ public final class RulesCacheRuntime implements AutoCloseable {
         log.info("[CACHE] Reloading compiled rules from {}", fullCacheName);
 
         reloader.reloadAllStrict(fullCacheName);
+        publishCompiledRulesSnapshot();
 
         log.info("[CACHE] compiled_rules reloaded: version={}, size={}",
                 version, rulesRegistry.size());
@@ -276,17 +285,17 @@ public final class RulesCacheRuntime implements AutoCloseable {
         Map<String, String> typeDulMapping =
                 cachePayloadConverter.toStringMap(typeDulMappingResponse.getCache(), typeDulMappingName);
 
-        // Network calls and conversion finish before locking publication.
-        // MessageProcessingService uses this same monitor for message processing.
-        synchronized (this) {
-            dataset2ControlAreaCache.replaceAll(dataset2ControlArea, versionStr);
-            controlAreaRulesCache.replaceAll(controlAreaRules, versionStr);
-            errorMessagesCache.replaceAll(errorMessages, versionStr);
-            datasetExclusionCache.replaceAll(datasetExclusion, versionStr);
-            filterFlagCache.replaceAll(filterFlags, versionStr);
-            genderMappingCache.replaceAll(genderMapping, versionStr);
-            typeDulMappingCache.replaceAll(typeDulMapping, versionStr);
-        }
+        // Внутренние cache-объекты сначала полностью подготавливают immutable
+        // карты. Только после этого весь politics bundle становится видимым
+        // обработчикам сообщений одной атомарной публикацией.
+        dataset2ControlAreaCache.replaceAll(dataset2ControlArea, versionStr);
+        controlAreaRulesCache.replaceAll(controlAreaRules, versionStr);
+        errorMessagesCache.replaceAll(errorMessages, versionStr);
+        datasetExclusionCache.replaceAll(datasetExclusion, versionStr);
+        filterFlagCache.replaceAll(filterFlags, versionStr);
+        genderMappingCache.replaceAll(genderMapping, versionStr);
+        typeDulMappingCache.replaceAll(typeDulMapping, versionStr);
+        publishPoliticsSnapshot();
 
         log.info(
                 "[CACHE] politics reloaded: version={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}, genderMapping={}, typeDulMapping={}",
@@ -395,78 +404,152 @@ public final class RulesCacheRuntime implements AutoCloseable {
         }
     }
 
+    public RulesCacheSnapshot snapshot() {
+        return activeSnapshot.get();
+    }
+
     public Map<String, Rule> rulesSnapshot() {
-        return rulesRegistry.snapshot();
+        return snapshot().compiledRules();
     }
 
     public int rulesSize() {
-        return rulesRegistry == null ? 0 : rulesRegistry.size();
+        return snapshot().compiledRules().size();
     }
 
     public String controlAreaByDataset(String datasetCode) {
-        return dataset2ControlAreaCache.get(datasetCode);
+        return snapshot().controlAreaByDataset(datasetCode);
     }
 
     public Map<String, Set<String>> fieldToRules(String controlArea) {
-        return controlAreaRulesCache.get(controlArea);
+        return snapshot().fieldToRules(controlArea);
     }
 
     public Map<String, Map<String, String>> errorMessagesSnapshot() {
-        Map<String, Map<String, String>> snapshot = errorMessagesCache.snapshot();
-        return snapshot == null || snapshot.isEmpty() ? Map.of() : snapshot;
+        return snapshot().errorMessagesByRule();
     }
 
     public Set<String> excludedBlocks(String controlArea) {
-        Set<String> result = datasetExclusionCache.get(controlArea);
-        return result == null ? Set.of() : result;
+        return snapshot().excludedBlocks(controlArea);
     }
 
     public Boolean filterFlag(String controlArea) {
-        return filterFlagCache.get(controlArea);
+        return snapshot().filterFlag(controlArea);
     }
 
     public int dataset2ControlAreaSize() {
-        return dataset2ControlAreaCache == null ? 0 : dataset2ControlAreaCache.size();
+        return snapshot().dataset2ControlArea().size();
     }
 
     public int controlAreaRulesSize() {
-        return controlAreaRulesCache == null ? 0 : controlAreaRulesCache.size();
+        return snapshot().controlAreaRules().size();
     }
 
     public int errorMessagesSize() {
-        return errorMessagesCache == null ? 0 : errorMessagesCache.size();
+        return snapshot().errorMessagesByRule().size();
     }
 
     public int datasetExclusionSize() {
-        return datasetExclusionCache == null ? 0 : datasetExclusionCache.size();
+        return snapshot().excludedBlocksByControlArea().size();
     }
 
     public int filterFlagSize() {
-        return filterFlagCache == null ? 0 : filterFlagCache.size();
+        return snapshot().filterFlagsByControlArea().size();
     }
 
     public Map<String, String> genderMappingSnapshot() {
-        return genderMappingCache.snapshot();
+        return snapshot().genderMapping();
     }
 
     public Map<String, String> typeDulMappingSnapshot() {
-        return typeDulMappingCache.snapshot();
+        return snapshot().typeDulMapping();
     }
 
     public int genderMappingSize() {
-        return genderMappingCache == null ? 0 : genderMappingCache.size();
+        return snapshot().genderMapping().size();
     }
 
     public int typeDulMappingSize() {
-        return typeDulMappingCache == null ? 0 : typeDulMappingCache.size();
+        return snapshot().typeDulMapping().size();
     }
 
     public long compiledRulesVersion() {
-        return numericVersion(rulesRegistry.version());
+        return numericVersion(snapshot().compiledRulesVersion());
     }
 
     public long politicsVersion() {
-        return numericVersion(dataset2ControlAreaCache.version());
+        return numericVersion(snapshot().politicsVersion());
+    }
+
+    private void publishFullSnapshot() {
+        String politicsVersion = validatedPoliticsVersion();
+
+        activeSnapshot.set(new RulesCacheSnapshot(
+                rulesRegistry.snapshot(),
+                dataset2ControlAreaCache.snapshot(),
+                controlAreaRulesCache.snapshot(),
+                errorMessagesCache.snapshot(),
+                datasetExclusionCache.snapshot(),
+                filterFlagCache.snapshot(),
+                genderMappingCache.snapshot(),
+                typeDulMappingCache.snapshot(),
+                rulesRegistry.version(),
+                politicsVersion
+        ));
+    }
+
+    private void publishCompiledRulesSnapshot() {
+        Map<String, Rule> rules = rulesRegistry.snapshot();
+        String version = rulesRegistry.version();
+
+        activeSnapshot.updateAndGet(current ->
+                current.withCompiledRules(rules, version));
+    }
+
+    private void publishPoliticsSnapshot() {
+        String version = validatedPoliticsVersion();
+
+        Map<String, String> dataset2ControlArea = dataset2ControlAreaCache.snapshot();
+        Map<String, Map<String, Set<String>>> controlAreaRules = controlAreaRulesCache.snapshot();
+        Map<String, Map<String, String>> errorMessages = errorMessagesCache.snapshot();
+        Map<String, Set<String>> datasetExclusion = datasetExclusionCache.snapshot();
+        Map<String, Boolean> filterFlags = filterFlagCache.snapshot();
+        Map<String, String> genderMapping = genderMappingCache.snapshot();
+        Map<String, String> typeDulMapping = typeDulMappingCache.snapshot();
+
+        activeSnapshot.updateAndGet(current -> current.withPolitics(
+                dataset2ControlArea,
+                controlAreaRules,
+                errorMessages,
+                datasetExclusion,
+                filterFlags,
+                genderMapping,
+                typeDulMapping,
+                version
+        ));
+    }
+
+    private String validatedPoliticsVersion() {
+        String version = dataset2ControlAreaCache.version();
+
+        if (!Objects.equals(version, controlAreaRulesCache.version())
+                || !Objects.equals(version, errorMessagesCache.version())
+                || !Objects.equals(version, datasetExclusionCache.version())
+                || !Objects.equals(version, filterFlagCache.version())
+                || !Objects.equals(version, genderMappingCache.version())
+                || !Objects.equals(version, typeDulMappingCache.version())) {
+            throw new IllegalStateException(
+                    "Cannot publish inconsistent politics snapshot: "
+                            + "dataset=" + version
+                            + ", rules=" + controlAreaRulesCache.version()
+                            + ", errors=" + errorMessagesCache.version()
+                            + ", exclusion=" + datasetExclusionCache.version()
+                            + ", filterFlag=" + filterFlagCache.version()
+                            + ", genderMapping=" + genderMappingCache.version()
+                            + ", typeDulMapping=" + typeDulMappingCache.version()
+            );
+        }
+
+        return version;
     }
 
     private static long numericVersion(String version) {

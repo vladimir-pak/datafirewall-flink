@@ -74,6 +74,23 @@ class MappingNormalizerMappingTest {
     }
 
     @Test
+    void keepsParentMappingsBeforeNestedMappingsWhenNestedNodeAppearsFirst() {
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode block = root.putObject("data").putObject("block");
+
+        ObjectNode nested = block.putObject("nested");
+        nested.put("value", "child");
+        nested.put("mapping.value", "COMMON.FIELD");
+
+        block.put("value", "parent");
+        block.put("mapping.value", "COMMON.FIELD");
+
+        Map<String, String> result = normalizer.normalize(root);
+
+        assertEquals("parent;child", result.get("COMMON.FIELD"));
+    }
+
+    @Test
     void preservesUnknownNullAndNonMatchingValues() {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode block = root.putObject("data").putObject("block");
