@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,8 +29,7 @@ public final class MappingNormalizer {
      * - для каждого объекта берёт mapping.* = logicalName
      * - находит рядом поле без "mapping." и кладёт logicalName -> value
      * - сразу подставляет справочные значения пола и типа ДУЛ
-     * - при filterFlag=true дополняет результат отсутствующими атрибутами
-     *   текущей контрольной области со значением null
+     * - совместимый overload может дополнить переданным набором expectedFields
      *
      * Если logicalName повторяется (например массив документов) — склеиваем через ';'
      *
@@ -81,9 +79,9 @@ public final class MappingNormalizer {
     }
 
     /**
-     * При включённом filterFlag дополняет результат нормализации всеми
-     * атрибутами текущей контрольной области. Уже нормализованные значения
-     * не перезаписываются, отсутствующие атрибуты получают значение null.
+     * Совместимый метод для старых вызовов: при включённом filterFlag
+     * дополняет результат переданным набором expectedFields. Основной pipeline
+     * использует раздельные selectPresentFields и completeMissingFields.
      *
      * Метод изменяет и возвращает переданную LinkedHashMap, созданную этапом
      * нормализации. Благодаря этому для каждого сообщения нет лишнего
@@ -109,56 +107,124 @@ public final class MappingNormalizer {
     }
 
     /**
-     * Одним проходом дополняет карту отсутствующими ключами и возвращает
-     * только те записи fieldToRules, чьи атрибуты реально присутствовали до
-     * дополнения. Это сохраняет семантику filterFlag: правила отсутствующего
-     * атрибута пропускаются, но правило присутствующего атрибута видит все
-     * свои зависимости как ключи со значением null.
+     * Совместимый комбинированный метод: сначала выбирает записи fieldToRules,
+     * чьи атрибуты реально присутствовали, затем дополняет отсутствующие ключи.
      */
     <V> Map<String, V> completeMissingFieldsAndSelectPresent(
             Map<String, String> normalizedMap,
             Map<String, V> expectedFields
     ) {
+        Map<String, V> presentFields = selectPresentFields(normalizedMap, expectedFields);
+        completeMissingFields(normalizedMap, expectedFields == null ? Set.of() : expectedFields.keySet());
+        return presentFields;
+    }
+
+    /**
+     * Возвращает только привязки правил для атрибутов, которые присутствовали
+     * во входных данных до null-дополнения. Карта normalizedMap может быть
+     * дополнена только каноническим вариантом имени для legacy-ключа с
+     * запятой; синтетические null здесь никогда не создаются.
+     */
+    <V> Map<String, V> selectPresentFields(
+            Map<String, String> normalizedMap,
+            Map<String, V> fieldToRules
+    ) {
         Map<String, V> presentFields = new LinkedHashMap<>();
-        if (normalizedMap == null || expectedFields == null || expectedFields.isEmpty()) {
+        if (normalizedMap == null || fieldToRules == null || fieldToRules.isEmpty()) {
             return presentFields;
         }
 
-        // Нужен только для редкого случая, когда кэш одновременно содержит
-        // варианты имени с точкой и запятой. Синтетически добавленный ключ не
-        // должен считаться физически присутствовавшим для следующей записи.
-        Set<String> syntheticFields = null;
-
-        for (Map.Entry<String, V> entry : expectedFields.entrySet()) {
+        for (Map.Entry<String, V> entry : fieldToRules.entrySet()) {
             String logicalField = entry.getKey();
             if (logicalField == null || logicalField.isBlank()) {
                 continue;
             }
 
-            if (normalizedMap.containsKey(logicalField)
-                    && (syntheticFields == null || !syntheticFields.contains(logicalField))) {
+            if (normalizedMap.containsKey(logicalField)) {
                 presentFields.put(logicalField, entry.getValue());
                 continue;
             }
 
-            // Сохраняем поддержку старого варианта имени, где вместо точки
-            // в mapping использовалась запятая.
             String alternativeField = logicalField.replace('.', ',');
             if (!alternativeField.equals(logicalField)
-                    && normalizedMap.containsKey(alternativeField)
-                    && (syntheticFields == null || !syntheticFields.contains(alternativeField))) {
+                    && normalizedMap.containsKey(alternativeField)) {
                 normalizedMap.put(logicalField, normalizedMap.get(alternativeField));
                 presentFields.put(logicalField, entry.getValue());
-            } else {
-                normalizedMap.put(logicalField, null);
-                if (syntheticFields == null) {
-                    syntheticFields = new HashSet<>();
-                }
-                syntheticFields.add(logicalField);
             }
         }
 
         return presentFields;
+    }
+
+    /**
+     * Добавляет отсутствующие referencedFields в общую карту Rule.apply.
+     * Уже существующие значения, включая физический null, не изменяются.
+     */
+    Map<String, String> completeMissingFields(
+            Map<String, String> normalizedMap,
+            Iterable<String> referencedFields
+    ) {
+        Map<String, String> result = normalizedMap == null
+                ? new LinkedHashMap<>()
+                : normalizedMap;
+
+        if (referencedFields == null) {
+            return result;
+        }
+
+        for (String logicalField : referencedFields) {
+            completeMissingField(result, logicalField);
+        }
+
+        return result;
+    }
+
+    /**
+     * Локальный overlay получает null только для полей, которые одновременно
+     * принадлежат текущему блоку и используются его правилами. Межблочные
+     * зависимости остаются в общей карте и не перекрываются локальным null.
+     */
+    Map<String, String> completeMissingLocalFields(
+            Map<String, String> normalizedMap,
+            Set<String> referencedFields,
+            Set<String> localFields
+    ) {
+        Map<String, String> result = normalizedMap == null
+                ? new LinkedHashMap<>()
+                : normalizedMap;
+
+        if (referencedFields == null || referencedFields.isEmpty()
+                || localFields == null || localFields.isEmpty()) {
+            return result;
+        }
+
+        // Обычно localFields существенно меньше полного набора зависимостей
+        // controlArea, особенно для межблочных правил.
+        for (String logicalField : localFields) {
+            if (referencedFields.contains(logicalField)) {
+                completeMissingField(result, logicalField);
+            }
+        }
+
+        return result;
+    }
+
+    private void completeMissingField(
+            Map<String, String> normalizedMap,
+            String logicalField
+    ) {
+        if (logicalField == null || logicalField.isBlank()
+                || normalizedMap.containsKey(logicalField)) {
+            return;
+        }
+
+        String alternativeField = logicalField.replace('.', ',');
+        if (!alternativeField.equals(logicalField)
+                && normalizedMap.containsKey(alternativeField)) {
+            normalizedMap.put(logicalField, normalizedMap.get(alternativeField));
+        } else {
+            normalizedMap.put(logicalField, null);
+        }
     }
 
     private void walk(

@@ -178,7 +178,8 @@ public class RulesReloadBroadcastProcessFunction
                         + "dotnetSslVerify={} rulesLoaded={} dataset2controlAreaLoaded={} "
                         + "controlAreaRulesLoaded={} errorMessagesLoaded={} "
                         + "datasetExclusionLoaded={} filterFlagLoaded={} "
-                        + "genderMappingLoaded={} typeDulMappingLoaded={}",
+                        + "genderMappingLoaded={} typeDulMappingLoaded={} "
+                        + "referencedRulesLoaded={} referencedControlAreasLoaded={}",
                 rc.getIndexOfThisSubtask(),
                 defaultHandler.value(),
                 dotnetUrl,
@@ -191,7 +192,9 @@ public class RulesReloadBroadcastProcessFunction
                 cacheRuntime.datasetExclusionSize(),
                 cacheRuntime.filterFlagSize(),
                 cacheRuntime.genderMappingSize(),
-                cacheRuntime.typeDulMappingSize()
+                cacheRuntime.typeDulMappingSize(),
+                cacheRuntime.referencedRulesSize(),
+                cacheRuntime.referencedControlAreasSize()
         );
 
         log.info(

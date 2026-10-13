@@ -207,7 +207,7 @@ public final class ValidationService {
                      * Ожидаемые отсутствующие атрибуты уже должны быть
                      * добавлены в normalizedMap со значением null. Поэтому
                      * NoSuchElementException здесь означает несогласованность
-                     * правила и PoliticsControlAreaRulesCache.
+                     * Rule.referencedFields() и фактических обращений apply().
                      */
                     triggered = false;
                     anyException = true;
@@ -445,35 +445,7 @@ public final class ValidationService {
             Map<String, Rule> compiledRules,
             String ruleName
     ) {
-
-        Rule rule =
-                compiledRules.get(ruleName);
-
-        if (rule != null) {
-            return rule;
-        }
-
-        if (!ruleName.startsWith("Rule")) {
-
-            rule =
-                    compiledRules.get(
-                            "Rule" + ruleName
-                    );
-
-            if (rule != null) {
-                return rule;
-            }
-        }
-
-        if (ruleName.startsWith("Rule")
-                && ruleName.length() > 4) {
-
-            return compiledRules.get(
-                    ruleName.substring(4)
-            );
-        }
-
-        return null;
+        return RuleIdLookup.resolve(compiledRules, ruleName);
     }
 
     private Map<String, String> resolveErrorInfo(

@@ -12,9 +12,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MessageProcessingCrossBlockRuleInputTest {
 
@@ -45,22 +48,24 @@ class MessageProcessingCrossBlockRuleInputTest {
         AtomicReference<Map<String, String>> mainInput = new AtomicReference<>();
         AtomicReference<Map<String, String>> addressInput = new AtomicReference<>();
 
-        Rule mainRule = values -> {
+        Rule mainRule = rule(Set.of(CITIZENSHIP_COUNTRY, ADDRESS_COUNTRY), values -> {
             mainCalls.incrementAndGet();
             mainInput.set(new LinkedHashMap<>(values));
             required(values, CITIZENSHIP_COUNTRY);
             required(values, ADDRESS_COUNTRY);
             return false;
-        };
+        });
 
-        Rule addressRule = values -> {
+        Rule addressRule = rule(
+                Set.of(ADDRESS_DISTRICT, ADDRESS_COUNTRY, CITIZENSHIP_COUNTRY),
+                values -> {
             addressCalls.incrementAndGet();
             addressInput.set(new LinkedHashMap<>(values));
             required(values, ADDRESS_DISTRICT);
             required(values, ADDRESS_COUNTRY);
             required(values, CITIZENSHIP_COUNTRY);
             return false;
-        };
+        });
 
         RulesCacheSnapshot snapshot = new RulesCacheSnapshot(
                 Map.of(
@@ -111,6 +116,125 @@ class MessageProcessingCrossBlockRuleInputTest {
         assertEquals("Район", addressInput.get().get(ADDRESS_DISTRICT));
     }
 
+    @Test
+    void excludedRuleReceivesMissingCrossBlockDependencyAsNull() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode data = root.putObject("data");
+
+        data.putObject("main")
+                .put("dataset_code", "MAIN_DS")
+                .put("anchor", "present")
+                .put("mapping.anchor", "MAIN.Anchor");
+
+        data.putObject("registrationAddress")
+                .put("dataset_code", "ADDRESS_DS")
+                .put("countryName", "Страна")
+                .put("mapping.countryName", ADDRESS_COUNTRY)
+                .put("district", "Район")
+                .put("mapping.district", ADDRESS_DISTRICT);
+
+        AtomicReference<Map<String, String>> addressInput = new AtomicReference<>();
+
+        Rule mainRule = rule(Set.of("MAIN.Anchor"), values -> false);
+        Rule addressRule = rule(
+                Set.of(ADDRESS_DISTRICT, ADDRESS_COUNTRY, CITIZENSHIP_COUNTRY),
+                values -> {
+                    addressInput.set(new LinkedHashMap<>(values));
+                    required(values, ADDRESS_DISTRICT);
+                    required(values, ADDRESS_COUNTRY);
+                    required(values, CITIZENSHIP_COUNTRY);
+                    return false;
+                }
+        );
+
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule);
+        RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
+        MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
+
+        ProcessingResult result = service.process(MessageRecord.fromJms(
+                "ID:missing-cross-block",
+                mapper.writeValueAsString(root),
+                1L,
+                2L
+        ));
+
+        assertNotNull(result);
+        assertNotNull(addressInput.get());
+        assertTrue(addressInput.get().containsKey(CITIZENSHIP_COUNTRY));
+        assertNull(addressInput.get().get(CITIZENSHIP_COUNTRY));
+    }
+
+    @Test
+    void syntheticReferencedFieldDoesNotStartRuleOfMissingAnchor() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode data = root.putObject("data");
+
+        data.putObject("main")
+                .put("dataset_code", "MAIN_DS")
+                .put("anchor", "present")
+                .put("mapping.anchor", "MAIN.Anchor");
+
+        data.putObject("registrationAddress")
+                .put("dataset_code", "ADDRESS_DS")
+                .put("countryName", "Страна")
+                .put("mapping.countryName", ADDRESS_COUNTRY);
+
+        AtomicInteger addressCalls = new AtomicInteger();
+        Rule mainRule = rule(Set.of("MAIN.Anchor"), values -> false);
+        Rule addressRule = rule(
+                Set.of(ADDRESS_DISTRICT, ADDRESS_COUNTRY, CITIZENSHIP_COUNTRY),
+                values -> {
+                    addressCalls.incrementAndGet();
+                    return false;
+                }
+        );
+
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule);
+        RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
+        MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
+
+        ProcessingResult result = service.process(MessageRecord.fromJms(
+                "ID:missing-anchor",
+                mapper.writeValueAsString(root),
+                1L,
+                2L
+        ));
+
+        assertNotNull(result);
+        assertEquals(0, addressCalls.get());
+    }
+
+    private static RulesCacheSnapshot snapshot(Rule mainRule, Rule addressRule) {
+        return new RulesCacheSnapshot(
+                Map.of(
+                        "RuleMainCrossBlock", mainRule,
+                        "RuleAddressCrossBlock", addressRule
+                ),
+                Map.of(
+                        "MAIN_DS", "CA_MAIN",
+                        "ADDRESS_DS", "CA_ADDRESS"
+                ),
+                Map.of(
+                        "CA_MAIN", Map.of(
+                                "MAIN.Anchor", Set.of("RuleMainCrossBlock")
+                        ),
+                        "CA_ADDRESS", Map.of(
+                                ADDRESS_COUNTRY, Set.of(),
+                                ADDRESS_DISTRICT, Set.of("RuleAddressCrossBlock")
+                        )
+                ),
+                Map.of(),
+                Map.of("CA_MAIN", Set.of("registrationAddress")),
+                Map.of("CA_MAIN", true, "CA_ADDRESS", true),
+                Map.of(),
+                Map.of(),
+                "1",
+                "1"
+        );
+    }
+
     @SuppressWarnings("unchecked")
     private static RulesCacheRuntime runtimeWithSnapshot(
             ObjectMapper mapper,
@@ -130,5 +254,22 @@ class MessageProcessingCrossBlockRuleInputTest {
             throw new java.util.NoSuchElementException("Missing field: " + field);
         }
         return values.get(field);
+    }
+
+    private static Rule rule(
+            Set<String> referencedFields,
+            Predicate<Map<String, String>> predicate
+    ) {
+        return new Rule() {
+            @Override
+            public boolean apply(Map<String, String> data) {
+                return predicate.test(data);
+            }
+
+            @Override
+            public Set<String> referencedFields() {
+                return referencedFields;
+            }
+        };
     }
 }

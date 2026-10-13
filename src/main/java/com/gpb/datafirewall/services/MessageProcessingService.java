@@ -134,6 +134,11 @@ public final class MessageProcessingService {
             );
             Map<String, JsonNode> blockNodes = topLevelPreparation.objectBlocks();
             Set<String> arrayLogicalFields = topLevelPreparation.arrayLogicalFields();
+            Set<String> completionControlAreas =
+                    new LinkedHashSet<>(topLevelPreparation.completionControlAreas());
+            if (Boolean.TRUE.equals(filterFlag)) {
+                completionControlAreas.add(controlArea);
+            }
 
             List<PreparedExcludedBlock> preparedExcludedBlocks =
                     new ArrayList<>(excludedBlocks.size());
@@ -148,11 +153,18 @@ public final class MessageProcessingService {
                 if (blockControlArea == null || blockControlArea.isBlank()) blockControlArea = controlArea;
 
                 Map<String, Set<String>> blockAllFieldToRules = cacheSnapshot.fieldToRules(blockControlArea);
+                String blockRulesControlArea = blockControlArea;
                 if (blockAllFieldToRules == null || blockAllFieldToRules.isEmpty()) {
                     blockAllFieldToRules = allFieldToRules;
+                    blockRulesControlArea = controlArea;
                 }
 
                 Boolean blockFilterFlag = cacheSnapshot.filterFlag(blockControlArea);
+                Set<String> blockReferencedFields =
+                        cacheSnapshot.referencedFields(blockRulesControlArea);
+                if (Boolean.TRUE.equals(blockFilterFlag)) {
+                    completionControlAreas.add(blockRulesControlArea);
+                }
 
                 Map<String, String> blockNormalized = normalizeSingleBlock(
                         blockName,
@@ -163,6 +175,11 @@ public final class MessageProcessingService {
 
                 Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
                 blockLogicalFields.addAll(blockNormalized.keySet());
+                if (Boolean.TRUE.equals(blockFilterFlag)) {
+                    // Эти ключи нужны для определения принадлежности поля
+                    // локальному блоку, но не являются источником запуска.
+                    blockLogicalFields.addAll(blockAllFieldToRules.keySet());
+                }
 
                 Map<String, Set<String>> blockExpectedFieldToRules = Boolean.TRUE.equals(blockFilterFlag)
                         ? blockAllFieldToRules
@@ -171,7 +188,9 @@ public final class MessageProcessingService {
                 EffectiveNormalization blockEffective = buildEffectiveNormalization(
                         blockFilterFlag,
                         blockNormalized,
-                        blockExpectedFieldToRules
+                        blockExpectedFieldToRules,
+                        blockReferencedFields,
+                        blockLogicalFields
                 );
 
                 preparedExcludedBlocks.add(new PreparedExcludedBlock(
@@ -179,7 +198,10 @@ public final class MessageProcessingService {
                         blockEffective.normalizedMap(),
                         blockEffective.fieldToRules()
                 ));
-                excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
+                excludedLogicalFields.addAll(blockLogicalFields);
+                if (!Boolean.TRUE.equals(blockFilterFlag)) {
+                    excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
+                }
 
                 if (logPayloads && log.isInfoEnabled()) {
                     log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", qid, blockName, blockDatasetCode, prettyObject(maskMap(blockEffective.normalizedMap())));
@@ -194,7 +216,9 @@ public final class MessageProcessingService {
             EffectiveNormalization mainEffective = buildEffectiveNormalization(
                     filterFlag,
                     mainNormalizedMap,
-                    mainFieldToRules
+                    mainFieldToRules,
+                    cacheSnapshot.referencedFields(controlArea),
+                    Set.of()
             );
 
             /*
@@ -208,7 +232,9 @@ public final class MessageProcessingService {
                     normalizedMap,
                     mainEffective,
                     preparedExcludedBlocks,
-                    topLevelPreparation.arrayItems()
+                    topLevelPreparation.arrayItems(),
+                    completionControlAreas,
+                    cacheSnapshot
             );
 
             if (logPayloads && log.isInfoEnabled()) {
@@ -371,7 +397,12 @@ public final class MessageProcessingService {
         Set<String> completedControlAreas = new LinkedHashSet<>();
 
         if (dataNode == null || !dataNode.isObject()) {
-            return new TopLevelPreparation(objectBlocks, arrayItems, arrayLogicalFields);
+            return new TopLevelPreparation(
+                    objectBlocks,
+                    arrayItems,
+                    arrayLogicalFields,
+                    completedControlAreas
+            );
         }
 
         Iterator<Map.Entry<String, JsonNode>> fields = dataNode.fields();
@@ -400,7 +431,12 @@ public final class MessageProcessingService {
             }
         }
 
-        return new TopLevelPreparation(objectBlocks, arrayItems, arrayLogicalFields);
+        return new TopLevelPreparation(
+                objectBlocks,
+                arrayItems,
+                arrayLogicalFields,
+                completedControlAreas
+        );
     }
 
     private void prepareArrayBlock(
@@ -438,16 +474,20 @@ public final class MessageProcessingService {
             }
 
             Map<String, Set<String>> itemAllFieldToRules = cacheSnapshot.fieldToRules(itemControlArea);
+            String itemRulesControlArea = itemControlArea;
             if (itemAllFieldToRules == null || itemAllFieldToRules.isEmpty()) {
                 itemAllFieldToRules = defaultFieldToRules;
+                itemRulesControlArea = defaultControlArea;
             }
 
             Boolean itemFilterFlag = cacheSnapshot.filterFlag(itemControlArea);
+            Set<String> itemReferencedFields =
+                    cacheSnapshot.referencedFields(itemRulesControlArea);
 
             // Ровно как в прежнем первом проходе: при filterFlag=true поля
             // контрольной области исключаются из main-блока один раз.
             if (Boolean.TRUE.equals(itemFilterFlag)
-                    && completedControlAreas.add(itemControlArea)
+                    && completedControlAreas.add(itemRulesControlArea)
                     && itemAllFieldToRules != null) {
                 arrayLogicalFields.addAll(itemAllFieldToRules.keySet());
             }
@@ -461,6 +501,9 @@ public final class MessageProcessingService {
 
             Set<String> itemLogicalFields = new LinkedHashSet<>(mappedFields);
             itemLogicalFields.addAll(itemNormalized.keySet());
+            if (Boolean.TRUE.equals(itemFilterFlag)) {
+                itemLogicalFields.addAll(itemAllFieldToRules.keySet());
+            }
 
             Map<String, Set<String>> itemExpectedFieldToRules = Boolean.TRUE.equals(itemFilterFlag)
                     ? itemAllFieldToRules
@@ -469,7 +512,9 @@ public final class MessageProcessingService {
             EffectiveNormalization itemEffective = buildEffectiveNormalization(
                     itemFilterFlag,
                     itemNormalized,
-                    itemExpectedFieldToRules
+                    itemExpectedFieldToRules,
+                    itemReferencedFields,
+                    itemLogicalFields
             );
 
             arrayItems.add(new PreparedArrayItem(
@@ -550,7 +595,9 @@ public final class MessageProcessingService {
     private EffectiveNormalization buildEffectiveNormalization(
             Boolean filterFlag,
             Map<String, String> normalizedMap,
-            Map<String, Set<String>> fieldToRules
+            Map<String, Set<String>> fieldToRules,
+            Set<String> referencedFields,
+            Set<String> localFields
     ) {
         // Все вызовы передают только что созданную карту нормализации.
         // Метод получает её во владение и может дополнять без полной копии.
@@ -559,10 +606,19 @@ public final class MessageProcessingService {
 
         if (Boolean.TRUE.equals(filterFlag)) {
             Map<String, Set<String>> presentFieldToRules =
-                    normalizer.completeMissingFieldsAndSelectPresent(
+                    normalizer.selectPresentFields(
                             safeNormalized,
                             safeFieldToRules
                     );
+
+            // В локальном overlay остаются реальные значения и null только
+            // для однозначно локальных полей. Межблочные зависимости будут
+            // добавлены один раз в общую карту Rule.apply ниже.
+            normalizer.completeMissingLocalFields(
+                    safeNormalized,
+                    referencedFields,
+                    localFields
+            );
             return new EffectiveNormalization(safeNormalized, presentFieldToRules);
         }
 
@@ -606,7 +662,9 @@ public final class MessageProcessingService {
             Map<String, String> normalizedMap,
             EffectiveNormalization mainEffective,
             List<PreparedExcludedBlock> excludedBlocks,
-            List<PreparedArrayItem> arrayItems
+            List<PreparedArrayItem> arrayItems,
+            Set<String> completionControlAreas,
+            RulesCacheSnapshot cacheSnapshot
     ) {
         Map<String, String> result = normalizedMap == null
                 ? new LinkedHashMap<>()
@@ -623,6 +681,19 @@ public final class MessageProcessingService {
         if (arrayItems != null) {
             for (PreparedArrayItem item : arrayItems) {
                 if (item != null) putAbsentEntries(result, item.normalizedMap());
+            }
+        }
+
+        // Null-дополнение выполняется только после выбора запускаемых правил
+        // и только в общей карте. Поэтому синтетический ключ не запускает
+        // правило отсутствующего атрибута, а реальное значение из другого
+        // блока не перекрывается локальным null.
+        if (completionControlAreas != null && cacheSnapshot != null) {
+            for (String controlArea : completionControlAreas) {
+                normalizer.completeMissingFields(
+                        result,
+                        cacheSnapshot.referencedFields(controlArea)
+                );
             }
         }
 
@@ -692,7 +763,8 @@ public final class MessageProcessingService {
     private record TopLevelPreparation(
             Map<String, JsonNode> objectBlocks,
             List<PreparedArrayItem> arrayItems,
-            Set<String> arrayLogicalFields
+            Set<String> arrayLogicalFields,
+            Set<String> completionControlAreas
     ) {
     }
 

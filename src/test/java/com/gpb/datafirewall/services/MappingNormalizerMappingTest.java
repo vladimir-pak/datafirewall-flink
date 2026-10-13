@@ -198,6 +198,47 @@ class MappingNormalizerMappingTest {
         assertFalse(presentFieldToRules.containsKey(PASSPORT_TYPE));
     }
 
+    @Test
+    void separateSelectionDoesNotTreatReferencedNullAsPresent() {
+        String series = "ДУЛ.Паспорт РФ.Серия";
+        Map<String, String> normalized = new java.util.LinkedHashMap<>();
+        normalized.put(series, "0000");
+
+        Map<String, Set<String>> fieldToRules = Map.of(
+                series, Set.of("Rule10220"),
+                PASSPORT_TYPE, Set.of("RuleMissingType")
+        );
+
+        Map<String, Set<String>> present =
+                normalizer.selectPresentFields(normalized, fieldToRules);
+
+        assertEquals(Set.of(series), present.keySet());
+        assertFalse(normalized.containsKey(PASSPORT_TYPE));
+
+        normalizer.completeMissingFields(normalized, Set.of(PASSPORT_TYPE));
+
+        assertTrue(normalized.containsKey(PASSPORT_TYPE));
+        assertNull(normalized.get(PASSPORT_TYPE));
+        assertFalse(present.containsKey(PASSPORT_TYPE));
+    }
+
+    @Test
+    void localCompletionDoesNotAddCrossBlockDependencyToOverlay() {
+        String addressCountry = "АДРЕС.Страна";
+        String citizenshipCountry = "ГРАЖДАНСТВО.Страна";
+        Map<String, String> local = new java.util.LinkedHashMap<>();
+
+        normalizer.completeMissingLocalFields(
+                local,
+                Set.of(addressCountry, citizenshipCountry),
+                Set.of(addressCountry)
+        );
+
+        assertTrue(local.containsKey(addressCountry));
+        assertNull(local.get(addressCountry));
+        assertFalse(local.containsKey(citizenshipCountry));
+    }
+
     private void addDocument(ArrayNode cards, String type, String logicalField) {
         ObjectNode card = cards.addObject();
         card.put("type", type);

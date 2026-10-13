@@ -12,9 +12,38 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 class RulesCacheSnapshotTest {
 
     @Test
+    void buildsRuleAndControlAreaReferencedFieldIndexes() {
+        Rule first = rule(false, Set.of("A.Anchor", "A.Dependency"));
+        Rule second = rule(false, Set.of("B.Anchor", "C.CrossBlock"));
+
+        RulesCacheSnapshot snapshot = new RulesCacheSnapshot(
+                Map.of("Rule1", first, "Rule2", second),
+                Map.of("dataset", "area"),
+                Map.of("area", Map.of(
+                        "A.Anchor", Set.of("1"),
+                        "B.Anchor", Set.of("Rule2"),
+                        "UNUSED.Anchor", Set.of()
+                )),
+                Map.of(),
+                Map.of(),
+                Map.of("area", true),
+                Map.of(),
+                Map.of(),
+                "1",
+                "1"
+        );
+
+        assertEquals(Set.of("A.Anchor", "A.Dependency"), snapshot.referencedFieldsForRule("1"));
+        assertEquals(
+                Set.of("A.Anchor", "A.Dependency", "B.Anchor", "C.CrossBlock"),
+                snapshot.referencedFields("area")
+        );
+    }
+
+    @Test
     void replacesOnlyRequestedBundleAndPreservesTheOtherOne() {
-        Rule ruleV1 = data -> false;
-        Rule ruleV2 = data -> true;
+        Rule ruleV1 = rule(false, Set.of("FIELD.V1", "DEPENDENCY.V1"));
+        Rule ruleV2 = rule(true, Set.of("FIELD.V2", "DEPENDENCY.V2"));
 
         RulesCacheSnapshot initial = new RulesCacheSnapshot(
                 Map.of("Rule1", ruleV1),
@@ -31,7 +60,7 @@ class RulesCacheSnapshotTest {
 
         RulesCacheSnapshot politicsV2 = initial.withPolitics(
                 Map.of("dataset-v2", "area-v2"),
-                Map.of("area-v2", Map.of("FIELD.V2", Set.of("Rule2"))),
+                Map.of("area-v2", Map.of("FIELD.V2", Set.of("2"))),
                 Map.of("Rule2", Map.of("classification", "warning")),
                 Map.of("area-v2", Set.of("excluded-v2")),
                 Map.of("area-v2", false),
@@ -44,6 +73,11 @@ class RulesCacheSnapshotTest {
         assertEquals("1", politicsV2.compiledRulesVersion());
         assertEquals("area-v2", politicsV2.controlAreaByDataset("dataset-v2"));
         assertEquals("20", politicsV2.politicsVersion());
+        assertSame(initial.referencedFieldsByRule(), politicsV2.referencedFieldsByRule());
+
+        // Rule2 ещё не загружено: для совместимости со старой версией
+        // snapshot оставляет хотя бы якорный атрибут politics-кэша.
+        assertEquals(Set.of("FIELD.V2"), politicsV2.referencedFields("area-v2"));
 
         RulesCacheSnapshot rulesV2 = politicsV2.withCompiledRules(
                 Map.of("Rule2", ruleV2),
@@ -55,5 +89,27 @@ class RulesCacheSnapshotTest {
         assertEquals("2", rulesV2.compiledRulesVersion());
         assertEquals("20", rulesV2.politicsVersion());
         assertEquals("area-v2", rulesV2.controlAreaByDataset("dataset-v2"));
+        assertEquals(
+                Set.of("FIELD.V2", "DEPENDENCY.V2"),
+                rulesV2.referencedFieldsForRule("2")
+        );
+        assertEquals(
+                Set.of("FIELD.V2", "DEPENDENCY.V2"),
+                rulesV2.referencedFields("area-v2")
+        );
+    }
+
+    private static Rule rule(boolean result, Set<String> referencedFields) {
+        return new Rule() {
+            @Override
+            public boolean apply(Map<String, String> data) {
+                return result;
+            }
+
+            @Override
+            public Set<String> referencedFields() {
+                return referencedFields;
+            }
+        };
     }
 }

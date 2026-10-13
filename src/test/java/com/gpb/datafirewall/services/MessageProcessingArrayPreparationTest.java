@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.gpb.datafirewall.model.Rule;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -53,7 +54,11 @@ class MessageProcessingArrayPreparationTest {
         );
 
         RulesCacheSnapshot snapshot = new RulesCacheSnapshot(
-                Map.of(),
+                Map.of(
+                        "Rule1", rule(Set.of("ARRAY.ONE")),
+                        "Rule2", rule(Set.of("ARRAY.TWO", "ARRAY.MISSING")),
+                        "Rule3", rule(Set.of("ARRAY.MISSING"))
+                ),
                 Map.of(
                         "ROOT_DS", "ROOT_AREA",
                         "DS_1", "AREA_1",
@@ -123,6 +128,20 @@ class MessageProcessingArrayPreparationTest {
         assertTrue(secondNormalized.containsKey("ARRAY.MISSING"));
         assertNull(secondNormalized.get("ARRAY.MISSING"));
         assertEquals(Set.of("ARRAY.TWO"), secondSelectedRules.keySet());
+    }
+
+    private static Rule rule(Set<String> referencedFields) {
+        return new Rule() {
+            @Override
+            public boolean apply(Map<String, String> data) {
+                return false;
+            }
+
+            @Override
+            public Set<String> referencedFields() {
+                return referencedFields;
+            }
+        };
     }
 
     private static Object component(Object record, String name) throws Exception {

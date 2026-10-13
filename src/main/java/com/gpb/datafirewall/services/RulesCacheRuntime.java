@@ -424,6 +424,14 @@ public final class RulesCacheRuntime implements AutoCloseable {
         return snapshot().fieldToRules(controlArea);
     }
 
+    public Set<String> referencedFields(String controlArea) {
+        return snapshot().referencedFields(controlArea);
+    }
+
+    public Map<String, Set<String>> referencedFieldsByRuleSnapshot() {
+        return snapshot().referencedFieldsByRule();
+    }
+
     public Map<String, Map<String, String>> errorMessagesSnapshot() {
         return snapshot().errorMessagesByRule();
     }
@@ -472,6 +480,14 @@ public final class RulesCacheRuntime implements AutoCloseable {
         return snapshot().typeDulMapping().size();
     }
 
+    public int referencedRulesSize() {
+        return snapshot().referencedFieldsByRule().size();
+    }
+
+    public int referencedControlAreasSize() {
+        return snapshot().referencedFieldsByControlArea().size();
+    }
+
     public long compiledRulesVersion() {
         return numericVersion(snapshot().compiledRulesVersion());
     }
@@ -483,7 +499,7 @@ public final class RulesCacheRuntime implements AutoCloseable {
     private void publishFullSnapshot() {
         String politicsVersion = validatedPoliticsVersion();
 
-        activeSnapshot.set(new RulesCacheSnapshot(
+        RulesCacheSnapshot next = new RulesCacheSnapshot(
                 rulesRegistry.snapshot(),
                 dataset2ControlAreaCache.snapshot(),
                 controlAreaRulesCache.snapshot(),
@@ -494,15 +510,19 @@ public final class RulesCacheRuntime implements AutoCloseable {
                 typeDulMappingCache.snapshot(),
                 rulesRegistry.version(),
                 politicsVersion
-        ));
+        );
+
+        activeSnapshot.set(next);
+        logReferencedFieldsIndex("full", next);
     }
 
     private void publishCompiledRulesSnapshot() {
         Map<String, Rule> rules = rulesRegistry.snapshot();
         String version = rulesRegistry.version();
 
-        activeSnapshot.updateAndGet(current ->
+        RulesCacheSnapshot next = activeSnapshot.updateAndGet(current ->
                 current.withCompiledRules(rules, version));
+        logReferencedFieldsIndex("compiled_rules", next);
     }
 
     private void publishPoliticsSnapshot() {
@@ -516,7 +536,7 @@ public final class RulesCacheRuntime implements AutoCloseable {
         Map<String, String> genderMapping = genderMappingCache.snapshot();
         Map<String, String> typeDulMapping = typeDulMappingCache.snapshot();
 
-        activeSnapshot.updateAndGet(current -> current.withPolitics(
+        RulesCacheSnapshot next = activeSnapshot.updateAndGet(current -> current.withPolitics(
                 dataset2ControlArea,
                 controlAreaRules,
                 errorMessages,
@@ -526,6 +546,38 @@ public final class RulesCacheRuntime implements AutoCloseable {
                 typeDulMapping,
                 version
         ));
+        logReferencedFieldsIndex("politics", next);
+    }
+
+    private void logReferencedFieldsIndex(
+            String trigger,
+            RulesCacheSnapshot snapshot
+    ) {
+        int ruleFields = countFields(snapshot.referencedFieldsByRule());
+        int controlAreaFields = countFields(snapshot.referencedFieldsByControlArea());
+
+        log.info(
+                "[CACHE] referenced fields indexed: trigger={}, rules={}, ruleFields={}, controlAreas={}, controlAreaFields={}",
+                trigger,
+                snapshot.referencedFieldsByRule().size(),
+                ruleFields,
+                snapshot.referencedFieldsByControlArea().size(),
+                controlAreaFields
+        );
+    }
+
+    private static int countFields(Map<String, Set<String>> fieldsByKey) {
+        if (fieldsByKey == null || fieldsByKey.isEmpty()) {
+            return 0;
+        }
+
+        int result = 0;
+        for (Set<String> fields : fieldsByKey.values()) {
+            if (fields != null) {
+                result += fields.size();
+            }
+        }
+        return result;
     }
 
     private String validatedPoliticsVersion() {
