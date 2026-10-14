@@ -15,8 +15,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MessageProcessingCrossBlockRuleInputTest {
@@ -192,7 +192,7 @@ class MessageProcessingCrossBlockRuleInputTest {
     }
 
     @Test
-    void excludedRuleReceivesMissingCrossBlockDependencyAsNull() throws Exception {
+    void excludedRuleDoesNotReceiveSyntheticMissingDependency() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode root = mapper.createObjectNode();
         ObjectNode data = root.putObject("data");
@@ -236,8 +236,14 @@ class MessageProcessingCrossBlockRuleInputTest {
 
         assertNotNull(result);
         assertNotNull(addressInput.get());
-        assertTrue(addressInput.get().containsKey(CITIZENSHIP_COUNTRY));
-        assertNull(addressInput.get().get(CITIZENSHIP_COUNTRY));
+        assertFalse(addressInput.get().containsKey(CITIZENSHIP_COUNTRY));
+        assertEquals(
+                "OK",
+                mapper.readTree(result.getShortJson())
+                        .path("data")
+                        .path("PROCESS_STATUS")
+                        .asText()
+        );
     }
 
     @Test
@@ -361,9 +367,65 @@ class MessageProcessingCrossBlockRuleInputTest {
         assertEquals("2000-01-01", birthdateInput.get().get(BIRTHDATE));
         assertEquals(1, addressCalls.get());
         assertNotNull(addressInput.get());
-        assertTrue(addressInput.get().containsKey(ADDRESS_DISTRICT));
-        assertNull(addressInput.get().get(ADDRESS_DISTRICT));
+        assertFalse(addressInput.get().containsKey(ADDRESS_DISTRICT));
         assertEquals("2000-01-01", addressInput.get().get(BIRTHDATE));
+    }
+
+    @Test
+    void filterFlagTrueRemovesRuleWithMissingDependencyFromBothAnswers()
+            throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode data = root.putObject("data");
+
+        data.putObject("main")
+                .put("dataset_code", "MAIN_DS")
+                .put("anchor", "present")
+                .put("mapping.anchor", "MAIN.Anchor");
+
+        data.putObject("registrationAddress")
+                .put("dataset_code", "ADDRESS_DS")
+                .put("district", "Район")
+                .put("mapping.district", ADDRESS_DISTRICT);
+
+        AtomicInteger calls = new AtomicInteger();
+        Rule mainRule = rule(Set.of("MAIN.Anchor"), values -> false);
+        Rule addressRule = rule(
+                Set.of(ADDRESS_DISTRICT, CITIZENSHIP_COUNTRY),
+                values -> {
+                    calls.incrementAndGet();
+                    required(values, ADDRESS_DISTRICT);
+                    required(values, CITIZENSHIP_COUNTRY);
+                    return false;
+                }
+        );
+
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, true, false);
+        RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
+        MessageProcessingService service =
+                new MessageProcessingService(mapper, runtime, false);
+
+        ProcessingResult result = service.process(MessageRecord.fromJms(
+                "ID:filtered-missing-dependency",
+                mapper.writeValueAsString(root),
+                1L,
+                2L
+        ));
+
+        assertNotNull(result);
+        assertEquals(1, calls.get());
+
+        com.fasterxml.jackson.databind.JsonNode shortAnswer =
+                mapper.readTree(result.getShortJson());
+        assertFalse(shortAnswer.path("data").path("details")
+                .has("registrationAddress"));
+
+        com.fasterxml.jackson.databind.JsonNode detailAnswer =
+                mapper.readTree(result.getDetailJson());
+        com.fasterxml.jackson.databind.JsonNode addressDetail =
+                detailAnswer.path("detail_results").path("ADDRESS_DS");
+        assertFalse(addressDetail.has(ADDRESS_DISTRICT));
+        assertEquals("SUCCESS", addressDetail.path("ALL_RESULT").asText());
     }
 
     private static RulesCacheSnapshot snapshot(

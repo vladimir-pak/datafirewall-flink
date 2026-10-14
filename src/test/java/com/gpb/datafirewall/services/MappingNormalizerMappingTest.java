@@ -133,7 +133,7 @@ class MappingNormalizerMappingTest {
     }
 
     @Test
-    void addsAllMissingControlAreaFieldsAsNullWhenFilterFlagIsFalse() {
+    void doesNotAddMissingControlAreaFieldsWhenFilterFlagIsFalse() {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode passport = root.putObject("data").putObject("documents");
         passport.put("series", "0000");
@@ -154,10 +154,8 @@ class MappingNormalizerMappingTest {
         );
 
         assertEquals("0000", result.get("ДУЛ.Паспорт РФ.Серия"));
-        assertTrue(result.containsKey(PASSPORT_TYPE));
-        assertNull(result.get(PASSPORT_TYPE));
-        assertTrue(result.containsKey("ДУЛ.Паспорт РФ.Номер"));
-        assertNull(result.get("ДУЛ.Паспорт РФ.Номер"));
+        assertFalse(result.containsKey(PASSPORT_TYPE));
+        assertFalse(result.containsKey("ДУЛ.Паспорт РФ.Номер"));
     }
 
     @Test
@@ -193,28 +191,26 @@ class MappingNormalizerMappingTest {
     }
 
     @Test
-    void selectsRulesOnlyForFieldsPresentBeforeNullCompletion() {
+    void selectsRulesOnlyForFieldsPresentInNormalizedInput() {
         String series = "ДУЛ.Паспорт РФ.Серия";
         Map<String, String> normalized = new java.util.LinkedHashMap<>();
         normalized.put(series, "0000");
 
-        Map<String, Set<String>> presentFieldToRules =
-                normalizer.completeMissingFieldsAndSelectPresent(
-                        normalized,
-                        Map.of(
-                                series, Set.of("Rule10220"),
-                                PASSPORT_TYPE, Set.of("RuleMissingType")
-                        )
-                );
+        Map<String, Set<String>> presentFieldToRules = normalizer.selectPresentFields(
+                normalized,
+                Map.of(
+                        series, Set.of("Rule10220"),
+                        PASSPORT_TYPE, Set.of("RuleMissingType")
+                )
+        );
 
-        assertTrue(normalized.containsKey(PASSPORT_TYPE));
-        assertNull(normalized.get(PASSPORT_TYPE));
+        assertFalse(normalized.containsKey(PASSPORT_TYPE));
         assertTrue(presentFieldToRules.containsKey(series));
         assertFalse(presentFieldToRules.containsKey(PASSPORT_TYPE));
     }
 
     @Test
-    void separateSelectionDoesNotTreatReferencedNullAsPresent() {
+    void selectionDoesNotMutateInputWithMissingFields() {
         String series = "ДУЛ.Паспорт РФ.Серия";
         Map<String, String> normalized = new java.util.LinkedHashMap<>();
         normalized.put(series, "0000");
@@ -229,29 +225,7 @@ class MappingNormalizerMappingTest {
 
         assertEquals(Set.of(series), present.keySet());
         assertFalse(normalized.containsKey(PASSPORT_TYPE));
-
-        normalizer.completeMissingFields(normalized, Set.of(PASSPORT_TYPE));
-
-        assertTrue(normalized.containsKey(PASSPORT_TYPE));
-        assertNull(normalized.get(PASSPORT_TYPE));
         assertFalse(present.containsKey(PASSPORT_TYPE));
-    }
-
-    @Test
-    void localCompletionDoesNotAddCrossBlockDependencyToOverlay() {
-        String addressCountry = "АДРЕС.Страна";
-        String citizenshipCountry = "ГРАЖДАНСТВО.Страна";
-        Map<String, String> local = new java.util.LinkedHashMap<>();
-
-        normalizer.completeMissingLocalFields(
-                local,
-                Set.of(addressCountry, citizenshipCountry),
-                Set.of(addressCountry)
-        );
-
-        assertTrue(local.containsKey(addressCountry));
-        assertNull(local.get(addressCountry));
-        assertFalse(local.containsKey(citizenshipCountry));
     }
 
     private void addDocument(ArrayNode cards, String type, String logicalField) {

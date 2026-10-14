@@ -87,7 +87,6 @@ class MessageProcessingArrayPreparationTest {
                 String.class,
                 Map.class,
                 Boolean.class,
-                Set.class,
                 Map.class,
                 Map.class
         );
@@ -99,7 +98,6 @@ class MessageProcessingArrayPreparationTest {
                 "ROOT_DS",
                 rootRules,
                 true,
-                snapshot.referencedFields("ROOT_AREA"),
                 Map.of(),
                 Map.of()
         );

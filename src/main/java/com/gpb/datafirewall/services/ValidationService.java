@@ -39,12 +39,17 @@ public final class ValidationService {
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRuleIds
     ) {
-        return validate(compiledRules, normalizedMap, fieldToRuleIds, Map.of());
+        return validate(
+                compiledRules,
+                normalizedMap,
+                fieldToRuleIds,
+                Map.of(),
+                false
+        );
     }
 
     /**
-     * Совместимый вход для старых вызовов. Обработка filterFlag выполняется
-     * до валидации, на этапе нормализации.
+     * Совместимый вход без справочника сообщений об ошибках.
      */
     public ValidationResult validate(
             Map<String, Rule> compiledRules,
@@ -52,7 +57,13 @@ public final class ValidationService {
             Map<String, Set<String>> fieldToRuleIds,
             Boolean filterFlag
     ) {
-        return validate(compiledRules, normalizedMap, fieldToRuleIds, Map.of());
+        return validate(
+                compiledRules,
+                normalizedMap,
+                fieldToRuleIds,
+                Map.of(),
+                filterFlag
+        );
     }
 
     public ValidationResult validate(
@@ -60,6 +71,22 @@ public final class ValidationService {
             Map<String, String> normalizedMap,
             Map<String, Set<String>> fieldToRuleIds,
             Map<String, Map<String, String>> errorMessagesByRule
+    ) {
+        return validate(
+                compiledRules,
+                normalizedMap,
+                fieldToRuleIds,
+                errorMessagesByRule,
+                false
+        );
+    }
+
+    public ValidationResult validate(
+            Map<String, Rule> compiledRules,
+            Map<String, String> normalizedMap,
+            Map<String, Set<String>> fieldToRuleIds,
+            Map<String, Map<String, String>> errorMessagesByRule,
+            Boolean filterFlag
     ) {
         if (compiledRules == null) {
             compiledRules = Map.of();
@@ -183,12 +210,7 @@ public final class ValidationService {
                 boolean triggered;
 
                 try {
-                    /*
-                     * true = правило сработало = ошибка найдена.
-                     *
-                     * ВАЖНО:
-                     * текущую бизнес-логику здесь НЕ меняем.
-                     */
+                    // true = правило сработало = ошибка найдена.
                     triggered =
                             rule != null
                                     && rule.apply(ruleInput);
@@ -202,26 +224,21 @@ public final class ValidationService {
                         );
                     }
 
-                } catch (NoSuchElementException ex) {
-                    /*
-                     * Ожидаемые отсутствующие атрибуты уже должны быть
-                     * добавлены в normalizedMap со значением null. Поэтому
-                     * NoSuchElementException здесь означает несогласованность
-                     * Rule.referencedFields() и фактических обращений apply().
-                     */
-                    triggered = false;
-                    anyException = true;
+                } catch (NoSuchElementException ignored) {
+                    if (Boolean.TRUE.equals(filterFlag)) {
+                        // При включённой фильтрации проверка с отсутствующей
+                        // зависимостью полностью исключается из результата.
+                        continue;
+                    }
 
-                    log.error(
-                            "[RULE-DIAG] APPLY EXCEPTION field='{}' rule={} containsKey={} inputState={} implClass={}",
-                            logicalField,
+                    // Отсутствующая зависимость является штатным SUCCESS,
+                    // поэтому processStatus остаётся OK. Stack trace намеренно
+                    // не передаётся в лог.
+                    triggered = false;
+                    log.warn(
+                            "[RULE] missing field: rule={} fields={}",
                             ruleName,
-                            ruleInput.containsKey(logicalField),
-                            valueState(ruleInput.get(logicalField)),
-                            rule == null
-                                    ? null
-                                    : rule.getClass().getName(),
-                            ex
+                            referencedFieldsForLog(rule, logicalField)
                     );
                 } catch (Exception ex) {
 
@@ -378,23 +395,24 @@ public final class ValidationService {
         );
     }
 
-    /**
-     * Совместимый вход для старых вызовов. filterFlag намеренно не участвует
-     * в применении правил: normalizedMap уже подготовлена вызывающим кодом.
-     */
-    public ValidationResult validate(
-            Map<String, Rule> compiledRules,
-            Map<String, String> normalizedMap,
-            Map<String, Set<String>> fieldToRuleIds,
-            Map<String, Map<String, String>> errorMessagesByRule,
-            Boolean filterFlag
+    private Set<String> referencedFieldsForLog(
+            Rule rule,
+            String anchorField
     ) {
-        return validate(
-                compiledRules,
-                normalizedMap,
-                fieldToRuleIds,
-                errorMessagesByRule
-        );
+        if (rule != null) {
+            try {
+                Set<String> fields = rule.referencedFields();
+                if (fields != null && !fields.isEmpty()) {
+                    return fields;
+                }
+            } catch (RuntimeException ignored) {
+                // Диагностический код не должен менять результат проверки.
+            }
+        }
+
+        return anchorField == null || anchorField.isBlank()
+                ? Set.of()
+                : Set.of(anchorField);
     }
 
     private String resolveErrorMessage(
