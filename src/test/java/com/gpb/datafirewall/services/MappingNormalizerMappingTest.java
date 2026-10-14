@@ -53,7 +53,6 @@ class MappingNormalizerMappingTest {
         assertEquals("BIRTH_CERTIFICATE", cards.get(1).get("type").asText());
     }
 
-    @Test
     void mapsBeforeJoiningRepeatedLogicalFields() {
         ObjectNode root = mapper.createObjectNode();
         ArrayNode cards = root.putObject("data")

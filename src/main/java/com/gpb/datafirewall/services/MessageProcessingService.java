@@ -89,6 +89,9 @@ public final class MessageProcessingService {
 
             log.debug("[PIPE][{}][eventId={}] resolved datasetCode={}", qid, eventId, datasetCode);
 
+            // controlArea определяется один раз на всё сообщение. Вложенные
+            // dataset_code используются только как идентификаторы результата
+            // и не переключают набор правил/исключений/флагов кэша.
             String controlArea = cacheSnapshot.controlAreaByDataset(datasetCode);
 
             if (controlArea == null || controlArea.isBlank()) {
@@ -108,6 +111,7 @@ public final class MessageProcessingService {
             Map<String, String> genderMapping = cacheSnapshot.genderMapping();
             Map<String, String> typeDulMapping = cacheSnapshot.typeDulMapping();
             Boolean filterFlag = cacheSnapshot.filterFlag(controlArea);
+            Set<String> referencedFields = cacheSnapshot.referencedFields(controlArea);
             Map<String, String> normalizedMap = normalizer.normalize(
                     originalEvent,
                     genderMapping,
@@ -126,20 +130,18 @@ public final class MessageProcessingService {
             TopLevelPreparation topLevelPreparation = prepareTopLevelBlocks(
                     dataNode,
                     datasetCode,
-                    controlArea,
                     allFieldToRules,
-                    cacheSnapshot,
+                    filterFlag,
+                    referencedFields,
                     genderMapping,
                     typeDulMapping
             );
             Map<String, JsonNode> blockNodes = topLevelPreparation.objectBlocks();
+            Map<String, Set<String>> logicalFieldsByObjectBlock =
+                    topLevelPreparation.logicalFieldsByObjectBlock();
             Set<String> arrayLogicalFields = topLevelPreparation.arrayLogicalFields();
-            Set<String> completionControlAreas =
-                    new LinkedHashSet<>(topLevelPreparation.completionControlAreas());
-            if (Boolean.FALSE.equals(filterFlag)) {
-                completionControlAreas.add(controlArea);
-            }
-
+            Map<String, Integer> logicalFamilyOwners =
+                    topLevelPreparation.logicalFamilyOwners();
             List<PreparedExcludedBlock> preparedExcludedBlocks =
                     new ArrayList<>(excludedBlocks.size());
             Set<String> excludedLogicalFields = new LinkedHashSet<>();
@@ -149,57 +151,67 @@ public final class MessageProcessingService {
                 if (blockNode == null || !blockNode.isObject()) continue;
 
                 String blockDatasetCode = text(blockNode, "dataset_code", blockName);
-                String blockControlArea = cacheSnapshot.controlAreaByDataset(blockDatasetCode);
-                if (blockControlArea == null || blockControlArea.isBlank()) blockControlArea = controlArea;
-
-                Map<String, Set<String>> blockAllFieldToRules = cacheSnapshot.fieldToRules(blockControlArea);
-                String blockRulesControlArea = blockControlArea;
-                if (blockAllFieldToRules == null || blockAllFieldToRules.isEmpty()) {
-                    blockAllFieldToRules = allFieldToRules;
-                    blockRulesControlArea = controlArea;
-                }
-
-                Boolean blockFilterFlag = cacheSnapshot.filterFlag(blockRulesControlArea);
-                Set<String> blockReferencedFields =
-                        cacheSnapshot.referencedFields(blockRulesControlArea);
-                if (Boolean.FALSE.equals(blockFilterFlag)) {
-                    completionControlAreas.add(blockRulesControlArea);
-                }
-
                 Map<String, String> blockNormalized = normalizeSingleBlock(
                         blockName,
                         blockNode,
                         genderMapping,
                         typeDulMapping
                 );
+                // Запоминаем только фактически присутствующие в excluded-блоке
+                // поля до добавления синтетических null. Именно они имеют
+                // приоритет над общей картой сообщения при вызове Rule.apply.
+                Set<String> blockLocalValueFields =
+                        new LinkedHashSet<>(blockNormalized.keySet());
 
-                Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
-                blockLogicalFields.addAll(blockNormalized.keySet());
-                if (Boolean.FALSE.equals(blockFilterFlag)) {
-                    // Эти ключи нужны для определения принадлежности поля
-                    // локальному блоку, но не являются источником запуска.
-                    blockLogicalFields.addAll(blockAllFieldToRules.keySet());
+                Set<String> blockObservedFields = new LinkedHashSet<>(
+                        logicalFieldsByObjectBlock.getOrDefault(blockName, Set.of())
+                );
+                blockObservedFields.addAll(blockNormalized.keySet());
+
+                Map<String, Set<String>> blockExpectedFieldToRules;
+                if (Boolean.FALSE.equals(filterFlag)) {
+                    blockExpectedFieldToRules = selectKeysByLogicalFamily(
+                            allFieldToRules,
+                            blockObservedFields,
+                            normalizedMap.keySet(),
+                            logicalFamilyOwners,
+                            true
+                    );
+                } else {
+                    blockExpectedFieldToRules = selectKeys(
+                            allFieldToRules,
+                            blockObservedFields
+                    );
                 }
 
-                Map<String, Set<String>> blockExpectedFieldToRules = Boolean.FALSE.equals(blockFilterFlag)
-                        ? blockAllFieldToRules
-                        : selectKeys(blockAllFieldToRules, blockLogicalFields);
+                Set<String> blockLocalFields = new LinkedHashSet<>(blockObservedFields);
+                if (Boolean.FALSE.equals(filterFlag)) {
+                    blockLocalFields.addAll(blockExpectedFieldToRules.keySet());
+                    blockLocalFields.addAll(selectFieldsByLogicalFamily(
+                            referencedFields,
+                            blockLocalFields,
+                            normalizedMap.keySet(),
+                            logicalFamilyOwners,
+                            true
+                    ));
+                }
 
                 EffectiveNormalization blockEffective = buildEffectiveNormalization(
-                        blockFilterFlag,
+                        filterFlag,
                         blockNormalized,
                         blockExpectedFieldToRules,
-                        blockReferencedFields,
-                        blockLogicalFields
+                        referencedFields,
+                        blockLocalFields
                 );
 
                 preparedExcludedBlocks.add(new PreparedExcludedBlock(
                         blockDatasetCode,
                         blockEffective.normalizedMap(),
+                        blockLocalValueFields,
                         blockEffective.fieldToRules()
                 ));
-                excludedLogicalFields.addAll(blockLogicalFields);
-                if (Boolean.FALSE.equals(blockFilterFlag)) {
+                excludedLogicalFields.addAll(blockLocalFields);
+                if (Boolean.FALSE.equals(filterFlag)) {
                     excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
                 }
 
@@ -217,7 +229,7 @@ public final class MessageProcessingService {
                     filterFlag,
                     mainNormalizedMap,
                     mainFieldToRules,
-                    cacheSnapshot.referencedFields(controlArea),
+                    referencedFields,
                     Set.of()
             );
 
@@ -225,7 +237,7 @@ public final class MessageProcessingService {
              * fieldToRules определяет только набор запускаемых правил, а
              * Rule.apply всегда получает полный контекст сообщения. Карта
              * строится один раз и дополняется отсутствующими зависимостями из
-             * всех обнаруженных control area. Для отдельных блоков и
+             * единственной control area сообщения. Для отдельных блоков и
              * элементов массива ниже используется дешёвый overlay-view.
              */
             Map<String, String> completeRuleInput = buildCompleteRuleInput(
@@ -233,8 +245,8 @@ public final class MessageProcessingService {
                     mainEffective,
                     preparedExcludedBlocks,
                     topLevelPreparation.arrayItems(),
-                    completionControlAreas,
-                    cacheSnapshot
+                    filterFlag,
+                    referencedFields
             );
 
             if (logPayloads && log.isInfoEnabled()) {
@@ -262,7 +274,8 @@ public final class MessageProcessingService {
             for (PreparedExcludedBlock block : preparedExcludedBlocks) {
                 Map<String, String> blockRuleInput = scopedRuleInput(
                         completeRuleInput,
-                        block.normalizedMap()
+                        block.normalizedMap(),
+                        block.localValueFields()
                 );
                 ValidationResult blockValidation = validationService.validate(
                         compiledRules, blockRuleInput, block.fieldToRules(),
@@ -385,23 +398,26 @@ public final class MessageProcessingService {
     private TopLevelPreparation prepareTopLevelBlocks(
             JsonNode dataNode,
             String defaultDatasetCode,
-            String defaultControlArea,
             Map<String, Set<String>> defaultFieldToRules,
-            RulesCacheSnapshot cacheSnapshot,
+            Boolean filterFlag,
+            Set<String> referencedFields,
             Map<String, String> genderMapping,
             Map<String, String> typeDulMapping
     ) {
         Map<String, JsonNode> objectBlocks = new LinkedHashMap<>();
+        Map<String, JsonNode> arrayBlocks = new LinkedHashMap<>();
+        Map<String, Set<String>> logicalFieldsByObjectBlock = new LinkedHashMap<>();
         List<PreparedArrayItem> arrayItems = new ArrayList<>();
         Set<String> arrayLogicalFields = new LinkedHashSet<>();
-        Set<String> completedControlAreas = new LinkedHashSet<>();
+        Map<String, Integer> logicalFamilyOwners = new LinkedHashMap<>();
 
         if (dataNode == null || !dataNode.isObject()) {
             return new TopLevelPreparation(
                     objectBlocks,
                     arrayItems,
                     arrayLogicalFields,
-                    completedControlAreas
+                    logicalFieldsByObjectBlock,
+                    logicalFamilyOwners
             );
         }
 
@@ -414,28 +430,38 @@ public final class MessageProcessingService {
 
             if (value.isObject()) {
                 objectBlocks.put(entry.getKey(), value);
+                Set<String> logicalFields = collectLogicalFieldsFromBlock(value);
+                logicalFieldsByObjectBlock.put(entry.getKey(), logicalFields);
+                for (String family : logicalFamilies(logicalFields)) {
+                    logicalFamilyOwners.merge(family, 1, Integer::sum);
+                }
             } else if (value.isArray()) {
-                prepareArrayBlock(
-                        entry.getKey(),
-                        value,
-                        defaultDatasetCode,
-                        defaultControlArea,
-                        defaultFieldToRules,
-                        cacheSnapshot,
-                        genderMapping,
-                        typeDulMapping,
-                        completedControlAreas,
-                        arrayLogicalFields,
-                        arrayItems
-                );
+                arrayBlocks.put(entry.getKey(), value);
             }
+        }
+
+        for (Map.Entry<String, JsonNode> arrayEntry : arrayBlocks.entrySet()) {
+            prepareArrayBlock(
+                    arrayEntry.getKey(),
+                    arrayEntry.getValue(),
+                    defaultDatasetCode,
+                    defaultFieldToRules,
+                    filterFlag,
+                    referencedFields,
+                    genderMapping,
+                    typeDulMapping,
+                    arrayLogicalFields,
+                    arrayItems,
+                    logicalFamilyOwners
+            );
         }
 
         return new TopLevelPreparation(
                 objectBlocks,
                 arrayItems,
                 arrayLogicalFields,
-                completedControlAreas
+                logicalFieldsByObjectBlock,
+                logicalFamilyOwners
         );
     }
 
@@ -443,14 +469,14 @@ public final class MessageProcessingService {
             String blockName,
             JsonNode arrayNode,
             String defaultDatasetCode,
-            String defaultControlArea,
             Map<String, Set<String>> defaultFieldToRules,
-            RulesCacheSnapshot cacheSnapshot,
+            Boolean filterFlag,
+            Set<String> referencedFields,
             Map<String, String> genderMapping,
             Map<String, String> typeDulMapping,
-            Set<String> completedControlAreas,
             Set<String> arrayLogicalFields,
-            List<PreparedArrayItem> arrayItems
+            List<PreparedArrayItem> arrayItems,
+            Map<String, Integer> logicalFamilyOwners
     ) {
         if (arrayNode == null || !arrayNode.isArray()) {
             return;
@@ -468,29 +494,6 @@ public final class MessageProcessingService {
             arrayLogicalFields.addAll(mappedFields);
 
             String itemDatasetCode = text(itemNode, "dataset_code", defaultDatasetCode);
-            String itemControlArea = cacheSnapshot.controlAreaByDataset(itemDatasetCode);
-            if (itemControlArea == null || itemControlArea.isBlank()) {
-                itemControlArea = defaultControlArea;
-            }
-
-            Map<String, Set<String>> itemAllFieldToRules = cacheSnapshot.fieldToRules(itemControlArea);
-            String itemRulesControlArea = itemControlArea;
-            if (itemAllFieldToRules == null || itemAllFieldToRules.isEmpty()) {
-                itemAllFieldToRules = defaultFieldToRules;
-                itemRulesControlArea = defaultControlArea;
-            }
-
-            Boolean itemFilterFlag = cacheSnapshot.filterFlag(itemRulesControlArea);
-            Set<String> itemReferencedFields =
-                    cacheSnapshot.referencedFields(itemRulesControlArea);
-
-            // Ровно как в прежнем первом проходе: при filterFlag=false поля
-            // контрольной области исключаются из main-блока один раз.
-            if (Boolean.FALSE.equals(itemFilterFlag)
-                    && completedControlAreas.add(itemRulesControlArea)
-                    && itemAllFieldToRules != null) {
-                arrayLogicalFields.addAll(itemAllFieldToRules.keySet());
-            }
 
             Map<String, String> itemNormalized = normalizeSingleBlock(
                     blockName,
@@ -499,22 +502,44 @@ public final class MessageProcessingService {
                     typeDulMapping
             );
 
-            Set<String> itemLogicalFields = new LinkedHashSet<>(mappedFields);
-            itemLogicalFields.addAll(itemNormalized.keySet());
-            if (Boolean.FALSE.equals(itemFilterFlag)) {
-                itemLogicalFields.addAll(itemAllFieldToRules.keySet());
+            Set<String> itemObservedFields = new LinkedHashSet<>(mappedFields);
+            itemObservedFields.addAll(itemNormalized.keySet());
+
+            Map<String, Set<String>> itemExpectedFieldToRules;
+            if (Boolean.FALSE.equals(filterFlag)) {
+                itemExpectedFieldToRules = selectKeysByLogicalFamily(
+                        defaultFieldToRules,
+                        itemObservedFields,
+                        Set.of(),
+                        logicalFamilyOwners,
+                        false
+                );
+            } else {
+                itemExpectedFieldToRules = selectKeys(
+                        defaultFieldToRules,
+                        itemObservedFields
+                );
             }
 
-            Map<String, Set<String>> itemExpectedFieldToRules = Boolean.FALSE.equals(itemFilterFlag)
-                    ? itemAllFieldToRules
-                    : selectKeys(itemAllFieldToRules, itemLogicalFields);
+            Set<String> itemLocalFields = new LinkedHashSet<>(itemObservedFields);
+            if (Boolean.FALSE.equals(filterFlag)) {
+                itemLocalFields.addAll(itemExpectedFieldToRules.keySet());
+                itemLocalFields.addAll(selectFieldsByLogicalFamily(
+                        referencedFields,
+                        itemLocalFields,
+                        Set.of(),
+                        logicalFamilyOwners,
+                        false
+                ));
+            }
+            arrayLogicalFields.addAll(itemLocalFields);
 
             EffectiveNormalization itemEffective = buildEffectiveNormalization(
-                    itemFilterFlag,
+                    filterFlag,
                     itemNormalized,
                     itemExpectedFieldToRules,
-                    itemReferencedFields,
-                    itemLogicalFields
+                    referencedFields,
+                    itemLocalFields
             );
 
             arrayItems.add(new PreparedArrayItem(
@@ -548,24 +573,43 @@ public final class MessageProcessingService {
 
     private Set<String> collectLogicalFieldsFromBlock(JsonNode blockNode) {
         Set<String> out = new LinkedHashSet<>();
-        if (blockNode == null || !blockNode.isObject()) return out;
+        collectLogicalFields(blockNode, out);
+        return out;
+    }
 
-        Iterator<Map.Entry<String, JsonNode>> it = blockNode.fields();
+    private void collectLogicalFields(JsonNode node, Set<String> out) {
+        if (node == null || node.isNull() || out == null) return;
+
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                collectLogicalFields(item, out);
+            }
+            return;
+        }
+
+        if (!node.isObject()) return;
+
+        Iterator<Map.Entry<String, JsonNode>> it = node.fields();
 
         while (it.hasNext()) {
             Map.Entry<String, JsonNode> e = it.next();
             String key = e.getKey();
             JsonNode value = e.getValue();
 
-            if (key == null || !key.startsWith("mapping.") || value == null || value.isNull()) continue;
+            if (key != null && key.startsWith("mapping.")
+                    && value != null && !value.isNull()) {
+                String logical = isNullLikeText(value) ? null : value.asText(null);
+                if (logical != null && !logical.isBlank()
+                        && !"none".equalsIgnoreCase(logical.trim())) {
+                    out.add(logical.trim());
+                }
+            }
 
-            String logical = isNullLikeText(value) ? null : value.asText(null);
-            if (logical == null || logical.isBlank() || "none".equalsIgnoreCase(logical.trim())) continue;
-
-            out.add(logical.trim());
+            if (value != null && !value.isNull()
+                    && (value.isObject() || value.isArray())) {
+                collectLogicalFields(value, out);
+            }
         }
-
-        return out;
     }
 
     private <V> Map<String, V> removeKeys(Map<String, V> source, Set<String> keysToRemove) {
@@ -592,6 +636,113 @@ public final class MessageProcessingService {
         return result;
     }
 
+    /**
+     * Выбирает anchor-поля, принадлежащие тем же логическим семействам, что
+     * и mapping.* текущего блока. Например, наличие любого поля АДРЕС.*
+     * относит к блоку остальные anchor-поля АДРЕС.*. Семейства, встречающиеся
+     * сразу в нескольких top-level блоках, не используются для неявного
+     * определения владельца поля.
+     */
+    private <V> Map<String, V> selectKeysByLogicalFamily(
+            Map<String, V> source,
+            Set<String> localFields,
+            Set<String> globallyPresentFields,
+            Map<String, Integer> logicalFamilyOwners,
+            boolean localOwnerAlreadyCounted
+    ) {
+        Map<String, V> result = new LinkedHashMap<>();
+        if (source == null || source.isEmpty()
+                || localFields == null || localFields.isEmpty()) {
+            return result;
+        }
+
+        Set<String> families = logicalFamilies(localFields);
+        for (Map.Entry<String, V> entry : source.entrySet()) {
+            String field = entry.getKey();
+            boolean locallyDeclared = localFields.contains(field);
+            boolean presentOnlyOutsideBlock = !locallyDeclared
+                    && globallyPresentFields != null
+                    && globallyPresentFields.contains(field);
+            String family = logicalFamily(field);
+            int ownerCount = logicalFamilyOwners == null
+                    ? 0
+                    : logicalFamilyOwners.getOrDefault(family, 0);
+            if (!localOwnerAlreadyCounted) ownerCount++;
+            boolean uniquelyOwnedFamily = ownerCount <= 1;
+
+            if (locallyDeclared
+                    || (!presentOnlyOutsideBlock
+                    && uniquelyOwnedFamily
+                    && families.contains(family))) {
+                result.put(field, entry.getValue());
+            }
+        }
+
+        return result;
+    }
+
+    private Set<String> selectFieldsByLogicalFamily(
+            Iterable<String> source,
+            Set<String> localFields,
+            Set<String> globallyPresentFields,
+            Map<String, Integer> logicalFamilyOwners,
+            boolean localOwnerAlreadyCounted
+    ) {
+        Set<String> result = new LinkedHashSet<>();
+        if (source == null || localFields == null || localFields.isEmpty()) {
+            return result;
+        }
+
+        Set<String> families = logicalFamilies(localFields);
+        for (String field : source) {
+            boolean locallyDeclared = field != null && localFields.contains(field);
+            boolean presentOnlyOutsideBlock = field != null
+                    && !locallyDeclared
+                    && globallyPresentFields != null
+                    && globallyPresentFields.contains(field);
+            String family = logicalFamily(field);
+            int ownerCount = logicalFamilyOwners == null
+                    ? 0
+                    : logicalFamilyOwners.getOrDefault(family, 0);
+            if (!localOwnerAlreadyCounted) ownerCount++;
+            boolean uniquelyOwnedFamily = ownerCount <= 1;
+
+            if (field != null && (locallyDeclared
+                    || (!presentOnlyOutsideBlock
+                    && uniquelyOwnedFamily
+                    && families.contains(family)))) {
+                result.add(field);
+            }
+        }
+
+        return result;
+    }
+
+    private Set<String> logicalFamilies(Iterable<String> fields) {
+        Set<String> result = new LinkedHashSet<>();
+        if (fields == null) return result;
+
+        for (String field : fields) {
+            String family = logicalFamily(field);
+            if (!family.isEmpty()) result.add(family);
+        }
+
+        return result;
+    }
+
+    private String logicalFamily(String field) {
+        if (field == null) return "";
+
+        String normalized = field.trim();
+        if (normalized.isEmpty()) return "";
+
+        int separator = normalized.indexOf('.');
+        String family = separator < 0
+                ? normalized
+                : normalized.substring(0, separator);
+        return family.trim().toLowerCase(Locale.ROOT);
+    }
+
     private EffectiveNormalization buildEffectiveNormalization(
             Boolean filterFlag,
             Map<String, String> normalizedMap,
@@ -604,7 +755,7 @@ public final class MessageProcessingService {
         Map<String, String> safeNormalized = normalizedMap == null ? new LinkedHashMap<>() : normalizedMap;
         Map<String, Set<String>> safeFieldToRules = fieldToRules == null ? Map.of() : fieldToRules;
 
-        if (Boolean.TRUE.equals(filterFlag)) {
+        if (!Boolean.FALSE.equals(filterFlag)) {
             Map<String, Set<String>> presentFieldToRules =
                     normalizer.selectPresentFields(
                             safeNormalized,
@@ -617,47 +768,21 @@ public final class MessageProcessingService {
             );
         }
 
-        Map<String, String> effective = new LinkedHashMap<>();
-
         if (safeFieldToRules.isEmpty()) {
             return new EffectiveNormalization(safeNormalized, safeFieldToRules);
         }
 
-        for (String logicalField : safeFieldToRules.keySet()) {
-            if (logicalField == null || logicalField.isBlank()) continue;
-
-            if (safeNormalized.containsKey(logicalField)) {
-                effective.put(logicalField, safeNormalized.get(logicalField));
-                continue;
-            }
-
-            String alt = logicalField.replace('.', ',');
-
-            if (safeNormalized.containsKey(alt)) {
-                effective.put(logicalField, safeNormalized.get(alt));
-                continue;
-            }
-
-            effective.put(logicalField, null);
-        }
-
-        for (Map.Entry<String, String> entry : safeNormalized.entrySet()) {
-            effective.putIfAbsent(entry.getKey(), entry.getValue());
-        }
-
-        if (Boolean.FALSE.equals(filterFlag)) {
-            // В локальном overlay остаются реальные значения и null только
-            // для однозначно локальных полей. Межблочные зависимости будут
-            // добавлены один раз в общую карту Rule.apply ниже.
-            normalizer.completeMissingLocalFields(
-                    effective,
-                    referencedFields,
-                    localFields
-            );
-        }
+        // В локальном overlay остаются реальные значения и null только для
+        // полей, однозначно принадлежащих текущему блоку/элементу массива.
+        // Остальные зависимости добавляются в общую карту Rule.apply.
+        normalizer.completeMissingLocalFields(
+                safeNormalized,
+                referencedFields,
+                localFields
+        );
 
         return new EffectiveNormalization(
-                effective,
+                safeNormalized,
                 safeFieldToRules
         );
     }
@@ -672,8 +797,8 @@ public final class MessageProcessingService {
             EffectiveNormalization mainEffective,
             List<PreparedExcludedBlock> excludedBlocks,
             List<PreparedArrayItem> arrayItems,
-            Set<String> completionControlAreas,
-            RulesCacheSnapshot cacheSnapshot
+            Boolean filterFlag,
+            Set<String> referencedFields
     ) {
         Map<String, String> result = normalizedMap == null
                 ? new LinkedHashMap<>()
@@ -697,13 +822,8 @@ public final class MessageProcessingService {
         // и только в общей карте. Поэтому синтетический ключ не запускает
         // правило отсутствующего атрибута, а реальное значение из другого
         // блока не перекрывается локальным null.
-        if (completionControlAreas != null && cacheSnapshot != null) {
-            for (String controlArea : completionControlAreas) {
-                normalizer.completeMissingFields(
-                        result,
-                        cacheSnapshot.referencedFields(controlArea)
-                );
-            }
+        if (Boolean.FALSE.equals(filterFlag)) {
+            normalizer.completeMissingFields(result, referencedFields);
         }
 
         return result;
@@ -734,25 +854,46 @@ public final class MessageProcessingService {
             Map<String, String> completeRuleInput,
             Map<String, String> scopedValues
     ) {
+        return scopedRuleInput(
+                completeRuleInput,
+                scopedValues,
+                scopedValues == null ? Set.of() : scopedValues.keySet()
+        );
+    }
+
+    /**
+     * Создаёт view с явным приоритетом значений:
+     * локальное поле блока -> общая карта сообщения -> отсутствующий ключ.
+     *
+     * <p>{@code localValueFields} фиксируется до null-дополнения локальной
+     * карты, поэтому синтетический null не может перекрыть реальное значение
+     * из другого блока. При этом физический null исходного excluded-блока
+     * остаётся локальным значением и имеет приоритет.</p>
+     */
+    private Map<String, String> scopedRuleInput(
+            Map<String, String> completeRuleInput,
+            Map<String, String> scopedValues,
+            Set<String> localValueFields
+    ) {
         Map<String, String> base = completeRuleInput == null ? Map.of() : completeRuleInput;
 
-        if (scopedValues == null || scopedValues.isEmpty()) {
+        if (scopedValues == null || scopedValues.isEmpty()
+                || localValueFields == null || localValueFields.isEmpty()) {
             return base;
         }
 
         boolean differs = false;
 
-        for (Map.Entry<String, String> entry : scopedValues.entrySet()) {
-            String field = entry.getKey();
+        for (String field : localValueFields) {
             if (!base.containsKey(field)
-                    || !Objects.equals(base.get(field), entry.getValue())) {
+                    || !Objects.equals(base.get(field), scopedValues.get(field))) {
                 differs = true;
                 break;
             }
         }
 
         return differs
-                ? new ScopedRuleInputMap(base, scopedValues)
+                ? new ScopedRuleInputMap(base, scopedValues, localValueFields)
                 : base;
     }
 
@@ -765,6 +906,7 @@ public final class MessageProcessingService {
     private record PreparedExcludedBlock(
             String datasetCode,
             Map<String, String> normalizedMap,
+            Set<String> localValueFields,
             Map<String, Set<String>> fieldToRules
     ) {
     }
@@ -773,7 +915,8 @@ public final class MessageProcessingService {
             Map<String, JsonNode> objectBlocks,
             List<PreparedArrayItem> arrayItems,
             Set<String> arrayLogicalFields,
-            Set<String> completionControlAreas
+            Map<String, Set<String>> logicalFieldsByObjectBlock,
+            Map<String, Integer> logicalFamilyOwners
     ) {
     }
 
@@ -789,33 +932,36 @@ public final class MessageProcessingService {
 
         private final Map<String, String> base;
         private final Map<String, String> scopedValues;
+        private final Set<String> localValueFields;
         private Set<Entry<String, String>> materializedEntrySet;
 
         private ScopedRuleInputMap(
                 Map<String, String> base,
-                Map<String, String> scopedValues
+                Map<String, String> scopedValues,
+                Set<String> localValueFields
         ) {
             this.base = base;
             this.scopedValues = scopedValues;
+            this.localValueFields = localValueFields;
         }
 
         @Override
         public String get(Object key) {
-            return scopedValues.containsKey(key)
+            return localValueFields.contains(key)
                     ? scopedValues.get(key)
                     : base.get(key);
         }
 
         @Override
         public boolean containsKey(Object key) {
-            return scopedValues.containsKey(key) || base.containsKey(key);
+            return localValueFields.contains(key) || base.containsKey(key);
         }
 
         @Override
         public int size() {
             int size = base.size();
 
-            for (String field : scopedValues.keySet()) {
+            for (String field : localValueFields) {
                 if (!base.containsKey(field)) {
                     size++;
                 }
@@ -828,7 +974,9 @@ public final class MessageProcessingService {
         public Set<Entry<String, String>> entrySet() {
             if (materializedEntrySet == null) {
                 Map<String, String> materialized = new LinkedHashMap<>(base);
-                materialized.putAll(scopedValues);
+                for (String field : localValueFields) {
+                    materialized.put(field, scopedValues.get(field));
+                }
 
                 materializedEntrySet = Collections.unmodifiableMap(materialized).entrySet();
             }

@@ -24,6 +24,8 @@ class MessageProcessingCrossBlockRuleInputTest {
     private static final String CITIZENSHIP_COUNTRY = "ГРАЖДАНСТВО.Страна";
     private static final String ADDRESS_COUNTRY = "АДРЕС.Страна";
     private static final String ADDRESS_DISTRICT = "АДРЕС.Район";
+    private static final String BIRTHDATE = "ОСНОВНЫЕ СВЕДЕНИЯ.Дата рождения";
+    private static final String SNILS = "ОСНОВНЫЕ СВЕДЕНИЯ.СНИЛС";
 
     @Test
     void mainAndExcludedRulesSeeFieldsFromBothBlocks() throws Exception {
@@ -78,16 +80,17 @@ class MessageProcessingCrossBlockRuleInputTest {
                 ),
                 Map.of(
                         "CA_MAIN", Map.of(
-                                CITIZENSHIP_COUNTRY, Set.of("RuleMainCrossBlock")
-                        ),
-                        "CA_ADDRESS", Map.of(
+                                CITIZENSHIP_COUNTRY, Set.of("RuleMainCrossBlock"),
                                 ADDRESS_COUNTRY, Set.of(),
                                 ADDRESS_DISTRICT, Set.of("RuleAddressCrossBlock")
+                        ),
+                        "CA_ADDRESS", Map.of(
+                                "WRONG.FIELD", Set.of()
                         )
                 ),
                 Map.of(),
                 Map.of("CA_MAIN", Set.of("registrationAddress")),
-                Map.of("CA_MAIN", true, "CA_ADDRESS", true),
+                Map.of("CA_MAIN", true, "CA_ADDRESS", false),
                 Map.of(),
                 Map.of(),
                 "1",
@@ -114,6 +117,78 @@ class MessageProcessingCrossBlockRuleInputTest {
         assertEquals("Россия", addressInput.get().get(CITIZENSHIP_COUNTRY));
         assertEquals("Страна", addressInput.get().get(ADDRESS_COUNTRY));
         assertEquals("Район", addressInput.get().get(ADDRESS_DISTRICT));
+    }
+
+    @Test
+    void excludedRulePrefersLocalValueOverCommonMessageValue() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode data = root.putObject("data");
+
+        data.putObject("baseInfo")
+                .put("dataset_code", "MAIN_DS")
+                .put("citizenship", "Россия")
+                .put("mapping.citizenship", CITIZENSHIP_COUNTRY);
+
+        data.putObject("registrationAddress")
+                .put("dataset_code", "ADDRESS_DS")
+                .put("countryName", "Страна")
+                .put("mapping.countryName", ADDRESS_COUNTRY)
+                .put("district", "Район")
+                .put("mapping.district", ADDRESS_DISTRICT)
+                .put("citizenship", "Казахстан")
+                .put("mapping.citizenship", CITIZENSHIP_COUNTRY);
+
+        AtomicInteger addressCalls = new AtomicInteger();
+        AtomicReference<Map<String, String>> addressInput = new AtomicReference<>();
+        Rule addressRule = rule(
+                Set.of(ADDRESS_DISTRICT, CITIZENSHIP_COUNTRY),
+                values -> {
+                    addressCalls.incrementAndGet();
+                    addressInput.set(new LinkedHashMap<>(values));
+                    required(values, ADDRESS_DISTRICT);
+                    required(values, CITIZENSHIP_COUNTRY);
+                    return false;
+                }
+        );
+
+        RulesCacheSnapshot snapshot = new RulesCacheSnapshot(
+                Map.of("RuleAddress", addressRule),
+                Map.of(
+                        "MAIN_DS", "CA_MESSAGE",
+                        "ADDRESS_DS", "CA_IGNORED"
+                ),
+                Map.of(
+                        "CA_MESSAGE", Map.of(
+                                ADDRESS_COUNTRY, Set.of(),
+                                ADDRESS_DISTRICT, Set.of("RuleAddress")
+                        ),
+                        "CA_IGNORED", Map.of("WRONG.FIELD", Set.of())
+                ),
+                Map.of(),
+                Map.of("CA_MESSAGE", Set.of("registrationAddress")),
+                Map.of("CA_MESSAGE", false, "CA_IGNORED", true),
+                Map.of(),
+                Map.of(),
+                "1",
+                "1"
+        );
+
+        RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
+        MessageProcessingService service =
+                new MessageProcessingService(mapper, runtime, false);
+
+        ProcessingResult result = service.process(MessageRecord.fromJms(
+                "ID:local-value-priority",
+                mapper.writeValueAsString(root),
+                1L,
+                2L
+        ));
+
+        assertNotNull(result);
+        assertEquals(1, addressCalls.get());
+        assertNotNull(addressInput.get());
+        assertEquals("Казахстан", addressInput.get().get(CITIZENSHIP_COUNTRY));
     }
 
     @Test
@@ -148,7 +223,7 @@ class MessageProcessingCrossBlockRuleInputTest {
                 }
         );
 
-        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, false, false);
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, false, true);
         RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
         MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
 
@@ -191,7 +266,7 @@ class MessageProcessingCrossBlockRuleInputTest {
                 }
         );
 
-        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, true, true);
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, true, false);
         RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
         MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
 
@@ -204,6 +279,91 @@ class MessageProcessingCrossBlockRuleInputTest {
 
         assertNotNull(result);
         assertEquals(0, addressCalls.get());
+    }
+
+    @Test
+    void excludedBlockDoesNotMaskPresentMainFieldWhenControlAreaIsShared()
+            throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode data = root.putObject("data");
+
+        data.putObject("baseInfo")
+                .put("dataset_code", "MAIN_DS")
+                .put("birthdate", "2000-01-01")
+                .put("mapping.birthdate", BIRTHDATE);
+
+        data.putObject("registrationAddress")
+                .put("dataset_code", "ADDRESS_DS")
+                .put("countryName", "РОССИЯ")
+                .put("mapping.countryName", ADDRESS_COUNTRY);
+
+        ObjectNode documents = data.putObject("documents");
+        documents.put("dataset_code", "DOCUMENTS_DS");
+        documents.putNull("clientSnils");
+        documents.put("mapping.clientSnils", SNILS);
+
+        AtomicInteger birthdateCalls = new AtomicInteger();
+        AtomicReference<Map<String, String>> birthdateInput = new AtomicReference<>();
+        AtomicInteger addressCalls = new AtomicInteger();
+        AtomicReference<Map<String, String>> addressInput = new AtomicReference<>();
+
+        Rule birthdateRule = rule(Set.of(BIRTHDATE), values -> {
+            birthdateCalls.incrementAndGet();
+            birthdateInput.set(new LinkedHashMap<>(values));
+            return required(values, BIRTHDATE) == null;
+        });
+
+        Rule addressRule = rule(Set.of(ADDRESS_DISTRICT, BIRTHDATE), values -> {
+            addressCalls.incrementAndGet();
+            addressInput.set(new LinkedHashMap<>(values));
+            return required(values, ADDRESS_DISTRICT) == null;
+        });
+
+        RulesCacheSnapshot snapshot = new RulesCacheSnapshot(
+                Map.of(
+                        "RuleBirthdate", birthdateRule,
+                        "RuleAddress", addressRule
+                ),
+                Map.of(
+                        "MAIN_DS", "CA_SHARED",
+                        "ADDRESS_DS", "CA_SHARED",
+                        "DOCUMENTS_DS", "CA_SHARED"
+                ),
+                Map.of("CA_SHARED", Map.of(
+                        BIRTHDATE, Set.of("RuleBirthdate"),
+                        ADDRESS_COUNTRY, Set.of(),
+                        ADDRESS_DISTRICT, Set.of("RuleAddress"),
+                        SNILS, Set.of()
+                )),
+                Map.of(),
+                Map.of("CA_SHARED", Set.of("registrationAddress", "documents")),
+                Map.of("CA_SHARED", false),
+                Map.of(),
+                Map.of(),
+                "1",
+                "1"
+        );
+
+        RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
+        MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
+
+        ProcessingResult result = service.process(MessageRecord.fromJms(
+                "ID:shared-control-area",
+                mapper.writeValueAsString(root),
+                1L,
+                2L
+        ));
+
+        assertNotNull(result);
+        assertEquals(1, birthdateCalls.get());
+        assertNotNull(birthdateInput.get());
+        assertEquals("2000-01-01", birthdateInput.get().get(BIRTHDATE));
+        assertEquals(1, addressCalls.get());
+        assertNotNull(addressInput.get());
+        assertTrue(addressInput.get().containsKey(ADDRESS_DISTRICT));
+        assertNull(addressInput.get().get(ADDRESS_DISTRICT));
+        assertEquals("2000-01-01", addressInput.get().get(BIRTHDATE));
     }
 
     private static RulesCacheSnapshot snapshot(
@@ -223,11 +383,12 @@ class MessageProcessingCrossBlockRuleInputTest {
                 ),
                 Map.of(
                         "CA_MAIN", Map.of(
-                                "MAIN.Anchor", Set.of("RuleMainCrossBlock")
-                        ),
-                        "CA_ADDRESS", Map.of(
+                                "MAIN.Anchor", Set.of("RuleMainCrossBlock"),
                                 ADDRESS_COUNTRY, Set.of(),
                                 ADDRESS_DISTRICT, Set.of("RuleAddressCrossBlock")
+                        ),
+                        "CA_ADDRESS", Map.of(
+                                "WRONG.FIELD", Set.of()
                         )
                 ),
                 Map.of(),

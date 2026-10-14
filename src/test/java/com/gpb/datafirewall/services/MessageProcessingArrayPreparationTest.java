@@ -42,7 +42,10 @@ class MessageProcessingArrayPreparationTest {
                 .put("mapping.value", "ARRAY.TWO");
 
         Map<String, Set<String>> rootRules = Map.of(
-                "ROOT.FIELD", Set.of("RootRule")
+                "ROOT.FIELD", Set.of("RootRule"),
+                "ARRAY.ONE", Set.of("Rule1"),
+                "ARRAY.TWO", Set.of("Rule2"),
+                "ARRAY.MISSING", Set.of("Rule3")
         );
         Map<String, Set<String>> firstRules = Map.of(
                 "ARRAY.ONE", Set.of("Rule1")
@@ -54,6 +57,7 @@ class MessageProcessingArrayPreparationTest {
 
         RulesCacheSnapshot snapshot = new RulesCacheSnapshot(
                 Map.of(
+                        "RootRule", rule(Set.of("ROOT.FIELD")),
                         "Rule1", rule(Set.of("ARRAY.ONE")),
                         "Rule2", rule(Set.of("ARRAY.TWO", "ARRAY.MISSING")),
                         "Rule3", rule(Set.of("ARRAY.MISSING"))
@@ -65,12 +69,12 @@ class MessageProcessingArrayPreparationTest {
                 ),
                 Map.of(
                         "ROOT_AREA", rootRules,
-                        "AREA_1", firstRules,
-                        "AREA_2", secondRules
+                        "AREA_1", Map.of("WRONG.ONE", Set.of()),
+                        "AREA_2", Map.of("WRONG.TWO", Set.of())
                 ),
                 Map.of(),
                 Map.of(),
-                Map.of("AREA_1", false, "AREA_2", true),
+                Map.of("ROOT_AREA", true, "AREA_1", false, "AREA_2", false),
                 Map.of(),
                 Map.of(),
                 "1",
@@ -81,9 +85,9 @@ class MessageProcessingArrayPreparationTest {
                 "prepareTopLevelBlocks",
                 JsonNode.class,
                 String.class,
-                String.class,
                 Map.class,
-                RulesCacheSnapshot.class,
+                Boolean.class,
+                Set.class,
                 Map.class,
                 Map.class
         );
@@ -93,9 +97,9 @@ class MessageProcessingArrayPreparationTest {
                 service,
                 data,
                 "ROOT_DS",
-                "ROOT_AREA",
                 rootRules,
-                snapshot,
+                true,
+                snapshot.referencedFields("ROOT_AREA"),
                 Map.of(),
                 Map.of()
         );
