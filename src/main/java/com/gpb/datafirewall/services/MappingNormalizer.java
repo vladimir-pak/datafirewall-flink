@@ -79,7 +79,7 @@ public final class MappingNormalizer {
     }
 
     /**
-     * Совместимый метод для старых вызовов: при включённом filterFlag
+     * Совместимый метод для старых вызовов: при выключенном filterFlag
      * дополняет результат переданным набором expectedFields. Основной pipeline
      * использует раздельные selectPresentFields и completeMissingFields.
      *
@@ -96,7 +96,7 @@ public final class MappingNormalizer {
                 ? new LinkedHashMap<>()
                 : normalizedMap;
 
-        if (!Boolean.TRUE.equals(filterFlag)
+        if (!Boolean.FALSE.equals(filterFlag)
                 || expectedFields == null
                 || expectedFields.isEmpty()) {
             return result;

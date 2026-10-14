@@ -16,7 +16,6 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MessageProcessingArrayPreparationTest {
@@ -108,7 +107,8 @@ class MessageProcessingArrayPreparationTest {
         assertEquals(Set.of("main"), objectBlocks.keySet());
         assertEquals(2, items.size());
         assertEquals(1, documents.iterations());
-        assertTrue(separatedFields.containsAll(Set.of("ARRAY.ONE", "ARRAY.TWO", "ARRAY.MISSING")));
+        assertTrue(separatedFields.containsAll(Set.of("ARRAY.ONE", "ARRAY.TWO")));
+        assertFalse(separatedFields.contains("ARRAY.MISSING"));
         assertFalse(separatedFields.contains("ROOT.FIELD"));
 
         Object first = items.get(0);
@@ -125,8 +125,7 @@ class MessageProcessingArrayPreparationTest {
                 (Map<String, Set<String>>) component(second, "fieldToRules");
 
         assertEquals("second", secondNormalized.get("ARRAY.TWO"));
-        assertTrue(secondNormalized.containsKey("ARRAY.MISSING"));
-        assertNull(secondNormalized.get("ARRAY.MISSING"));
+        assertFalse(secondNormalized.containsKey("ARRAY.MISSING"));
         assertEquals(Set.of("ARRAY.TWO"), secondSelectedRules.keySet());
     }
 

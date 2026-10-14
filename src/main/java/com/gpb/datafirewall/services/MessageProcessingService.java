@@ -136,7 +136,7 @@ public final class MessageProcessingService {
             Set<String> arrayLogicalFields = topLevelPreparation.arrayLogicalFields();
             Set<String> completionControlAreas =
                     new LinkedHashSet<>(topLevelPreparation.completionControlAreas());
-            if (Boolean.TRUE.equals(filterFlag)) {
+            if (Boolean.FALSE.equals(filterFlag)) {
                 completionControlAreas.add(controlArea);
             }
 
@@ -159,10 +159,10 @@ public final class MessageProcessingService {
                     blockRulesControlArea = controlArea;
                 }
 
-                Boolean blockFilterFlag = cacheSnapshot.filterFlag(blockControlArea);
+                Boolean blockFilterFlag = cacheSnapshot.filterFlag(blockRulesControlArea);
                 Set<String> blockReferencedFields =
                         cacheSnapshot.referencedFields(blockRulesControlArea);
-                if (Boolean.TRUE.equals(blockFilterFlag)) {
+                if (Boolean.FALSE.equals(blockFilterFlag)) {
                     completionControlAreas.add(blockRulesControlArea);
                 }
 
@@ -175,13 +175,13 @@ public final class MessageProcessingService {
 
                 Set<String> blockLogicalFields = collectLogicalFieldsFromBlock(blockNode);
                 blockLogicalFields.addAll(blockNormalized.keySet());
-                if (Boolean.TRUE.equals(blockFilterFlag)) {
+                if (Boolean.FALSE.equals(blockFilterFlag)) {
                     // Эти ключи нужны для определения принадлежности поля
                     // локальному блоку, но не являются источником запуска.
                     blockLogicalFields.addAll(blockAllFieldToRules.keySet());
                 }
 
-                Map<String, Set<String>> blockExpectedFieldToRules = Boolean.TRUE.equals(blockFilterFlag)
+                Map<String, Set<String>> blockExpectedFieldToRules = Boolean.FALSE.equals(blockFilterFlag)
                         ? blockAllFieldToRules
                         : selectKeys(blockAllFieldToRules, blockLogicalFields);
 
@@ -199,7 +199,7 @@ public final class MessageProcessingService {
                         blockEffective.fieldToRules()
                 ));
                 excludedLogicalFields.addAll(blockLogicalFields);
-                if (!Boolean.TRUE.equals(blockFilterFlag)) {
+                if (Boolean.FALSE.equals(blockFilterFlag)) {
                     excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
                 }
 
@@ -480,13 +480,13 @@ public final class MessageProcessingService {
                 itemRulesControlArea = defaultControlArea;
             }
 
-            Boolean itemFilterFlag = cacheSnapshot.filterFlag(itemControlArea);
+            Boolean itemFilterFlag = cacheSnapshot.filterFlag(itemRulesControlArea);
             Set<String> itemReferencedFields =
                     cacheSnapshot.referencedFields(itemRulesControlArea);
 
-            // Ровно как в прежнем первом проходе: при filterFlag=true поля
+            // Ровно как в прежнем первом проходе: при filterFlag=false поля
             // контрольной области исключаются из main-блока один раз.
-            if (Boolean.TRUE.equals(itemFilterFlag)
+            if (Boolean.FALSE.equals(itemFilterFlag)
                     && completedControlAreas.add(itemRulesControlArea)
                     && itemAllFieldToRules != null) {
                 arrayLogicalFields.addAll(itemAllFieldToRules.keySet());
@@ -501,11 +501,11 @@ public final class MessageProcessingService {
 
             Set<String> itemLogicalFields = new LinkedHashSet<>(mappedFields);
             itemLogicalFields.addAll(itemNormalized.keySet());
-            if (Boolean.TRUE.equals(itemFilterFlag)) {
+            if (Boolean.FALSE.equals(itemFilterFlag)) {
                 itemLogicalFields.addAll(itemAllFieldToRules.keySet());
             }
 
-            Map<String, Set<String>> itemExpectedFieldToRules = Boolean.TRUE.equals(itemFilterFlag)
+            Map<String, Set<String>> itemExpectedFieldToRules = Boolean.FALSE.equals(itemFilterFlag)
                     ? itemAllFieldToRules
                     : selectKeys(itemAllFieldToRules, itemLogicalFields);
 
@@ -611,15 +611,10 @@ public final class MessageProcessingService {
                             safeFieldToRules
                     );
 
-            // В локальном overlay остаются реальные значения и null только
-            // для однозначно локальных полей. Межблочные зависимости будут
-            // добавлены один раз в общую карту Rule.apply ниже.
-            normalizer.completeMissingLocalFields(
+            return new EffectiveNormalization(
                     safeNormalized,
-                    referencedFields,
-                    localFields
+                    presentFieldToRules
             );
-            return new EffectiveNormalization(safeNormalized, presentFieldToRules);
         }
 
         Map<String, String> effective = new LinkedHashMap<>();
@@ -650,7 +645,21 @@ public final class MessageProcessingService {
             effective.putIfAbsent(entry.getKey(), entry.getValue());
         }
 
-        return new EffectiveNormalization(effective, safeFieldToRules);
+        if (Boolean.FALSE.equals(filterFlag)) {
+            // В локальном overlay остаются реальные значения и null только
+            // для однозначно локальных полей. Межблочные зависимости будут
+            // добавлены один раз в общую карту Rule.apply ниже.
+            normalizer.completeMissingLocalFields(
+                    effective,
+                    referencedFields,
+                    localFields
+            );
+        }
+
+        return new EffectiveNormalization(
+                effective,
+                safeFieldToRules
+        );
     }
 
     /**

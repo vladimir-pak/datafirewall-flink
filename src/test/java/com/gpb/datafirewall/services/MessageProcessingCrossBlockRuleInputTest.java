@@ -148,7 +148,7 @@ class MessageProcessingCrossBlockRuleInputTest {
                 }
         );
 
-        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule);
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, false, false);
         RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
         MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
 
@@ -191,7 +191,7 @@ class MessageProcessingCrossBlockRuleInputTest {
                 }
         );
 
-        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule);
+        RulesCacheSnapshot snapshot = snapshot(mainRule, addressRule, true, true);
         RulesCacheRuntime runtime = runtimeWithSnapshot(mapper, snapshot);
         MessageProcessingService service = new MessageProcessingService(mapper, runtime, false);
 
@@ -206,7 +206,12 @@ class MessageProcessingCrossBlockRuleInputTest {
         assertEquals(0, addressCalls.get());
     }
 
-    private static RulesCacheSnapshot snapshot(Rule mainRule, Rule addressRule) {
+    private static RulesCacheSnapshot snapshot(
+            Rule mainRule,
+            Rule addressRule,
+            boolean mainFilterFlag,
+            boolean addressFilterFlag
+    ) {
         return new RulesCacheSnapshot(
                 Map.of(
                         "RuleMainCrossBlock", mainRule,
@@ -227,7 +232,10 @@ class MessageProcessingCrossBlockRuleInputTest {
                 ),
                 Map.of(),
                 Map.of("CA_MAIN", Set.of("registrationAddress")),
-                Map.of("CA_MAIN", true, "CA_ADDRESS", true),
+                Map.of(
+                        "CA_MAIN", mainFilterFlag,
+                        "CA_ADDRESS", addressFilterFlag
+                ),
                 Map.of(),
                 Map.of(),
                 "1",

@@ -53,7 +53,7 @@ class ValidationServiceNormalizedInputTest {
         normalizer.completeMissingFields(
                 normalized,
                 Map.of(TYPE, Set.of("Rule10220"), SERIES, Set.of("Rule10220")),
-                true
+                false
         );
 
         Rule rule10220 = data -> "21".equals(required(data, TYPE))

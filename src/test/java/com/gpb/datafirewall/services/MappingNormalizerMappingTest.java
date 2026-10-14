@@ -134,7 +134,7 @@ class MappingNormalizerMappingTest {
     }
 
     @Test
-    void addsAllMissingControlAreaFieldsAsNullWhenFilterFlagIsTrue() {
+    void addsAllMissingControlAreaFieldsAsNullWhenFilterFlagIsFalse() {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode passport = root.putObject("data").putObject("documents");
         passport.put("series", "0000");
@@ -151,7 +151,7 @@ class MappingNormalizerMappingTest {
                 Map.of(),
                 Map.of("PASSPORT_RU", "21"),
                 fieldToRules,
-                true
+                false
         );
 
         assertEquals("0000", result.get("ДУЛ.Паспорт РФ.Серия"));
@@ -162,7 +162,7 @@ class MappingNormalizerMappingTest {
     }
 
     @Test
-    void doesNotAddMissingControlAreaFieldsWhenFilterFlagIsFalse() {
+    void doesNotAddMissingControlAreaFieldsWhenFilterFlagIsTrue() {
         ObjectNode root = mapper.createObjectNode();
         root.putObject("data").putObject("documents");
 
@@ -171,7 +171,23 @@ class MappingNormalizerMappingTest {
                 Map.of(),
                 Map.of(),
                 Map.of(PASSPORT_TYPE, Set.of("Rule10220")),
-                false
+                true
+        );
+
+        assertFalse(result.containsKey(PASSPORT_TYPE));
+    }
+
+    @Test
+    void doesNotAddMissingControlAreaFieldsWhenFilterFlagIsNull() {
+        ObjectNode root = mapper.createObjectNode();
+        root.putObject("data").putObject("documents");
+
+        Map<String, String> result = normalizer.normalize(
+                root,
+                Map.of(),
+                Map.of(),
+                Map.of(PASSPORT_TYPE, Set.of("Rule10220")),
+                null
         );
 
         assertFalse(result.containsKey(PASSPORT_TYPE));
