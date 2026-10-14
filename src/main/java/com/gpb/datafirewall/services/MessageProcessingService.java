@@ -136,27 +136,38 @@ public final class MessageProcessingService {
                     genderMapping,
                     typeDulMapping
             );
+
             Map<String, JsonNode> blockNodes = topLevelPreparation.objectBlocks();
+
             Map<String, Set<String>> logicalFieldsByObjectBlock =
                     topLevelPreparation.logicalFieldsByObjectBlock();
+
             Set<String> arrayLogicalFields = topLevelPreparation.arrayLogicalFields();
+
             Map<String, Integer> logicalFamilyOwners =
                     topLevelPreparation.logicalFamilyOwners();
+
             List<PreparedExcludedBlock> preparedExcludedBlocks =
                     new ArrayList<>(excludedBlocks.size());
+
             Set<String> excludedLogicalFields = new LinkedHashSet<>();
 
             for (String blockName : excludedBlocks) {
+
                 JsonNode blockNode = blockNodes.get(blockName);
+
                 if (blockNode == null || !blockNode.isObject()) continue;
 
-                String blockDatasetCode = text(blockNode, "dataset_code", blockName);
+                String blockDatasetCode = 
+                        text(blockNode, "dataset_code", blockName);
+
                 Map<String, String> blockNormalized = normalizeSingleBlock(
                         blockName,
                         blockNode,
                         genderMapping,
                         typeDulMapping
                 );
+
                 // Запоминаем только фактически присутствующие в excluded-блоке
                 // поля до добавления синтетических null. Именно они имеют
                 // приоритет над общей картой сообщения при вызове Rule.apply.
@@ -166,9 +177,11 @@ public final class MessageProcessingService {
                 Set<String> blockObservedFields = new LinkedHashSet<>(
                         logicalFieldsByObjectBlock.getOrDefault(blockName, Set.of())
                 );
+
                 blockObservedFields.addAll(blockNormalized.keySet());
 
                 Map<String, Set<String>> blockExpectedFieldToRules;
+
                 if (Boolean.FALSE.equals(filterFlag)) {
                     blockExpectedFieldToRules = selectKeysByLogicalFamily(
                             allFieldToRules,
@@ -185,6 +198,7 @@ public final class MessageProcessingService {
                 }
 
                 Set<String> blockLocalFields = new LinkedHashSet<>(blockObservedFields);
+
                 if (Boolean.FALSE.equals(filterFlag)) {
                     blockLocalFields.addAll(blockExpectedFieldToRules.keySet());
                     blockLocalFields.addAll(selectFieldsByLogicalFamily(
@@ -210,21 +224,36 @@ public final class MessageProcessingService {
                         blockLocalValueFields,
                         blockEffective.fieldToRules()
                 ));
+
                 excludedLogicalFields.addAll(blockLocalFields);
+
                 if (Boolean.FALSE.equals(filterFlag)) {
                     excludedLogicalFields.addAll(blockEffective.normalizedMap().keySet());
                 }
 
                 if (logPayloads && log.isInfoEnabled()) {
-                    log.info("[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", qid, blockName, blockDatasetCode, prettyObject(maskMap(blockEffective.normalizedMap())));
+                    log.info(
+                            "[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", 
+                            qid, 
+                            blockName, 
+                            blockDatasetCode, 
+                            prettyObject(
+                                    maskMap(
+                                            blockEffective.normalizedMap()
+                                    )
+                            )
+                    );
                 }
             }
 
             Set<String> separatedLogicalFields = new LinkedHashSet<>(excludedLogicalFields);
+
             separatedLogicalFields.addAll(arrayLogicalFields);
 
             Map<String, String> mainNormalizedMap = removeKeys(normalizedMap, separatedLogicalFields);
+
             Map<String, Set<String>> mainFieldToRules = removeKeys(allFieldToRules, separatedLogicalFields);
+            
             EffectiveNormalization mainEffective = buildEffectiveNormalization(
                     filterFlag,
                     mainNormalizedMap,

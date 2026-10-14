@@ -380,6 +380,15 @@ public final class MappingNormalizer {
             return v.asText();
         }
 
+        // Массив с одним скалярным элементом
+        if (v.isArray() && v.size() == 1) {
+            JsonNode first = v.get(0);
+
+            if (first.isValueNode()) {
+                return toFlatString(first);
+            }
+        }
+
         try {
             return mapper.writeValueAsString(v);
         } catch (Exception e) {
