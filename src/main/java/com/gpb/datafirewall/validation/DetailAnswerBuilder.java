@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.gpb.datafirewall.util.DfwDateTimeFormatter;
+import com.gpb.datafirewall.util.HostnameUtils;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -32,29 +34,64 @@ public final class DetailAnswerBuilder {
         this.mapper = mapper;
     }
 
-    public ObjectNode buildDetailAnswer(JsonNode originalEvent, ValidationResult validation, String qid, Long createdDttm, Long readedDttm, Set<String> excludedBlocks) {
-        Map<String, Map<String, String>> general = validation == null || validation.detailByField() == null ? Map.of() : validation.detailByField();
-        Map<String, Map<String, Map<String, String>>> byDataset = validation == null || validation.detailByDataset() == null ? Map.of() : validation.detailByDataset();
+    public ObjectNode buildDetailAnswer(
+            JsonNode originalEvent, 
+            ValidationResult validation, 
+            String qid, 
+            Long createdDttm, 
+            Long readedDttm, 
+            Set<String> excludedBlocks) {
+                
+        Map<String, Map<String, String>> general = 
+                validation == null || validation.detailByField() == null 
+                        ? Map.of() : validation.detailByField();
+
+        Map<String, Map<String, Map<String, String>>> byDataset = 
+                validation == null || validation.detailByDataset() == null 
+                        ? Map.of() : validation.detailByDataset();
 
         ObjectNode result = mapper.createObjectNode();
-        String mainDataset = getText(originalEvent, "dfw_dataset_code", "UNKNOWN_DATASET");
+
+        String mainDataset = getText(
+                originalEvent, 
+                "dfw_dataset_code", 
+                "UNKNOWN_DATASET"
+        );
+
         JsonNode data = originalEvent == null ? null : originalEvent.get("data");
+
         ObjectNode detailResults = mapper.createObjectNode();
 
-        Set<String> excludedDatasetCodes = collectExcludedDatasetCodes(data, excludedBlocks);
+        Set<String> excludedDatasetCodes = 
+                collectExcludedDatasetCodes(data, excludedBlocks);
+
         Set<String> excludedFromMain = new LinkedHashSet<>();
 
         for (String excludedDatasetCode : excludedDatasetCodes) {
-            Map<String, Map<String, String>> excludedBucketMap = byDataset.getOrDefault(excludedDatasetCode, Map.of());
+            Map<String, Map<String, String>> excludedBucketMap = 
+                    byDataset.getOrDefault(excludedDatasetCode, Map.of());
+
             excludedFromMain.addAll(excludedBucketMap.keySet());
-            detailResults.set(excludedDatasetCode, buildBucket(excludedBucketMap));
+            
+            detailResults.set(
+                    excludedDatasetCode, 
+                    buildBucket(excludedBucketMap)
+            );
         }
 
         for (Map.Entry<String, Map<String, Map<String, String>>> entry : byDataset.entrySet()) {
             String key = entry.getKey();
-            if (key == null || key.isBlank() || key.equals(mainDataset) || excludedDatasetCodes.contains(key) || isArrayInstanceKey(key)) continue;
+
+            if (
+                key == null 
+                || key.isBlank() 
+                || key.equals(mainDataset) 
+                || excludedDatasetCodes.contains(key) 
+                || isArrayInstanceKey(key)
+            ) continue;
 
             Map<String, Map<String, String>> fields = entry.getValue();
+
             if (fields != null) excludedFromMain.addAll(fields.keySet());
         }
 
@@ -62,9 +99,16 @@ public final class DetailAnswerBuilder {
 
         for (Map.Entry<String, Map<String, Map<String, String>>> entry : byDataset.entrySet()) {
             String key = entry.getKey();
-            if (key == null || key.isBlank() || excludedDatasetCodes.contains(key) || isArrayInstanceKey(key)) continue;
+
+            if (
+                key == null 
+                || key.isBlank() 
+                || excludedDatasetCodes.contains(key) 
+                || isArrayInstanceKey(key)
+            ) continue;
 
             Map<String, Map<String, String>> fields = entry.getValue();
+
             if (fields != null && !fields.isEmpty()) mergeFieldResults(mainFiltered, fields);
         }
 
@@ -83,15 +127,30 @@ public final class DetailAnswerBuilder {
         ));
 
         result.put("dfw_action_type", "ANSWER_DETAIL");
-        result.put("dfw_created_dttm", createdDttm);
-        result.put("dfw_readed_dttm", readedDttm);
+        result.put(
+                "dfw_created_dttm", 
+                DfwDateTimeFormatter.formatEpochMillis(createdDttm)
+        );
+        result.put(
+                "dfw_readed_dttm", 
+                DfwDateTimeFormatter.formatEpochMillis(readedDttm)
+        );
+        result.put(
+                "dfw_hostname", 
+                HostnameUtils.getHostname()
+        );
+
         result.put("dfw_action_dttm", Instant.now().toString());
         result.put("dfw_query_id", qid);
 
         return result;
     }
 
-    private void appendArrayResults(ObjectNode detailResults, JsonNode data, Map<String, Map<String, Map<String, String>>> byDataset) {
+    private void appendArrayResults(
+            ObjectNode detailResults, 
+            JsonNode data, 
+            Map<String, Map<String, Map<String, String>>> byDataset) {
+
         if (detailResults == null || byDataset == null || byDataset.isEmpty()) return;
 
         Map<String, List<ArrayDetailItem>> grouped = new LinkedHashMap<>();
@@ -101,7 +160,14 @@ public final class DetailAnswerBuilder {
             if (instanceKey == null) continue;
 
             grouped.computeIfAbsent(instanceKey.blockName(), k -> new ArrayList<>())
-                    .add(new ArrayDetailItem(instanceKey.datasetCode(), instanceKey.blockName(), instanceKey.index(), entry.getValue()));
+                    .add(
+                            new ArrayDetailItem(
+                                    instanceKey.datasetCode(), 
+                                    instanceKey.blockName(), 
+                                    instanceKey.index(), 
+                                    entry.getValue()
+                            )
+                    );
         }
 
         for (Map.Entry<String, List<ArrayDetailItem>> entry : grouped.entrySet()) {
@@ -174,7 +240,10 @@ public final class DetailAnswerBuilder {
         if (keyNode != null && !keyNode.isNull()) target.set(KEY, keyNode.deepCopy());
     }
 
-    private void mergeFieldResults(Map<String, Map<String, String>> target, Map<String, Map<String, String>> source) {
+    private void mergeFieldResults(
+            Map<String, Map<String, String>> target, 
+            Map<String, Map<String, String>> source) {
+
         if (target == null || source == null || source.isEmpty()) return;
 
         for (Map.Entry<String, Map<String, String>> fieldEntry : source.entrySet()) {
@@ -205,7 +274,10 @@ public final class DetailAnswerBuilder {
         return SUCCESS;
     }
 
-    private Map<String, Map<String, String>> removeFields(Map<String, Map<String, String>> source, Set<String> excludedFields) {
+    private Map<String, Map<String, String>> removeFields(
+            Map<String, Map<String, String>> source, 
+            Set<String> excludedFields) {
+
         Map<String, Map<String, String>> result = new LinkedHashMap<>();
         if (source == null || source.isEmpty()) return result;
 
@@ -222,7 +294,10 @@ public final class DetailAnswerBuilder {
         return result;
     }
 
-    private Set<String> collectExcludedDatasetCodes(JsonNode data, Set<String> excludedBlocks) {
+    private Set<String> collectExcludedDatasetCodes(
+            JsonNode data, 
+            Set<String> excludedBlocks) {
+
         Set<String> result = new LinkedHashSet<>();
 
         if (data == null || !data.isObject() || excludedBlocks == null || excludedBlocks.isEmpty()) return result;
@@ -259,7 +334,9 @@ public final class DetailAnswerBuilder {
         boolean hasError = false;
         boolean hasWarning = false;
 
-        Map<String, Map<String, String>> sortedFields = detailByField instanceof TreeMap<?, ?> ? detailByField : new TreeMap<>(detailByField);
+        Map<String, Map<String, String>> sortedFields = 
+                detailByField instanceof TreeMap<?, ?> 
+                        ? detailByField : new TreeMap<>(detailByField);
 
         for (Map.Entry<String, Map<String, String>> fieldEntry : sortedFields.entrySet()) {
             String logicalField = fieldEntry.getKey();
@@ -268,7 +345,9 @@ public final class DetailAnswerBuilder {
             if (logicalField == null || logicalField.isBlank() || ruleMap == null || ruleMap.isEmpty()) continue;
 
             ObjectNode rulesNode = mapper.createObjectNode();
-            Map<String, String> sortedRules = ruleMap instanceof TreeMap<?, ?> ? ruleMap : new TreeMap<>(ruleMap);
+            Map<String, String> sortedRules = 
+                    ruleMap instanceof TreeMap<?, ?> 
+                            ? ruleMap : new TreeMap<>(ruleMap);
             boolean fieldHasResult = false;
 
             for (Map.Entry<String, String> ruleEntry : sortedRules.entrySet()) {
@@ -320,7 +399,14 @@ public final class DetailAnswerBuilder {
         return value == null || value.isNull() ? def : value.asText(def);
     }
 
-    private record ArrayInstanceKey(String datasetCode, String blockName, int index) {}
+    private record ArrayInstanceKey(
+            String datasetCode, 
+            String blockName, 
+            int index) {}
 
-    private record ArrayDetailItem(String datasetCode, String blockName, int index, Map<String, Map<String, String>> detailByField) {}
+    private record ArrayDetailItem(
+            String datasetCode, 
+            String blockName, 
+            int index, 
+            Map<String, Map<String, String>> detailByField) {}
 }
