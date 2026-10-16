@@ -69,7 +69,6 @@ public final class MessageProcessingService {
 
         try {
             JsonNode originalEvent = mapper.readTree(raw);
-            normalizeEmptyStringsToNull(originalEvent);
 
             String qid = originalEvent.path("dfw_query_id").asText(null);
             if (qid == null || qid.isBlank()) qid = eventId;
@@ -344,7 +343,14 @@ public final class MessageProcessingService {
                 log.info("[PIPE][{}] 3) ANSWER_SHORT:\n{}", qid, maskJsonPretty(shortJson));
             }
 
-            String detailJson = detailAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm, excludedBlocks);
+            String detailJson = detailAnswerService.build(
+                    originalEvent, 
+                    finalValidation, 
+                    qid, 
+                    in.createdDttm, 
+                    in.readedDttm, 
+                    excludedBlocks
+            );
 
             if (detailJson != null) {
                 if (logPayloads && log.isInfoEnabled()) {
@@ -1079,47 +1085,6 @@ public final class MessageProcessingService {
         if (in.mqMessageId != null) return MessageRecord.mqIdToHex(in.mqMessageId);
         if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) return in.jmsMessageId;
         return "unknown";
-    }
-
-    private int normalizeEmptyStringsToNull(JsonNode node) {
-        if (node == null || node.isNull()) return 0;
-
-        int converted = 0;
-
-        if (node.isObject()) {
-            ObjectNode objectNode = (ObjectNode) node;
-            Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
-            List<String> fieldsToNull = null;
-
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> entry = fields.next();
-                JsonNode child = entry.getValue();
-
-                if (isNullLikeText(child)) {
-                    if (fieldsToNull == null) {
-                        fieldsToNull = new ArrayList<>();
-                    }
-                    fieldsToNull.add(entry.getKey());
-                } else {
-                    converted += normalizeEmptyStringsToNull(child);
-                }
-            }
-
-            if (fieldsToNull != null) {
-                for (String fieldName : fieldsToNull) {
-                    objectNode.set(fieldName, mapper.nullNode());
-                    converted++;
-                }
-            }
-
-            return converted;
-        }
-
-        if (node.isArray()) {
-            for (JsonNode child : node) converted += normalizeEmptyStringsToNull(child);
-        }
-
-        return converted;
     }
 
     private boolean isNullLikeText(JsonNode node) {
