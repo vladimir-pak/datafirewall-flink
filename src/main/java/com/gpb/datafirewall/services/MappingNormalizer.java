@@ -2,15 +2,21 @@ package com.gpb.datafirewall.services;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public final class MappingNormalizer {
+
+    private static final Logger log = LoggerFactory.getLogger(MappingNormalizer.class);
 
     private static final String GENDER_FIELD = "ОСНОВНЫЕ СВЕДЕНИЯ.Пол";
     private static final String TYPE_DUL_FIELD_PREFIX = "ДУЛ.";
@@ -29,7 +35,9 @@ public final class MappingNormalizer {
      * - находит рядом поле без "mapping." и кладёт logicalName -> value
      * - сразу подставляет справочные значения пола и типа ДУЛ
      *
-     * Если logicalName повторяется (например массив документов) — склеиваем через ';'
+     * Если logicalName повторяется, сохраняем первое физически присутствующее
+     * значение, включая null и пустую строку. Повторы не склеиваются.
+     * Для каждого повторяющегося logicalName выводится один WARN на вызов normalize.
      *
      * ВАЖНО:
      * значение mapping.* = "none" означает, что поле не нужно добавлять.
@@ -44,18 +52,18 @@ public final class MappingNormalizer {
             Map<String, String> genderMapping,
             Map<String, String> typeDulMapping
     ) {
-        Map<String, String> out = new LinkedHashMap<>();
+        NormalizationContext context = new NormalizationContext();
 
         JsonNode data = event == null ? null : event.get("data");
         if (data == null || data.isNull()) {
-            return out;
+            return context.values;
         }
 
         Map<String, String> genders = genderMapping == null ? Map.of() : genderMapping;
         Map<String, String> documentTypes = typeDulMapping == null ? Map.of() : typeDulMapping;
 
-        walk(data, out, genders, documentTypes);
-        return out;
+        walk(data, context, genders, documentTypes);
+        return context.values;
     }
 
     /**
@@ -111,7 +119,7 @@ public final class MappingNormalizer {
 
     private void walk(
             JsonNode node,
-            Map<String, String> out,
+            NormalizationContext context,
             Map<String, String> genderMapping,
             Map<String, String> typeDulMapping
     ) {
@@ -133,7 +141,7 @@ public final class MappingNormalizer {
                             node,
                             key,
                             v,
-                            out,
+                            context,
                             genderMapping,
                             typeDulMapping
                     );
@@ -148,17 +156,17 @@ public final class MappingNormalizer {
             }
 
             // Как и раньше, сначала извлекаем mapping.* текущего объекта,
-            // затем обходим вложенные узлы. Это сохраняет порядок склейки
-            // повторяющихся logicalName, но не требует второго прохода fields().
+            // затем обходим вложенные узлы. Значение родителя имеет приоритет
+            // при повторении logicalName во вложенном объекте.
             if (nestedNodes != null) {
                 for (JsonNode nestedNode : nestedNodes) {
-                    walk(nestedNode, out, genderMapping, typeDulMapping);
+                    walk(nestedNode, context, genderMapping, typeDulMapping);
                 }
             }
 
         } else if (node.isArray()) {
             for (JsonNode el : node) {
-                walk(el, out, genderMapping, typeDulMapping);
+                walk(el, context, genderMapping, typeDulMapping);
             }
         }
     }
@@ -167,7 +175,7 @@ public final class MappingNormalizer {
             JsonNode obj,
             String mappingKey,
             JsonNode mappingNode,
-            Map<String, String> out,
+            NormalizationContext context,
             Map<String, String> genderMapping,
             Map<String, String> typeDulMapping
     ) {
@@ -195,6 +203,13 @@ public final class MappingNormalizer {
             return;
         }
 
+        // containsKey сохраняет первое значение даже при null или "".
+        // Дубликат не требует преобразования значения или lookup в справочнике.
+        if (context.values.containsKey(logical)) {
+            context.warnDuplicate(logical);
+            return;
+        }
+
         String value =
                 toFlatString(valueNode);
 
@@ -205,16 +220,21 @@ public final class MappingNormalizer {
                 typeDulMapping
         );
 
-        String prev =
-                out.get(logical);
+        context.values.put(logical, value);
+    }
 
-        if (prev == null || prev.isBlank()) {
-            out.put(logical, value);
-        } else {
-            out.put(
-                    logical,
-                    prev + ";" + value
-            );
+    /** Состояние одного вызова: не разделяется между сообщениями и потоками. */
+    private static final class NormalizationContext {
+        private final Map<String, String> values = new LinkedHashMap<>();
+        private Set<String> warnedFields;
+
+        private void warnDuplicate(String logicalField) {
+            if (!log.isWarnEnabled()) return;
+            // Дополнительный Set создаётся только при первом дубликате.
+            if (warnedFields == null) warnedFields = new HashSet<>();
+            if (warnedFields.add(logicalField)) {
+                log.warn("[NORMALIZE] duplicate mapping: field={} policy=FIRST", logicalField);
+            }
         }
     }
 

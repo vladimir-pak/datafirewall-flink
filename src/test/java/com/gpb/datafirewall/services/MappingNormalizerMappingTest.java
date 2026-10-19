@@ -53,7 +53,8 @@ class MappingNormalizerMappingTest {
         assertEquals("BIRTH_CERTIFICATE", cards.get(1).get("type").asText());
     }
 
-    void mapsBeforeJoiningRepeatedLogicalFields() {
+    @Test
+    void mapsOnlyFirstValueForRepeatedLogicalFields() {
         ObjectNode root = mapper.createObjectNode();
         ArrayNode cards = root.putObject("data")
                 .putObject("documents")
@@ -69,7 +70,7 @@ class MappingNormalizerMappingTest {
                 Map.of("PASSPORT_RU", "21", "BIRTH_CERTIFICATE", "27")
         );
 
-        assertEquals("21;27", result.get(commonLogicalField));
+        assertEquals("21", result.get(commonLogicalField));
     }
 
     @Test
@@ -86,7 +87,49 @@ class MappingNormalizerMappingTest {
 
         Map<String, String> result = normalizer.normalize(root);
 
-        assertEquals("parent;child", result.get("COMMON.FIELD"));
+        assertEquals("parent", result.get("COMMON.FIELD"));
+    }
+
+    @Test
+    void keepsFirstValueForRepeatedMappingsInSameObject() {
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode contact = root.putObject("data").putObject("contactPerson");
+        contact.put("addMobilePhone", "3434");
+        contact.put("mapping.addMobilePhone", "CONTACT.Phone");
+        contact.put("addWorkPhone", "test");
+        contact.put("mapping.addWorkPhone", "CONTACT.Phone");
+        contact.put("otherPhone", "third");
+        contact.put("mapping.otherPhone", "CONTACT.Phone");
+
+        Map<String, String> result = normalizer.normalize(root);
+
+        assertEquals(Map.of("CONTACT.Phone", "3434"), result);
+        assertEquals("test", contact.get("addWorkPhone").asText());
+    }
+
+    @Test
+    void preservesFirstNullEmptyBlankAndLiteralSemicolon() {
+        for (String first : new String[]{null, "", "  ", "first;literal"}) {
+            ObjectNode root = mapper.createObjectNode();
+            ArrayNode values = root.putObject("data").putArray("values");
+            values.addObject().put("mapping.value", "VALUE.Field").put("value", first);
+            values.addObject().put("mapping.value", "VALUE.Field").put("value", "later");
+
+            Map<String, String> result = normalizer.normalize(root);
+
+            assertTrue(result.containsKey("VALUE.Field"));
+            assertEquals(first, result.get("VALUE.Field"));
+        }
+    }
+
+    @Test
+    void ignoresMappingWhosePhysicalFieldIsAbsentWhenSelectingFirstValue() {
+        ObjectNode root = mapper.createObjectNode();
+        ArrayNode values = root.putObject("data").putArray("values");
+        values.addObject().put("mapping.value", "VALUE.Present");
+        values.addObject().put("mapping.value", "VALUE.Present").put("value", "present");
+
+        assertEquals(Map.of("VALUE.Present", "present"), normalizer.normalize(root));
     }
 
     @Test
