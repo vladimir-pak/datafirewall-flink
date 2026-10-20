@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.dto.ProcessingResult;
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.validation.ValidationResult;
+import com.gpb.datafirewall.validation.ValidationMessages;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -293,7 +294,7 @@ public final class MessageProcessingService {
                         compiledRules, blockRuleInput, block.fieldToRules(),
                         errorMessagesByRule, filterFlag);
 
-                if (blockValidation.detailByField() != null) mergedDetailByField.putAll(blockValidation.detailByField());
+                mergeRuleStatuses(mergedDetailByField, blockValidation.detailByField());
 
                 mergeErrors(mergedErrorsByField, blockValidation.errorsByField());
                 mergedDetailByDataset.put(block.datasetCode(), safeFieldMap(blockValidation.detailByField()));
@@ -332,13 +333,17 @@ public final class MessageProcessingService {
                     freezeErrors(mergedErrorsByField)
             );
 
+            ValidationMessages classifiedMessages = validationService.classifyMessages(
+                    finalValidation, errorMessagesByRule);
+
             String shortJson = shortAnswerService.build(
                     originalEvent, 
                     finalValidation, 
                     qid, 
                     in.createdDttm, 
                     in.readedDttm,
-                    controlArea
+                    controlArea,
+                    classifiedMessages
             );
 
             if (shortJson == null) {
@@ -946,6 +951,44 @@ public final class MessageProcessingService {
             if (entry.getKey() == null || entry.getKey().isBlank() || entry.getValue() == null || entry.getValue().isEmpty()) continue;
             target.put(instanceKey + "::" + entry.getKey(), List.copyOf(new LinkedHashSet<>(entry.getValue())));
         }
+    }
+
+    /**
+     * При совпадающих логических именах не перезаписываем сработавшие правила
+     * результатами другого блока (например, SUCCESS поверх WARNING/ERROR).
+     * Для одного ruleName приоритет: ERROR > WARNING > SUCCESS.
+     */
+    private void mergeRuleStatuses(
+            Map<String, Map<String, String>> target,
+            Map<String, Map<String, String>> source
+    ) {
+        if (source == null || source.isEmpty()) return;
+
+        for (Map.Entry<String, Map<String, String>> entry : source.entrySet()) {
+            String field = entry.getKey();
+            Map<String, String> statuses = entry.getValue();
+            if (field == null || statuses == null || statuses.isEmpty()) continue;
+
+            Map<String, String> merged = new LinkedHashMap<>(
+                    target.getOrDefault(field, Map.of()));
+
+            for (Map.Entry<String, String> rule : statuses.entrySet()) {
+                if (rule.getKey() == null || rule.getValue() == null) continue;
+                String old = merged.get(rule.getKey());
+                String candidate = rule.getValue();
+                if (old == null || statusRank(candidate) > statusRank(old)) {
+                    merged.put(rule.getKey(), candidate);
+                }
+            }
+            target.put(field, merged);
+        }
+    }
+
+    private int statusRank(String status) {
+        if (RESULT_ERROR.equalsIgnoreCase(status)) return 3;
+        if (RESULT_WARNING.equalsIgnoreCase(status)) return 2;
+        if (RESULT_SUCCESS.equalsIgnoreCase(status)) return 1;
+        return 0;
     }
 
     private void mergeErrors(Map<String, List<String>> target, Map<String, List<String>> source) {

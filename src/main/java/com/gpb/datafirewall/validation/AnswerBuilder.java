@@ -32,6 +32,18 @@ public final class AnswerBuilder {
             Long createdDttm, 
             Long readedDttm,
             String controlArea) {
+        return buildAnswer(originalEvent, validation, qid, createdDttm,
+                readedDttm, controlArea, null);
+    }
+
+    public ObjectNode buildAnswer(
+            JsonNode originalEvent,
+            ValidationResult validation,
+            String qid,
+            Long createdDttm,
+            Long readedDttm,
+            String controlArea,
+            ValidationMessages classifiedMessages) {
 
         ObjectNode out = mapper.createObjectNode();
 
@@ -62,13 +74,27 @@ public final class AnswerBuilder {
         out.put("dfw_action_dttm", Instant.now().toString());
         out.put("dfw_query_id", qid);
 
-        String processStatus = validation == null || validation.processStatus() == null ? "ERROR" : validation.processStatus();
+        String processStatus = 
+                validation == null || validation.processStatus() == null 
+                        ? "ERROR" : validation.processStatus();
+                        
         out.put("PROCESS_STATUS", processStatus);
 
         ObjectNode details = buildShortDetails(originalEvent, validation);
         out.set("details", details);
 
-        out.set("errors", buildErrors(originalEvent, validation));
+        // Старый вызов без классификации остаётся совместимым: всё в errors.
+        ValidationMessages messages = classifiedMessages == null
+                ? new ValidationMessages(
+                    validation == null ? Map.of() : validation.errorsByField(),
+                    Map.of(),
+                    java.util.Set.of())
+                : classifiedMessages;
+
+        out.set("errors", buildMessages(originalEvent,
+                messages.errorsByField(), messages.scopedInstanceKeys()));
+        out.set("warnings", buildMessages(originalEvent,
+                messages.warningsByField(), messages.scopedInstanceKeys()));
 
         ObjectNode wrapped = mapper.createObjectNode();
         wrapped.set("data", out);
@@ -97,14 +123,13 @@ public final class AnswerBuilder {
         return details;
     }
 
-    private ObjectNode buildErrors(
-            JsonNode originalEvent, 
-            ValidationResult validation) {
+    private ObjectNode buildMessages(
+            JsonNode originalEvent,
+            Map<String, List<String>> errorsByField,
+            java.util.Set<String> scopedInstanceKeys) {
 
         ObjectNode errors = mapper.createObjectNode();
-        Map<String, List<String>> errorsByField = 
-                validation == null || validation.errorsByField() == null 
-                        ? Map.of() : validation.errorsByField();
+        if (errorsByField == null) errorsByField = Map.of();
 
         if (errorsByField.isEmpty()) return errors;
 
@@ -125,7 +150,8 @@ public final class AnswerBuilder {
                         buildTopLevelArrayErrors(
                                 blockNode, 
                                 blockName, 
-                                errorsByField
+                                errorsByField,
+                                scopedInstanceKeys
                         );
                 if (arrayErrors.size() > 0) errors.set(blockName, arrayErrors);
                 continue;
@@ -137,11 +163,13 @@ public final class AnswerBuilder {
                     buildBlockErrors(
                             blockNode, 
                             errorsByField, 
-                            null
+                            null,
+                            scopedInstanceKeys
                     );
 
             if ("documents".equals(blockName)) {
-                ArrayNode cardsErrors = buildClientIdCardErrors(blockNode, errorsByField);
+                ArrayNode cardsErrors = buildClientIdCardErrors(blockNode, errorsByField,
+                        scopedInstanceKeys);
                 if (cardsErrors.size() > 0) blockErrors.set("clientIdCard", cardsErrors);
             }
 
@@ -154,7 +182,8 @@ public final class AnswerBuilder {
     private ArrayNode buildTopLevelArrayErrors(
             JsonNode arrayNode, 
             String blockName, 
-            Map<String, List<String>> errorsByField) {
+            Map<String, List<String>> errorsByField,
+            java.util.Set<String> scopedInstanceKeys) {
 
         ArrayNode result = mapper.createArrayNode();
         if (arrayNode == null || !arrayNode.isArray()) return result;
@@ -177,7 +206,8 @@ public final class AnswerBuilder {
             ObjectNode itemErrors = buildBlockErrors(
                     item, 
                     errorsByField, 
-                    instanceKey
+                    instanceKey,
+                    scopedInstanceKeys
             );
             copyTechnicalKey(item, itemErrors);
 
@@ -191,7 +221,8 @@ public final class AnswerBuilder {
     private ObjectNode buildBlockErrors(
             JsonNode blockNode, 
             Map<String, List<String>> errorsByField, 
-            String instanceKey) {
+            String instanceKey,
+            java.util.Set<String> scopedInstanceKeys) {
 
         ObjectNode blockErrors = mapper.createObjectNode();
         Iterator<Map.Entry<String, JsonNode>> fields = blockNode.fields();
@@ -208,7 +239,8 @@ public final class AnswerBuilder {
 
             if (logicalField == null || logicalField.isBlank() || "none".equalsIgnoreCase(logicalField)) continue;
 
-            List<String> fieldErrors = findErrorsByLogicalField(errorsByField, logicalField, instanceKey);
+            List<String> fieldErrors = findErrorsByLogicalField(
+                    errorsByField, logicalField, instanceKey, scopedInstanceKeys);
             if (fieldErrors == null || fieldErrors.isEmpty()) continue;
 
             ArrayNode arr = mapper.createArrayNode();
@@ -224,7 +256,8 @@ public final class AnswerBuilder {
 
     private ArrayNode buildClientIdCardErrors(
             JsonNode documentsNode, 
-            Map<String, List<String>> errorsByField) {
+            Map<String, List<String>> errorsByField,
+            java.util.Set<String> scopedInstanceKeys) {
 
         ArrayNode result = mapper.createArrayNode();
 
@@ -239,7 +272,8 @@ public final class AnswerBuilder {
                     buildBlockErrors(
                             cardNode, 
                             errorsByField, 
-                            null
+                            null,
+                            scopedInstanceKeys
                     );
 
             if (cardErrors.size() > 0) result.add(cardErrors);
@@ -460,7 +494,8 @@ public final class AnswerBuilder {
     private List<String> findErrorsByLogicalField(
             Map<String, List<String>> errorsByField, 
             String logicalField, 
-            String instanceKey) {
+            String instanceKey,
+            java.util.Set<String> scopedInstanceKeys) {
 
         if (logicalField == null || logicalField.isBlank() || errorsByField == null || errorsByField.isEmpty()) return null;
 
@@ -471,6 +506,12 @@ public final class AnswerBuilder {
             String alt = logicalField.replace('.', ',');
             instanceErrors = errorsByField.get(instanceKey + "::" + alt);
             if (instanceErrors != null && !instanceErrors.isEmpty()) return instanceErrors;
+
+            // Если элемент массива проверен, отсутствие сообщений означает SUCCESS
+            // именно для него: запрещаем fallback на другой экземпляр.
+            if (scopedInstanceKeys != null && scopedInstanceKeys.contains(instanceKey)) {
+                return null;
+            }
         }
 
         List<String> errors = errorsByField.get(logicalField);

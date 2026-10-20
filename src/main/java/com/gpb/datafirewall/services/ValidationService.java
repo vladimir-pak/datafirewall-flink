@@ -18,6 +18,7 @@ import java.util.TreeMap;
 
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.validation.ValidationResult;
+import com.gpb.datafirewall.validation.ValidationMessages;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -393,6 +394,103 @@ public final class ValidationService {
                 Collections.emptyMap(),
                 Collections.unmodifiableMap(errorsByField)
         );
+    }
+
+    /**
+     * Отдельные разделы для короткого ответа MQ. Не повторяет выполнение правил:
+     * используется статус из detailByField / detailByDataset и тот же справочник
+     * сообщений, который применялся во время validate().
+     */
+    public ValidationMessages classifyMessages(
+            ValidationResult validation,
+            Map<String, Map<String, String>> errorMessagesByRule
+    ) {
+        if (validation == null) {
+            return new ValidationMessages(Map.of(), Map.of(), Set.of());
+        }
+
+        Map<String, LinkedHashSet<String>> errors = new LinkedHashMap<>();
+        Map<String, LinkedHashSet<String>> warnings = new LinkedHashMap<>();
+        Map<String, Map<String, String>> messages =
+                errorMessagesByRule == null ? Map.of() : errorMessagesByRule;
+        Set<String> instances = new LinkedHashSet<>();
+
+        appendClassifiedMessages(validation.detailByField(), "", messages, errors, warnings);
+
+        // Сохраняем адресацию сообщений по конкретному элементу массива.
+        // В detailByDataset также есть обычные datasetCode, их здесь пропускаем.
+        if (validation.detailByDataset() != null) {
+            for (Map.Entry<String, Map<String, Map<String, String>>> entry
+                    : validation.detailByDataset().entrySet()) {
+                String instanceKey = entry.getKey();
+                if (!isArrayInstanceKey(instanceKey)) continue;
+                instances.add(instanceKey);
+                appendClassifiedMessages(
+                        entry.getValue(), instanceKey + "::", messages, errors, warnings);
+            }
+        }
+
+        return new ValidationMessages(
+                freezeClassifiedMessages(errors),
+                freezeClassifiedMessages(warnings),
+                Collections.unmodifiableSet(instances)
+        );
+    }
+
+    private void appendClassifiedMessages(
+            Map<String, Map<String, String>> byField,
+            String prefix,
+            Map<String, Map<String, String>> errorMessagesByRule,
+            Map<String, LinkedHashSet<String>> errors,
+            Map<String, LinkedHashSet<String>> warnings
+    ) {
+        if (byField == null || byField.isEmpty()) return;
+
+        for (Map.Entry<String, Map<String, String>> fieldEntry : byField.entrySet()) {
+            String field = fieldEntry.getKey();
+            Map<String, String> rules = fieldEntry.getValue();
+            if (field == null || field.isBlank() || rules == null) continue;
+
+            for (Map.Entry<String, String> ruleEntry : rules.entrySet()) {
+                String rule = ruleEntry.getKey();
+                String status = ruleEntry.getValue();
+                if (rule == null || rule.isBlank()) continue;
+
+                Map<String, LinkedHashSet<String>> destination;
+                if (ERROR.equalsIgnoreCase(status)) {
+                    destination = errors;
+                } else if (WARNING.equalsIgnoreCase(status)) {
+                    destination = warnings;
+                } else {
+                    continue; // SUCCESS и отсутствующие статусы не имеют сообщений.
+                }
+
+                String message = resolveErrorMessage(
+                        rule, resolveErrorInfo(rule, errorMessagesByRule));
+                destination.computeIfAbsent(prefix + field, k -> new LinkedHashSet<>())
+                        .add(message);
+            }
+        }
+    }
+
+    private Map<String, List<String>> freezeClassifiedMessages(
+            Map<String, LinkedHashSet<String>> source
+    ) {
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        source.forEach((key, values) -> out.put(key, List.copyOf(values)));
+        return Collections.unmodifiableMap(out);
+    }
+
+    private boolean isArrayInstanceKey(String key) {
+        if (key == null) return false;
+        int end = key.lastIndexOf('#');
+        int first = key.lastIndexOf('#', end - 1);
+        if (first < 0 || end <= first + 1 || end == key.length() - 1) return false;
+        try {
+            return Integer.parseInt(key.substring(end + 1)) >= 0;
+        } catch (NumberFormatException ex) {
+            return false;
+        }
     }
 
     private Set<String> referencedFieldsForLog(

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.validation.AnswerBuilder;
 import com.gpb.datafirewall.validation.ValidationResult;
+import com.gpb.datafirewall.validation.ValidationMessages;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,18 @@ public final class ShortAnswerService {
         Long readedDttm,
         String controlArea
     ) {
+        return build(originalEvent, validation, qid, createdDttm, readedDttm, controlArea, null);
+    }
+
+    public String build(
+        JsonNode originalEvent,
+        ValidationResult validation,
+        String qid,
+        Long createdDttm,
+        Long readedDttm,
+        String controlArea,
+        ValidationMessages classifiedMessages
+    ) {
         if (originalEvent == null || validation == null) return null;
 
         try {
@@ -38,7 +51,8 @@ public final class ShortAnswerService {
                 qid,
                 createdDttm,
                 readedDttm,
-                controlArea
+                controlArea,
+                classifiedMessages
             );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
