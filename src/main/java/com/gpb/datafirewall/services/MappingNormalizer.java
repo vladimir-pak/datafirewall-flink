@@ -282,12 +282,19 @@ public final class MappingNormalizer {
             return v.asText();
         }
 
-        // Массив с одним скалярным элементом
-        if (v.isArray() && v.size() == 1) {
-            JsonNode first = v.get(0);
+        if (v.isArray()) {
+            // Пустой массив [] преобразуем в null
+            if (v.size() == 0) {
+                return null;
+            }
 
-            if (first.isValueNode()) {
-                return toFlatString(first);
+            // Массив с одним скалярным элементом
+            if (v.size() == 1) {
+                JsonNode first = v.get(0);
+
+                if (first.isValueNode()) {
+                    return toFlatString(first);
+                }
             }
         }
 
