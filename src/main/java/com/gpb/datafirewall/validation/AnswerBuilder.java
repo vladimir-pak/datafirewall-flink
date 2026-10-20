@@ -30,7 +30,8 @@ public final class AnswerBuilder {
             ValidationResult validation, 
             String qid, 
             Long createdDttm, 
-            Long readedDttm) {
+            Long readedDttm,
+            String controlArea) {
 
         ObjectNode out = mapper.createObjectNode();
 
@@ -43,6 +44,7 @@ public final class AnswerBuilder {
                 "dfw_created_dttm"
         ));
 
+        out.put("dfw_dataset_code", controlArea);
         out.put("dfw_action_type", "ANSWER");
         out.put(
                 "dfw_created_dttm", 

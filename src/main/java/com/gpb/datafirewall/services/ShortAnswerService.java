@@ -26,7 +26,8 @@ public final class ShortAnswerService {
         ValidationResult validation, 
         String qid,
         Long createdDttm,
-        Long readedDttm
+        Long readedDttm,
+        String controlArea
     ) {
         if (originalEvent == null || validation == null) return null;
 
@@ -36,7 +37,8 @@ public final class ShortAnswerService {
                 validation,
                 qid,
                 createdDttm,
-                readedDttm
+                readedDttm,
+                controlArea
             );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {

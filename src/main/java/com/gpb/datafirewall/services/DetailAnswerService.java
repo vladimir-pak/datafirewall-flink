@@ -29,7 +29,8 @@ public final class DetailAnswerService {
         String qid,
         Long createdDttm,
         Long readedDttm,
-        Set<String> excludedBlocks
+        Set<String> excludedBlocks,
+        String controlArea
     ) {
         if (originalEvent == null || validation == null) return null;
 
@@ -40,7 +41,8 @@ public final class DetailAnswerService {
                 qid,
                 createdDttm,
                 readedDttm,
-                excludedBlocks
+                excludedBlocks,
+                controlArea
             );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {

@@ -332,7 +332,14 @@ public final class MessageProcessingService {
                     freezeErrors(mergedErrorsByField)
             );
 
-            String shortJson = shortAnswerService.build(originalEvent, finalValidation, qid, in.createdDttm, in.readedDttm);
+            String shortJson = shortAnswerService.build(
+                    originalEvent, 
+                    finalValidation, 
+                    qid, 
+                    in.createdDttm, 
+                    in.readedDttm,
+                    controlArea
+            );
 
             if (shortJson == null) {
                 log.warn("[PIPE][{}][eventId={}] ShortAnswerService returned null.", qid, eventId);
@@ -349,7 +356,8 @@ public final class MessageProcessingService {
                     qid, 
                     in.createdDttm, 
                     in.readedDttm, 
-                    excludedBlocks
+                    excludedBlocks,
+                    controlArea
             );
 
             if (detailJson != null) {

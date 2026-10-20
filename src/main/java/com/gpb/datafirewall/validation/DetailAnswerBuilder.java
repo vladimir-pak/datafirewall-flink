@@ -40,7 +40,8 @@ public final class DetailAnswerBuilder {
             String qid, 
             Long createdDttm, 
             Long readedDttm, 
-            Set<String> excludedBlocks) {
+            Set<String> excludedBlocks,
+            String controlArea) {
                 
         Map<String, Map<String, String>> general = 
                 validation == null || validation.detailByField() == null 
@@ -55,7 +56,7 @@ public final class DetailAnswerBuilder {
         String mainDataset = getText(
                 originalEvent, 
                 "dfw_dataset_code", 
-                "UNKNOWN_DATASET"
+                controlArea
         );
 
         JsonNode data = originalEvent == null ? null : originalEvent.get("data");
@@ -126,6 +127,7 @@ public final class DetailAnswerBuilder {
                 "dfw_created_dttm"
         ));
 
+        result.put("dfw_dataset_code", controlArea);
         result.put("dfw_action_type", "ANSWER_DETAIL");
         result.put(
                 "dfw_created_dttm", 
