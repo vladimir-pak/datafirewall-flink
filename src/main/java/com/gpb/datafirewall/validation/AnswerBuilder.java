@@ -64,8 +64,9 @@ public final class AnswerBuilder {
         out.put("PROCESS_STATUS", processStatus);
 
         ObjectNode details = buildShortDetails(originalEvent, validation);
-        details.set("errors", buildErrors(originalEvent, validation));
         out.set("details", details);
+
+        out.set("errors", buildErrors(originalEvent, validation));
 
         ObjectNode wrapped = mapper.createObjectNode();
         wrapped.set("data", out);
