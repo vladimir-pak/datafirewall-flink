@@ -148,6 +148,10 @@ public final class MessageProcessingService {
             List<PreparedExcludedBlock> preparedExcludedBlocks =
                     new ArrayList<>(excludedBlocks.size());
 
+            // Результаты каждого excluded-блока отдельно: ключ = физическое имя блока.
+            Map<String, Map<String, Map<String, String>>> excludedBlockStatuses =
+                    new LinkedHashMap<>();
+
             Set<String> excludedLogicalFields = new LinkedHashSet<>();
 
             for (String blockName : excludedBlocks) {
@@ -207,6 +211,7 @@ public final class MessageProcessingService {
                 );
 
                 preparedExcludedBlocks.add(new PreparedExcludedBlock(
+                        blockName,
                         blockDatasetCode,
                         blockEffective.normalizedMap(),
                         blockLocalValueFields,
@@ -294,6 +299,11 @@ public final class MessageProcessingService {
                         compiledRules, blockRuleInput, block.fieldToRules(),
                         errorMessagesByRule, filterFlag);
 
+                // Даже SUCCESS фиксируем: его отсутствие в errors/warnings не даёт
+                // права брать нарушение из другого excluded-блока.
+                excludedBlockStatuses.put(block.blockName(),
+                        safeFieldMap(blockValidation.detailByField()));
+
                 mergeRuleStatuses(mergedDetailByField, blockValidation.detailByField());
 
                 mergeErrors(mergedErrorsByField, blockValidation.errorsByField());
@@ -334,7 +344,8 @@ public final class MessageProcessingService {
             );
 
             ValidationMessages classifiedMessages = validationService.classifyMessages(
-                    finalValidation, errorMessagesByRule);
+                    finalValidation, errorMessagesByRule,
+                    mainValidation.detailByField(), excludedBlockStatuses);
 
             String shortJson = shortAnswerService.build(
                     originalEvent, 
@@ -859,6 +870,7 @@ public final class MessageProcessingService {
     }
 
     private record PreparedExcludedBlock(
+            String blockName,
             String datasetCode,
             Map<String, String> normalizedMap,
             Set<String> localValueFields,

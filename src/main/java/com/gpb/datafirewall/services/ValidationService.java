@@ -397,34 +397,58 @@ public final class ValidationService {
     }
 
     /**
-     * Отдельные разделы для короткого ответа MQ. Не повторяет выполнение правил:
-     * используется статус из detailByField / detailByDataset и тот же справочник
-     * сообщений, который применялся во время validate().
+     * Совместимый API: старые вызовы продолжают работать.
+     * Без отдельной информации о блоках точная scoped-адресация невозможна.
      */
     public ValidationMessages classifyMessages(
             ValidationResult validation,
             Map<String, Map<String, String>> errorMessagesByRule
     ) {
+        return classifyMessages(validation, errorMessagesByRule,
+                validation == null ? Map.of() : validation.detailByField(), Map.of());
+    }
+
+    /**
+     * Классифицируем ERROR/WARNING по настоящему источнику статуса:
+     * - mainDetailByField: только основной контекст;
+     * - excludedBlockStatuses: результаты каждого top-level excluded-блока;
+     * - detailByDataset: только экземпляры массивов.
+     * Правила повторно НЕ запускаются.
+     */
+    public ValidationMessages classifyMessages(
+            ValidationResult validation,
+            Map<String, Map<String, String>> errorMessagesByRule,
+            Map<String, Map<String, String>> mainDetailByField,
+            Map<String, Map<String, Map<String, String>>> excludedBlockStatuses
+    ) {
         if (validation == null) {
-            return new ValidationMessages(Map.of(), Map.of(), Set.of());
+            return new ValidationMessages(Map.of(), Map.of(), Set.of(), Map.of());
         }
 
         Map<String, LinkedHashSet<String>> errors = new LinkedHashMap<>();
         Map<String, LinkedHashSet<String>> warnings = new LinkedHashMap<>();
         Map<String, Map<String, String>> messages =
                 errorMessagesByRule == null ? Map.of() : errorMessagesByRule;
-        Set<String> instances = new LinkedHashSet<>();
+        Set<String> scopes = new LinkedHashSet<>();
 
-        appendClassifiedMessages(validation.detailByField(), "", messages, errors, warnings);
+        // Не использовать aggregated detailByField: он содержит объединение
+        // разных excluded-блоков и приводит к утечке сообщений между ними.
+        appendClassifiedMessages(mainDetailByField, "", messages, errors, warnings);
 
-        // Сохраняем адресацию сообщений по конкретному элементу массива.
-        // В detailByDataset также есть обычные datasetCode, их здесь пропускаем.
+        Map<String, Map<String, Map<String, String>>> excluded =
+                excludedBlockStatuses == null ? Map.of() : excludedBlockStatuses;
+        for (Map.Entry<String, Map<String, Map<String, String>>> block : excluded.entrySet()) {
+            String key = ValidationMessages.excludedScopeKey(block.getKey());
+            scopes.add(key); // фиксируем блок, даже когда он целиком SUCCESS
+            appendClassifiedMessages(block.getValue(), key + "::", messages, errors, warnings);
+        }
+
         if (validation.detailByDataset() != null) {
             for (Map.Entry<String, Map<String, Map<String, String>>> entry
                     : validation.detailByDataset().entrySet()) {
                 String instanceKey = entry.getKey();
                 if (!isArrayInstanceKey(instanceKey)) continue;
-                instances.add(instanceKey);
+                scopes.add(instanceKey);
                 appendClassifiedMessages(
                         entry.getValue(), instanceKey + "::", messages, errors, warnings);
             }
@@ -433,7 +457,8 @@ public final class ValidationService {
         return new ValidationMessages(
                 freezeClassifiedMessages(errors),
                 freezeClassifiedMessages(warnings),
-                Collections.unmodifiableSet(instances)
+                Collections.unmodifiableSet(scopes),
+                excluded
         );
     }
 

@@ -80,9 +80,6 @@ public final class AnswerBuilder {
                         
         out.put("PROCESS_STATUS", processStatus);
 
-        ObjectNode details = buildShortDetails(originalEvent, validation);
-        out.set("details", details);
-
         // Старый вызов без классификации остаётся совместимым: всё в errors.
         ValidationMessages messages = classifiedMessages == null
                 ? new ValidationMessages(
@@ -90,6 +87,9 @@ public final class AnswerBuilder {
                     Map.of(),
                     java.util.Set.of())
                 : classifiedMessages;
+
+        ObjectNode details = buildShortDetails(originalEvent, validation, messages);
+        out.set("details", details);
 
         out.set("errors", buildMessages(originalEvent,
                 messages.errorsByField(), messages.scopedInstanceKeys()));
@@ -102,8 +102,9 @@ public final class AnswerBuilder {
     }
 
     private ObjectNode buildShortDetails(
-            JsonNode originalEvent, 
-            ValidationResult validation) {
+            JsonNode originalEvent,
+            ValidationResult validation,
+            ValidationMessages messages) {
 
         ObjectNode details = mapper.createObjectNode();
 
@@ -114,6 +115,17 @@ public final class AnswerBuilder {
         Map<String, Map<String, Map<String, String>>> byDataset = 
                 validation == null || validation.detailByDataset() == null 
                         ? Map.of() : validation.detailByDataset();
+
+        // Для отображения статуса short answer подмешиваем в локальную карту
+        // адресные результаты excluded-блоков; сам ValidationResult не меняем,
+        // чтобы не нарушить формирование ANSWER_DETAIL.
+        if (messages != null && !messages.excludedBlockStatuses().isEmpty()) {
+            Map<String, Map<String, Map<String, String>>> scoped =
+                    new java.util.LinkedHashMap<>(byDataset);
+            messages.excludedBlockStatuses().forEach((blockName, statuses) ->
+                    scoped.put(ValidationMessages.excludedScopeKey(blockName), statuses));
+            byDataset = scoped;
+        }
 
         JsonNode data = originalEvent == null ? null : originalEvent.get("data");
         String allResult = validation == null || validation.allResult() == null ? "ERROR" : validation.allResult();
@@ -159,11 +171,15 @@ public final class AnswerBuilder {
 
             if (!blockNode.isObject()) continue;
 
-            ObjectNode blockErrors = 
+            String scopeKey = ValidationMessages.excludedScopeKey(blockName);
+            String instanceKey = scopedInstanceKeys != null
+                    && scopedInstanceKeys.contains(scopeKey) ? scopeKey : null;
+
+            ObjectNode blockErrors =
                     buildBlockErrors(
-                            blockNode, 
-                            errorsByField, 
-                            null,
+                            blockNode,
+                            errorsByField,
+                            instanceKey,
                             scopedInstanceKeys
                     );
 
@@ -314,11 +330,14 @@ public final class AnswerBuilder {
 
             if (!blockNode.isObject()) continue;
 
-            ObjectNode blockShortNode = 
+            String scopeKey = ValidationMessages.excludedScopeKey(blockName);
+            String instanceKey = byDataset.containsKey(scopeKey) ? scopeKey : null;
+
+            ObjectNode blockShortNode =
                     buildGenericShortNode(
-                            blockNode, 
-                            null, 
-                            general, 
+                            blockNode,
+                            instanceKey,
+                            general,
                             byDataset
                     );
             if (blockShortNode.size() > 0) details.set(blockName, blockShortNode);
@@ -559,11 +578,18 @@ public final class AnswerBuilder {
         if (instanceKey != null && byDataset != null && !byDataset.isEmpty()) {
             Map<String, Map<String, String>> instanceDetail = byDataset.get(instanceKey);
             rules = findRulesInDetail(
-                    instanceDetail, 
-                    logical, 
-                    localFieldName, 
+                    instanceDetail,
+                    logical,
+                    localFieldName,
                     mappingKey
             );
+            // Для excluded-блока чужие результаты по datasetCode/общей карте
+            // НЕ являются fallback. Пустой результат здесь означает отсутствие
+            // проверки или SUCCESS только текущего блока.
+            if (ValidationMessages.isExcludedScopeKey(instanceKey)
+                    && byDataset.containsKey(instanceKey)) {
+                return rules;
+            }
         }
 
         if (rules == null && datasetCode != null && byDataset != null && !byDataset.isEmpty()) {
