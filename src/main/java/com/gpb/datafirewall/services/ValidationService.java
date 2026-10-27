@@ -106,6 +106,7 @@ public final class ValidationService {
         }
 
         final boolean debugEnabled = log.isDebugEnabled();
+        final boolean filterMissingFields = Boolean.TRUE.equals(filterFlag);
 
         if (debugEnabled) {
             log.debug(
@@ -211,6 +212,13 @@ public final class ValidationService {
                 boolean triggered;
 
                 try {
+                    // Проверки расценивают отсутствующие атрибуты как UNKNOWN и не выбрасывают исключения.
+                    // Если фильтрация включена, то проверка исключается из результата
+                    if (filterMissingFields && rule != null
+                            && hasMissingReferencedField(ruleInput, rule.referencedFields())) {
+                        continue;
+                    }
+
                     // true = правило сработало = ошибка найдена.
                     triggered =
                             rule != null
@@ -226,15 +234,14 @@ public final class ValidationService {
                     }
 
                 } catch (NoSuchElementException ignored) {
-                    if (Boolean.TRUE.equals(filterFlag)) {
+                    if (filterMissingFields) {
                         // При включённой фильтрации проверка с отсутствующей
                         // зависимостью полностью исключается из результата.
                         continue;
                     }
 
-                    // Отсутствующая зависимость является штатным SUCCESS,
-                    // поэтому processStatus остаётся OK. Stack trace намеренно
-                    // не передаётся в лог.
+                    // Compatibility for old bytecode only. All rules must be
+                    // regenerated to obtain the new UNKNOWN semantics.
                     triggered = false;
                     log.warn(
                             "[RULE] missing field: rule={} fields={}",
@@ -516,6 +523,21 @@ public final class ValidationService {
         } catch (NumberFormatException ex) {
             return false;
         }
+    }
+
+    private boolean hasMissingReferencedField(
+            Map<String, String> data,
+            Set<String> fields
+    ) {
+        if (fields == null || fields.isEmpty()) {
+            return false;
+        }
+        for (String field : fields) {
+            if (!data.containsKey(field)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Set<String> referencedFieldsForLog(

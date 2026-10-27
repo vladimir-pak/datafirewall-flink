@@ -292,7 +292,11 @@ public final class AnswerBuilder {
                             scopedInstanceKeys
                     );
 
-            if (cardErrors.size() > 0) result.add(cardErrors);
+            if (cardErrors.size() > 0) {
+                // Copy from this source card: message arrays can be sparse.
+                copyElemId(cardNode, cardErrors);
+                result.add(cardErrors);
+            }
         }
 
         return result;
@@ -501,8 +505,7 @@ public final class AnswerBuilder {
 
             if (child.size() == 0) continue;
 
-            String elemId = text(item, ELEM_ID, null);
-            if (elemId != null && !child.has(ELEM_ID)) child.put(ELEM_ID, elemId);
+            copyElemId(item, child);
 
             result.add(child);
         }
@@ -637,6 +640,17 @@ public final class AnswerBuilder {
             int index) {
 
         return (datasetCode == null ? "" : datasetCode) + "#" + blockName + "#" + index;
+    }
+
+    /** Technical metadata only; never creates an otherwise empty result item. */
+    private void copyElemId(JsonNode source, ObjectNode target) {
+        if (source == null || !source.isObject() || target == null || target.has(ELEM_ID)) return;
+
+        JsonNode elemId = source.get(ELEM_ID);
+        if (elemId == null || elemId.isNull() || !elemId.isValueNode()) return;
+
+        // Preserve the JSON scalar type; scalar deepCopy does not copy a subtree.
+        target.set(ELEM_ID, elemId.deepCopy());
     }
 
     private void copyTechnicalKey(
