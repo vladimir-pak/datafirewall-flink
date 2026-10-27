@@ -160,7 +160,7 @@ public final class MessageProcessingService {
 
                 if (blockNode == null || !blockNode.isObject()) continue;
 
-                String blockDatasetCode = 
+                String blockDatasetCode =
                         text(blockNode, "dataset_code", blockName);
 
                 Map<String, String> blockNormalized = normalizeSingleBlock(
@@ -226,10 +226,10 @@ public final class MessageProcessingService {
 
                 if (logPayloads && log.isInfoEnabled()) {
                     log.info(
-                            "[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}", 
-                            qid, 
-                            blockName, 
-                            blockDatasetCode, 
+                            "[PIPE][{}] 2) BLOCK_NORMALIZED_MAP block={} datasetCode={} full(masked):\n{}",
+                            qid,
+                            blockName,
+                            blockDatasetCode,
                             prettyObject(
                                     maskMap(
                                             blockEffective.normalizedMap()
@@ -246,7 +246,7 @@ public final class MessageProcessingService {
             Map<String, String> mainNormalizedMap = removeKeys(normalizedMap, separatedLogicalFields);
 
             Map<String, Set<String>> mainFieldToRules = removeKeys(allFieldToRules, separatedLogicalFields);
-            
+
             EffectiveNormalization mainEffective = buildEffectiveNormalization(
                     filterFlag,
                     mainNormalizedMap,
@@ -348,10 +348,10 @@ public final class MessageProcessingService {
                     mainValidation.detailByField(), excludedBlockStatuses);
 
             String shortJson = shortAnswerService.build(
-                    originalEvent, 
-                    finalValidation, 
-                    qid, 
-                    in.createdDttm, 
+                    originalEvent,
+                    finalValidation,
+                    qid,
+                    in.createdDttm,
                     in.readedDttm,
                     controlArea,
                     classifiedMessages
@@ -367,11 +367,11 @@ public final class MessageProcessingService {
             }
 
             String detailJson = detailAnswerService.build(
-                    originalEvent, 
-                    finalValidation, 
-                    qid, 
-                    in.createdDttm, 
-                    in.readedDttm, 
+                    originalEvent,
+                    finalValidation,
+                    qid,
+                    in.createdDttm,
+                    in.readedDttm,
                     excludedBlocks,
                     controlArea
             );
@@ -1134,13 +1134,19 @@ public final class MessageProcessingService {
     private ProcessingResult buildProcessingResult(MessageRecord in, String shortJson, String detailJson, String originalJson) {
         if (in == null) throw new IllegalArgumentException("MessageRecord is null");
 
-        if (in.mqMessageId != null) return ProcessingResult.forMq(in.mqMessageId, shortJson, detailJson, originalJson);
-
-        if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
-            return ProcessingResult.forJms(in.jmsMessageId, shortJson, detailJson, originalJson);
+        ProcessingResult result;
+        if (in.mqMessageId != null) {
+            result = ProcessingResult.forMq(in.mqMessageId, shortJson, detailJson, originalJson);
+        } else if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
+            result = ProcessingResult.forJms(in.jmsMessageId, shortJson, detailJson, originalJson);
+        } else {
+            throw new IllegalStateException("MessageRecord has neither mqMessageId nor jmsMessageId. Cannot build ProcessingResult. " + in);
         }
 
-        throw new IllegalStateException("MessageRecord has neither mqMessageId nor jmsMessageId. Cannot build ProcessingResult. " + in);
+        result.setHeaders(in.headers);
+        result.setCreatedDttm(in.createdDttm);
+        result.setReadedDttm(in.readedDttm);
+        return result;
     }
 
     private String extractEventId(MessageRecord in) {
@@ -1157,3 +1163,4 @@ public final class MessageProcessingService {
         return text == null || text.isEmpty();
     }
 }
+

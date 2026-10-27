@@ -22,6 +22,10 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Enumeration;
+import java.util.Locale;
+import java.util.Base64;
 
 public class MqSource extends RichParallelSourceFunction<MessageRecord> {
 
@@ -109,7 +113,8 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         runThread = Thread.currentThread();
 
         MQGetMessageOptions gmo = new MQGetMessageOptions();
-        gmo.options = MQConstants.MQGMO_WAIT | MQConstants.MQGMO_FAIL_IF_QUIESCING;
+        gmo.options = MQConstants.MQGMO_WAIT | MQConstants.MQGMO_FAIL_IF_QUIESCING
+                | MQConstants.MQGMO_PROPERTIES_COMPATIBILITY;
         gmo.waitInterval = waitIntervalMs;
 
         long reconnectDelay = RECONNECT_INITIAL_DELAY_MS;
@@ -121,6 +126,7 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
 
                     MQMessage msg = new MQMessage();
                     queue.get(msg, gmo);
+                    Map<String, Object> headers = extractHeaders(msg);
 
                     reconnectDelay = RECONNECT_INITIAL_DELAY_MS;
 
@@ -146,7 +152,7 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
                     }
 
                     synchronized (ctx.getCheckpointLock()) {
-                        ctx.collect(MessageRecord.fromMq(msgIdBytes, body, createdDttm, readedDttm));
+                        ctx.collect(MessageRecord.fromMq(msgIdBytes, body, createdDttm, readedDttm, headers));
                     }
 
                 } catch (MQException e) {
@@ -300,6 +306,37 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         auditPublisher.publish(builder.build());
     }
 
+    /**
+     * Extract MQ properties for the Kafka audit without modifying the message payload.
+     * Do not put secrets or non-serializable MQ objects into Flink records.
+     */
+    private Map<String, Object> extractHeaders(MQMessage msg) {
+        Map<String, Object> headers = new LinkedHashMap<>();
+        try {
+            Enumeration<?> names = msg.getPropertyNames("%");
+            while (names.hasMoreElements()) {
+                String name = String.valueOf(names.nextElement());
+                Object value = msg.getObjectProperty(name);
+                if (value == null) continue;
+                String lower = name.toLowerCase(Locale.ROOT);
+                if (lower.contains("authorization") || lower.contains("password")
+                        || lower.contains("secret") || lower.contains("token")
+                        || lower.contains("credential")) {
+                    headers.put(name, "***");
+                } else if (value instanceof byte[] bytes) {
+                    headers.put(name, Base64.getEncoder().encodeToString(bytes));
+                } else if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+                    headers.put(name, value);
+                } else {
+                    headers.put(name, String.valueOf(value));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract IBM MQ message properties", e);
+        }
+        return headers;
+    }
+
     private Charset detectCharset(MQMessage msg) {
         int ccsid = msg.characterSet;
 
@@ -389,3 +426,4 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         return Instant.now().toEpochMilli();
     }
 }
+

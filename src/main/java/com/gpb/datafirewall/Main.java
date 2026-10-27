@@ -24,9 +24,12 @@ import org.apache.flink.util.Collector;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.gpb.datafirewall.util.DfwDateTimeFormatter;
+import com.gpb.datafirewall.util.HostnameUtils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.artemis.ArtemisConnectionUrlBuilder;
 import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.audit.AuditEventType;
@@ -506,6 +509,49 @@ public class Main {
                                 JsonNode requestNode = safeReadTree(mapper, result.getOriginalJson());
                                 JsonNode shortNode = safeReadTree(mapper, result.getShortJson());
                                 JsonNode detailNode = safeReadTree(mapper, result.getDetailJson());
+
+                                // Enrich only the Kafka audit copy of QUERY, not the MQ body or ANSWER.
+
+                                if (result.isMq() && requestNode != null && requestNode.isObject()) {
+                                    ObjectNode query = ((ObjectNode) requestNode).deepCopy();
+
+                                    // Сохраняем заголовки IBM MQ
+                                    if (result.getHeaders() != null) {
+                                        query.set("headers", mapper.valueToTree(result.getHeaders()));
+                                    }
+
+                                    // Заполняем поля по алгоритму ANSWER
+                                    query.put("dfw_hostname", HostnameUtils.getHostname());
+
+                                    query.put("dfw_action_dttm", Instant.now().toString());
+
+                                    query.put(
+                                            "dfw_created_dttm",
+                                            DfwDateTimeFormatter.formatEpochMillis(result.getCreatedDttm())
+                                    );
+
+                                    query.put(
+                                            "dfw_readed_dttm",
+                                            DfwDateTimeFormatter.formatEpochMillis(result.getReadedDttm())
+                                    );
+
+                                    // Получаем dataset_code из ANSWER,
+                                    // где он уже заполнен из controlArea
+                                    JsonNode answerData = shortNode == null
+                                            ? null
+                                            : shortNode.path("data");
+
+                                    JsonNode datasetCode = answerData == null
+                                            ? null
+                                            : answerData.get("dfw_dataset_code");
+
+                                    if (datasetCode != null && !datasetCode.isNull()) {
+                                        query.set("dfw_dataset_code", datasetCode.deepCopy());
+                                    }
+
+                                    requestNode = query;
+                                }
+
 
                                 AuditRecord audit = new AuditRecord(
                                         result.getEventId(),
