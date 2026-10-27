@@ -91,10 +91,23 @@ public final class AnswerBuilder {
         ObjectNode details = buildShortDetails(originalEvent, validation, messages);
         out.set("details", details);
 
-        out.set("errors", buildMessages(originalEvent,
-                messages.errorsByField(), messages.scopedInstanceKeys()));
-        out.set("warnings", buildMessages(originalEvent,
-                messages.warningsByField(), messages.scopedInstanceKeys()));
+        out.set(
+                "errors", 
+                buildMessages(
+                        originalEvent,
+                        messages.errorsByField(), 
+                        messages.scopedInstanceKeys()
+                )
+        );
+
+        out.set(
+                "warnings", 
+                buildMessages(
+                        originalEvent,
+                        messages.warningsByField(), 
+                        messages.scopedInstanceKeys()
+                )
+        );
 
         ObjectNode wrapped = mapper.createObjectNode();
         wrapped.set("data", out);
@@ -184,8 +197,12 @@ public final class AnswerBuilder {
                     );
 
             if ("documents".equals(blockName)) {
-                ArrayNode cardsErrors = buildClientIdCardErrors(blockNode, errorsByField,
-                        scopedInstanceKeys);
+                ArrayNode cardsErrors = 
+                        buildClientIdCardErrors(
+                                blockNode, 
+                                errorsByField,
+                                scopedInstanceKeys
+                        );
                 if (cardsErrors.size() > 0) blockErrors.set("clientIdCard", cardsErrors);
             }
 
