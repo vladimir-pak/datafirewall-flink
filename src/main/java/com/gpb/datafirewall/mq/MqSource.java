@@ -113,8 +113,11 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
         runThread = Thread.currentThread();
 
         MQGetMessageOptions gmo = new MQGetMessageOptions();
-        gmo.options = MQConstants.MQGMO_WAIT | MQConstants.MQGMO_FAIL_IF_QUIESCING
-                | MQConstants.MQGMO_PROPERTIES_COMPATIBILITY;
+
+        gmo.options = MQConstants.MQGMO_WAIT
+                | MQConstants.MQGMO_FAIL_IF_QUIESCING
+                | MQConstants.MQGMO_PROPERTIES_IN_HANDLE;
+
         gmo.waitInterval = waitIntervalMs;
 
         long reconnectDelay = RECONNECT_INITIAL_DELAY_MS;
@@ -143,6 +146,15 @@ public class MqSource extends RichParallelSourceFunction<MessageRecord> {
 
                     Charset cs = detectCharset(msg);
                     String body = new String(buf, cs);
+
+                    log.info(
+                            "MQ message: format={}, ccsid={}, bodyLength={}, startsWithJson={}, headersCount={}",
+                            msg.format,
+                            msg.characterSet,
+                            body.length(),
+                            body.stripLeading().startsWith("{"),
+                            headers.size()
+                    );
 
                     byte[] msgIdBytes = Arrays.copyOf(msg.messageId, msg.messageId.length);
 
