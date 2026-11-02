@@ -9,6 +9,7 @@ import com.gpb.datafirewall.transaction.BrokerConnectionAudit;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.concurrent.CancellationException;
 import javax.jms.BytesMessage;
 import javax.jms.Connection;
 import javax.jms.DeliveryMode;
@@ -117,6 +118,9 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
                 if (!id.equals(response.reply().getJmsCorrelationId())) {
                     throw new IllegalStateException("Reply correlation ID does not match JMS request " + id);
                 }
+            } catch (CancellationException | InterruptedException cancellation) {
+                // A stopping worker must not acknowledge an unfinished request.
+                throw cancellation;
             } catch (JMSException brokerFailure) {
                 // A JMS/session failure requires rollback, not acknowledgement.
                 throw brokerFailure;

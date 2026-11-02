@@ -30,7 +30,6 @@ import com.gpb.datafirewall.services.DynamicHandler;
 import com.gpb.datafirewall.bundle.CacheBundleEnvelope;
 import com.gpb.datafirewall.source.CacheSnapshotSource;
 import com.gpb.datafirewall.transaction.TransactionSettings;
-import com.gpb.datafirewall.transaction.TransactionPulseSource;
 import com.gpb.datafirewall.transaction.kafka.TransactionalRulesOperatorFactory;
 import com.gpb.datafirewall.transaction.artemis.ArtemisConnectionUrlBuilder;
 import com.gpb.datafirewall.transaction.kafka.BestEffortKafkaAuditSink;
@@ -58,7 +57,7 @@ public class Main {
     private static final String DEFAULT_ARTEMIS_BROKER_URL = "tcp://localhost:61616";
     private static final String DEFAULT_ARTEMIS_IN_QUEUE = "IN.Q";
     private static final String DEFAULT_ARTEMIS_OUT_QUEUE = "OUT.Q";
-    private static final long DEFAULT_ARTEMIS_RECEIVE_TIMEOUT_MS = 1000L;
+    private static final long DEFAULT_ARTEMIS_RECEIVE_TIMEOUT_MS = 5000L;
 
     @SuppressWarnings("deprecation")
     public static void main(String[] args) throws Exception {
@@ -309,7 +308,7 @@ public class Main {
             .setParallelism(1);
 
         // Independent broker transactions: a worker owns its own MQ manager/JMS session.
-        // Kafka cache updates are delivered over the second input and prepared off-mailbox.
+        // Kafka cache updates are the only Flink input and are prepared off-mailbox.
         TransactionSettings txSettings = new TransactionSettings(
                 backend,
                 cfg.mqHost(), cfg.mqPort(), cfg.mqChannel(), cfg.mqQmgr(),
@@ -320,18 +319,15 @@ public class Main {
                 mqTlsEnabled, mqTlsCipherSuite, mqTrustStore, mqTrustStorePassword,
                 mqReplyXFrom, mqReplyXServiceId, artemisBrokerUrl,
                 "mq".equals(backend)
-                        ? pt.getInt("mq.wait.interval.ms", 100)
+                        ? pt.getInt("mq.wait.interval.ms", 5000)
                         : artemisReceiveTimeoutMs);
 
-        DataStream<Long> pulses = env.addSource(
-                        new TransactionPulseSource(pt.getLong("transaction.pulse.interval.ms", 100L)),
-                        "transaction-pulse")
-                .name("transaction-pulse")
-                .uid("transaction-pulse-v1")
-                .setParallelism(processParallelism);
+        if (pt.has("transaction.pulse.interval.ms")) {
+            log.warn("[MAIN] transaction.pulse.interval.ms is ignored: blocking broker receivers replaced pulses");
+        }
 
-        SingleOutputStreamOperator<ProcessingResult> processed = pulses
-                .connect(cacheUpdates.broadcast())
+        SingleOutputStreamOperator<ProcessingResult> processed = cacheUpdates
+                .broadcast()
                 .transform(
                         "transactional-broker-worker",
                         Types.POJO(ProcessingResult.class),

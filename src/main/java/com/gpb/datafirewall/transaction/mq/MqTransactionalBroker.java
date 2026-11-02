@@ -15,6 +15,7 @@ import com.ibm.mq.MQQueueManager;
 import com.ibm.mq.constants.MQConstants;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.concurrent.CancellationException;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
@@ -152,6 +153,9 @@ public final class MqTransactionalBroker implements TransactionBroker {
                         || !Arrays.equals(result.reply().getMqCorrelationId(), received.messageId)) {
                     throw new IllegalStateException("Reply correlation ID does not match MQ request");
                 }
+            } catch (CancellationException | InterruptedException cancellation) {
+                // A stopping worker must not acknowledge an unfinished request.
+                throw cancellation;
             } catch (MQException brokerFailure) {
                 // A broker I/O error must never be acknowledged as a business failure.
                 throw brokerFailure;

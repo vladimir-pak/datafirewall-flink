@@ -5,7 +5,10 @@ import com.gpb.datafirewall.services.MessageRecord;
 /** Every call reads at most one message and finishes exactly one local broker transaction. */
 public interface TransactionBroker extends AutoCloseable {
 
-    /** On a business processing error the original request is moved to the broker error queue atomically. */
+    /**
+     * Blocking receive and one local transaction. Processing failures are logged and committed
+     * without reply; cancellation and broker failures roll back. No error queue is used.
+     */
     TransactionalReply poll(Processor processor) throws Exception;
 
     @FunctionalInterface

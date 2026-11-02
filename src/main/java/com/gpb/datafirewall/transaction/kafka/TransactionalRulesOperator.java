@@ -8,15 +8,11 @@ import com.gpb.datafirewall.dto.ProcessingResult;
 import com.gpb.datafirewall.services.DynamicHandler;
 import com.gpb.datafirewall.services.PreparedRuntime;
 import com.gpb.datafirewall.services.RulesProcessingFunction;
-import com.gpb.datafirewall.transaction.BrokerReconnectBackoff;
-import com.gpb.datafirewall.transaction.TransactionBroker;
+import com.gpb.datafirewall.transaction.BrokerWorker;
 import com.gpb.datafirewall.transaction.TransactionSettings;
 import com.gpb.datafirewall.transaction.TransactionalReply;
 
 import java.util.List;
-import javax.jms.JMSException;
-import javax.jms.JMSRuntimeException;
-import com.ibm.mq.MQException;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,28 +25,29 @@ import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerial
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.streaming.api.operators.AbstractUdfStreamOperator;
-import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.api.java.utils.ParameterTool;
+import java.util.Map;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * One local broker transaction per poll. Cache compilation runs off-mailbox; the whole
- * prepared runtime is activated in the mailbox between messages. Kafka is never called
- * from this operator's broker transaction. The output is a best-effort post-commit event.
+ * Cache input and managed state run on the mailbox. A dedicated broker worker owns
+ * blocking receive, processing, reply and commit. Each request captures one immutable
+ * runtime. Only bounded best-effort post-commit audit is handed back to the mailbox.
  */
 public final class TransactionalRulesOperator
         extends AbstractUdfStreamOperator<ProcessingResult, RulesProcessingFunction>
-        implements TwoInputStreamOperator<Long, CacheBundleEnvelope, ProcessingResult> {
+        implements OneInputStreamOperator<CacheBundleEnvelope, ProcessingResult> {
 
     private static final Logger log = LoggerFactory.getLogger(TransactionalRulesOperator.class);
 
     private final MailboxExecutor mailbox;
     private final TransactionSettings settings;
     private final AuditConfig auditConfig;
-    private transient TransactionBroker broker;
-    // All network reconnects are owned by the mailbox; never store a connection in Flink state.
-    private transient BrokerReconnectBackoff brokerBackoff;
+    private transient volatile BrokerWorker brokerWorker;
+    private transient MailboxAuditBuffer auditBuffer;
     private transient ExecutorService prepareExecutor;
     private transient ListState<byte[]> activeState;
     private transient ListState<byte[]> requestedState;
@@ -154,72 +151,54 @@ public final class TransactionalRulesOperator
                     CacheBundleStateSerializer.decode(activeImage.bytes));
             userFunction.activate(withSelectedHandler(restored));
         }
-        brokerBackoff = new BrokerReconnectBackoff(5_000L, 60_000L);
+        var global = getRuntimeContext().getExecutionConfig().getGlobalJobParameters();
+        ParameterTool pt = ParameterTool.fromMap(global == null ? Map.of() : global.toMap());
+        auditBuffer = new MailboxAuditBuffer(mailbox,
+                result -> output.collect(new StreamRecord<>(result)), this::failAsync,
+                pt.getInt("transaction.audit.buffer.max-records", 1024),
+                pt.getLong("transaction.audit.buffer.max-bytes", 16L * 1024 * 1024));
+        startBrokerIfReady();
         startNextPreparation();
         getRuntimeContext().getMetricGroup().gauge("brokerCacheReady", () -> ready() ? 1 : 0);
         getRuntimeContext().getMetricGroup().gauge("brokerCachePreparing", () -> building == null ? 0 : 1);
-        getRuntimeContext().getMetricGroup().gauge("brokerConnected", () -> broker == null ? 0 : 1);
+        getRuntimeContext().getMetricGroup().gauge("brokerConnected",
+                () -> brokerWorker != null && brokerWorker.isConnected() ? 1 : 0);
+        getRuntimeContext().getMetricGroup().gauge("brokerProcessing",
+                () -> brokerWorker != null && brokerWorker.isProcessing() ? 1 : 0);
+        getRuntimeContext().getMetricGroup().gauge("brokerRepliesCommitted",
+                () -> brokerWorker == null ? 0L : brokerWorker.repliesCommitted());
+        getRuntimeContext().getMetricGroup().gauge("brokerAuditPending", auditBuffer::size);
+        getRuntimeContext().getMetricGroup().gauge("brokerAuditPendingBytes", auditBuffer::retainedBytes);
+        getRuntimeContext().getMetricGroup().gauge("brokerAuditDropped", auditBuffer::dropped);
     }
 
     private boolean ready() {
         return userFunction.cacheReady();
     }
 
-    /** First input is only a poll trigger, not an MQ message or acknowledgement. */
-    @Override
-    public void processElement1(StreamRecord<Long> tick) throws Exception {
-        if (closed || !ready() || !brokerBackoff.canAttempt(System.nanoTime())) return;
-        if (broker == null) {
-            try {
-                broker = settings.connect(
-                        auditConfig,
-                        getRuntimeContext().getIndexOfThisSubtask(),
-                        getRuntimeContext().getNumberOfParallelSubtasks());
-                brokerBackoff.onSuccess();
-                log.info("Transactional broker connected, subtask={}",
-                        getRuntimeContext().getIndexOfThisSubtask());
-            } catch (MQException | JMSException | JMSRuntimeException failure) {
-                brokerConnectionLost(failure);
-                return;
-            }
-        }
-        try {
-            TransactionalReply committed = broker.poll(record -> {
-                ProcessingResult[] reply = new ProcessingResult[1];
-                ProcessingResult[] audit = new ProcessingResult[1];
-                // process() captures exactly one PreparedRuntime for the whole request.
-                userFunction.process(record, result -> reply[0] = result, result -> audit[0] = result);
-                return new TransactionalReply(reply[0], audit[0]);
-            });
-            if (committed != null && committed.audit() != null) {
-                // Broker commit happened already; audit is independent and best effort.
-                output.collect(new StreamRecord<>(committed.audit()));
-            }
-        } catch (MQException | JMSException | JMSRuntimeException failure) {
-            // Uncommitted requests are rolled back by the broker on session disconnect.
-            // A commit whose reply was lost is ambiguous; duplicates are possible.
-            brokerConnectionLost(failure);
-        }
+    private void startBrokerIfReady() {
+        if (closed || brokerWorker != null || !ready()) return;
+        int subtask = getRuntimeContext().getIndexOfThisSubtask();
+        int parallelism = getRuntimeContext().getNumberOfParallelSubtasks();
+        brokerWorker = new BrokerWorker("broker-receiver-" + subtask + "-"
+                + getRuntimeContext().getAttemptNumber(),
+                () -> settings.connect(auditConfig, subtask, parallelism), record -> {
+                    ProcessingResult[] reply = new ProcessingResult[1];
+                    ProcessingResult[] audit = new ProcessingResult[1];
+                    // One receiver processes serially. process() captures a complete runtime once.
+                    userFunction.process(record, result -> reply[0] = result, result -> audit[0] = result);
+                    return new TransactionalReply(reply[0], audit[0]);
+                }, auditBuffer::offer, this::failAsync);
+        brokerWorker.start();
     }
 
-    private void brokerConnectionLost(Exception failure) {
-        if (broker != null) {
-            try {
-                broker.close();
-            } catch (Exception closeFailure) {
-                log.warn("Failed to release broker connection after network error", closeFailure);
-            } finally {
-                broker = null;
-            }
-        }
-        long delay = brokerBackoff.onFailure(System.nanoTime());
-        log.warn("Broker unavailable for subtask={}, next connection attempt in {} ms: {}",
-                getRuntimeContext().getIndexOfThisSubtask(), delay, failure.toString());
+    private void failAsync(Throwable failure) {
+        if (!closed) getContainingTask().handleAsyncException("Transactional broker worker failed", failure);
     }
 
-    /** Second input is completely independent of broker transactions. */
+    /** The only Flink input contains actual cache updates, never poll ticks. */
     @Override
-    public void processElement2(StreamRecord<CacheBundleEnvelope> record) {
+    public void processElement(StreamRecord<CacheBundleEnvelope> record) {
         CacheBundleEnvelope update = record.getValue();
         if (update == null) return;
         update.validateHeader();
@@ -298,6 +277,7 @@ public final class TransactionalRulesOperator
             }
             userFunction.activate(withSelectedHandler(prepared));
             activeImage = target;
+            startBrokerIfReady();
             log.info("Activated rules={} politics={} handler={} subtask={}",
                     target.rules, target.politics, userFunction.currentRuntime().handler(),
                     getRuntimeContext().getIndexOfThisSubtask());
@@ -318,8 +298,14 @@ public final class TransactionalRulesOperator
     public void close() throws Exception {
         closed = true;
         if (prepareExecutor != null) prepareExecutor.shutdownNow();
+        if (auditBuffer != null) auditBuffer.close();
         try {
-            if (broker != null) broker.close();
+            if (brokerWorker != null) {
+                brokerWorker.close();
+                if (!brokerWorker.awaitTermination(Math.min(settings.receiveTimeoutMs() + 1000L, 10_000L))) {
+                    log.warn("Broker worker is still stopping; its owner will rollback/close when I/O returns");
+                }
+            }
         } finally {
             super.close();
         }

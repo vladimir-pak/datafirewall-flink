@@ -15,7 +15,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 
-/** Background preparation is pure; publication and processing run on the operator mailbox. */
+/** Preparation runs in the cache executor; publication is atomic; one broker thread processes requests. */
 public final class RulesProcessingFunction extends AbstractRichFunction {
     private static final Logger log = LoggerFactory.getLogger(RulesProcessingFunction.class);
     public static final OutputTag<ProcessingResult> FLINK_AUDIT_RESULT_TAG =
@@ -144,7 +144,7 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
                 getRuntimeContext().getIndexOfThisSubtask(), next);
     }
 
-    /** Runs on the mailbox, between messages. One atomic publication for the complete runtime. */
+    /** Mailbox publication. An in-flight message retains its previously captured complete runtime. */
     public void activate(PreparedRuntime runtime) {
         cacheRuntime.activate(runtime);
         log.info("[CACHE] subtask={} atomically activated rules={} politics={} handler={}",

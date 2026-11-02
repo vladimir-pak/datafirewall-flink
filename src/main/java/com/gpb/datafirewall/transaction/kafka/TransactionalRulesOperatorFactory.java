@@ -10,12 +10,12 @@ import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
-import org.apache.flink.streaming.api.operators.TwoInputStreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 
 /** Each parallel subtask owns exactly one local MQ/JMS transaction session. */
 public final class TransactionalRulesOperatorFactory
         extends AbstractStreamOperatorFactory<ProcessingResult>
-        implements TwoInputStreamOperatorFactory<Long, CacheBundleEnvelope, ProcessingResult> {
+        implements OneInputStreamOperatorFactory<CacheBundleEnvelope, ProcessingResult> {
 
     private final String jwt;
     private final VaultSecretsDto secrets;

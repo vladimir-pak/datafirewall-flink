@@ -2,7 +2,7 @@ package com.gpb.datafirewall.transaction;
 
 import java.util.concurrent.TimeUnit;
 
-/** Simple bounded exponential backoff; mailbox owned, no sleeping or worker threads. */
+/** Simple bounded exponential backoff; owned by one receiver thread. */
 public final class BrokerReconnectBackoff {
     private final long initialMs;
     private final long maxMs;
