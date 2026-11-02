@@ -4,7 +4,7 @@ import com.gpb.datafirewall.audit.*;
 import com.gpb.datafirewall.services.MessageRecord;
 import org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -13,7 +13,7 @@ import java.lang.IllegalStateException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
-public class ArtemisSource extends RichSourceFunction<MessageRecord> {
+public class ArtemisSource extends RichParallelSourceFunction<MessageRecord> {
 
     private static final Logger log = LoggerFactory.getLogger(ArtemisSource.class);
     private static final long RECONNECT_INITIAL_MS = 5_000L;

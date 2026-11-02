@@ -1,22 +1,15 @@
 package com.gpb.datafirewall;
 
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
-import org.apache.flink.api.common.time.Time;
-import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
-import org.apache.flink.connector.kafka.source.KafkaSource;
-import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.streaming.api.CheckpointingMode;
-import org.apache.flink.streaming.api.datastream.BroadcastStream;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
@@ -36,19 +29,21 @@ import com.gpb.datafirewall.audit.AuditEventType;
 import com.gpb.datafirewall.audit.AuditPropertiesUtil;
 import com.gpb.datafirewall.audit.CefAuditEvent;
 import com.gpb.datafirewall.audit.CefAuditPublisher;
+import com.gpb.datafirewall.bundle.CacheBundleState;
+import com.gpb.datafirewall.bundle.CacheBundleStateTypeInfo;
 import com.gpb.datafirewall.artemis.ArtemisSink;
 import com.gpb.datafirewall.artemis.ArtemisSource;
 import com.gpb.datafirewall.config.JobConfig;
 import com.gpb.datafirewall.dto.AuditRecord;
 import com.gpb.datafirewall.dto.ProcessingResult;
-import com.gpb.datafirewall.kafka.CacheUpdateEvent;
-import com.gpb.datafirewall.kafka.CacheUpdateEventDeserializationSchema;
 import com.gpb.datafirewall.mq.MqSink;
 import com.gpb.datafirewall.mq.MqSource;
 import com.gpb.datafirewall.services.DynamicHandler;
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.services.MessageReply;
-import com.gpb.datafirewall.services.RulesReloadBroadcastProcessFunction;
+import com.gpb.datafirewall.services.RulesProcessingFunction;
+import com.gpb.datafirewall.coordination.RulesProcessingOperatorFactory;
+import com.gpb.datafirewall.source.CacheSnapshotSource;
 import com.gpb.datafirewall.vault.VaultClient;
 import com.gpb.datafirewall.vault.VaultClientConfig;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
@@ -70,14 +65,6 @@ public class Main {
     // private static final String DEFAULT_DETAIL_KAFKA_TOPIC = "detail-answer";
     private static final String DEFAULT_MESSAGING_BACKEND = "mq";
     private static final int DEFAULT_PARALLELISM = 1;
-    private static final int DEFAULT_RESTART_ATTEMPTS = Integer.MAX_VALUE;
-    private static final long DEFAULT_RESTART_DELAY_MS = 30_000L;
-
-    private static final long DEFAULT_CHECKPOINT_INTERVAL_MS = 5000L;
-    private static final long DEFAULT_CHECKPOINT_TIMEOUT_MS = 60000L;
-    private static final long DEFAULT_MIN_PAUSE_BETWEEN_CHECKPOINTS_MS = 1000L;
-    private static final int DEFAULT_MAX_CONCURRENT_CHECKPOINTS = 1;
-
     private static final String DEFAULT_ARTEMIS_BROKER_URL = "tcp://localhost:61616";
     private static final String DEFAULT_ARTEMIS_IN_QUEUE = "IN.Q";
     private static final String DEFAULT_ARTEMIS_OUT_QUEUE = "OUT.Q";
@@ -87,74 +74,55 @@ public class Main {
     public static void main(String[] args) throws Exception {
         ParameterTool pt = loadParameters(args);
 
+        // Flink creates the execution environment using the cluster's config.yaml.
+        // Never override restart strategy or checkpoint settings from job.properties.
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        logIgnoredLegacyFlinkProperties(pt);
+        env.getConfig().setGlobalJobParameters(pt);
+
+        final int environmentParallelism = env.getParallelism() > 0
+                ? env.getParallelism() : DEFAULT_PARALLELISM;
+        final int parallelism = positiveParallelism(
+                "parallelism", pt.getInt("parallelism", environmentParallelism));
+        if (pt.has("parallelism")) {
+            env.setParallelism(parallelism);
+        }
+
+        final int sourceParallelism = positiveParallelism(
+                "parallelism.source", pt.getInt("parallelism.source", parallelism));
+        final int processParallelism = positiveParallelism(
+                "parallelism.process", pt.getInt("parallelism.process", parallelism));
+        final int sinkParallelism = positiveParallelism(
+                "parallelism.sink", pt.getInt("parallelism.sink", parallelism));
+        final int auditParallelism = positiveParallelism(
+                "parallelism.audit", pt.getInt("parallelism.audit", processParallelism));
+        // Set audit.slot-sharing-group only when audit needs dedicated slot capacity.
+        final String auditSlotSharingGroup = pt.get("audit.slot-sharing-group", "").trim();
+        final boolean checkpointingEnabled = env.getCheckpointConfig().isCheckpointingEnabled();
+        if (!checkpointingEnabled
+                || env.getCheckpointConfig().getCheckpointingConsistencyMode()
+                    != org.apache.flink.core.execution.CheckpointingMode.EXACTLY_ONCE
+                || env.getCheckpointConfig().getMaxConcurrentCheckpoints() != 1) {
+            throw new IllegalStateException("Coordinated cache activation requires checkpointing, "
+                    + "EXACTLY_ONCE mode and max-concurrent-checkpoints=1 in Flink configuration");
+        }
+
+
+        log.info("[MAIN] Flink cluster checkpointing: enabled={}, intervalMs={}, timeoutMs={}, mode={}, " +
+                        "maxConcurrent={}, minPauseMs={}",
+                checkpointingEnabled,
+                env.getCheckpointConfig().getCheckpointInterval(),
+                env.getCheckpointConfig().getCheckpointTimeout(),
+                env.getCheckpointConfig().getCheckpointingConsistencyMode(),
+                env.getCheckpointConfig().getMaxConcurrentCheckpoints(),
+                env.getCheckpointConfig().getMinPauseBetweenCheckpoints());
+        log.info("[MAIN] parallelism: default={}, source={}, process={}, sink={}, audit={}, auditSlotSharingGroup={}",
+                parallelism, sourceParallelism, processParallelism, sinkParallelism, auditParallelism,
+                auditSlotSharingGroup.isBlank() ? "<inherited>" : auditSlotSharingGroup);
+
         VaultSecretsDto vaultSecrets = VaultClient.loadSecrets(
                 VaultClientConfig.fromArgs(pt)
         );
-
-        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.getConfig().setGlobalJobParameters(pt);
-
-        int parallelism = pt.getInt("parallelism", DEFAULT_PARALLELISM);
-        env.setParallelism(parallelism);
-
-        int restartAttempts = pt.getInt(
-                "flink.restart.attempts",
-                DEFAULT_RESTART_ATTEMPTS
-        );
-
-        long restartDelayMs = pt.getLong(
-                "flink.restart.delay.ms",
-                DEFAULT_RESTART_DELAY_MS
-        );
-
-        env.setRestartStrategy(
-                RestartStrategies.fixedDelayRestart(
-                        restartAttempts,
-                        Time.milliseconds(restartDelayMs)
-                )
-        );
-
-        log.info(
-                "[MAIN] restart strategy: fixed delay, attempts={}, delayMs={}",
-                restartAttempts,
-                restartDelayMs
-        );
-
-        int sourceParallelism = pt.getInt("parallelism.source", parallelism);
-        int processParallelism = pt.getInt("parallelism.process", parallelism);
-        int sinkParallelism = pt.getInt("parallelism.sink", parallelism);
-
-        // boolean detailKafkaEnabled = pt.getBoolean("detail.kafka.enabled", false);
-        boolean checkpointingEnabled = pt.getBoolean("flink.checkpoint.enabled", true);
-
-        if (checkpointingEnabled) {
-            long checkpointInterval = pt.getLong("flink.checkpoint.interval.ms", DEFAULT_CHECKPOINT_INTERVAL_MS);
-            long checkpointTimeout = pt.getLong("flink.checkpoint.timeout.ms", DEFAULT_CHECKPOINT_TIMEOUT_MS);
-            long minPauseBetweenCheckpoints = pt.getLong(
-                    "flink.checkpoint.min.pause.ms",
-                    DEFAULT_MIN_PAUSE_BETWEEN_CHECKPOINTS_MS
-            );
-            int maxConcurrentCheckpoints = pt.getInt(
-                    "flink.checkpoint.max.concurrent",
-                    DEFAULT_MAX_CONCURRENT_CHECKPOINTS
-            );
-
-            env.enableCheckpointing(checkpointInterval);
-            env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.AT_LEAST_ONCE);
-            env.getCheckpointConfig().setCheckpointTimeout(checkpointTimeout);
-            env.getCheckpointConfig().setMinPauseBetweenCheckpoints(minPauseBetweenCheckpoints);
-            env.getCheckpointConfig().setMaxConcurrentCheckpoints(maxConcurrentCheckpoints);
-
-            log.info(
-                    "[MAIN] checkpointing enabled: intervalMs={}, timeoutMs={}, minPauseMs={}, maxConcurrent={}",
-                    checkpointInterval,
-                    checkpointTimeout,
-                    minPauseBetweenCheckpoints,
-                    maxConcurrentCheckpoints
-            );
-        } else {
-            log.info("[MAIN] checkpointing disabled");
-        }
 
         String backend = pt.get("messaging.backend", DEFAULT_MESSAGING_BACKEND).trim().toLowerCase();
         DynamicHandler startupHandler = DynamicHandler.from(
@@ -348,53 +316,82 @@ public class Main {
         Properties auditKafkaClientProps = buildKafkaClientProperties(pt, "audit.kafka", vaultSecrets);
 
         try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
-            publishKafkaConnectionCheck(jobAuditPublisher, cefAuditConfig, "rules-kafka", kafkaBootstrap, kafkaClientProps, vaultSecrets.kafkaUser());
-            publishKafkaConnectionCheck(jobAuditPublisher, cefAuditConfig, "cef-audit-kafka", cefAuditConfig.kafkaBootstrap(), cefAuditConfig.toKafkaProducerProperties(), vaultSecrets.kafkaUser());
+
+            publishKafkaConnectionCheck(
+                    jobAuditPublisher, 
+                    cefAuditConfig, 
+                    "rules-kafka", 
+                    kafkaBootstrap, 
+                    kafkaClientProps, 
+                    vaultSecrets.kafkaUser()
+            );
+
+            publishKafkaConnectionCheck(
+                    jobAuditPublisher, 
+                    cefAuditConfig, 
+                    "cef-audit-kafka", 
+                    cefAuditConfig.kafkaBootstrap(), 
+                    cefAuditConfig.toKafkaProducerProperties(), 
+                    vaultSecrets.kafkaUser()
+            );
+
             jobAuditPublisher.publish(
-                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_RULES_SOURCE_CONFIGURED))
-                            .put("bootstrap", kafkaBootstrap)
-                            .put("protocol", String.valueOf(kafkaClientProps.getOrDefault("security.protocol", "TCP")))
-                            .put("connectionUser", vaultSecrets.kafkaUser())
-                            .put("topic", kafkaTopic)
-                            .put("groupId", kafkaGroup)
-                            .build()
+                    cefAuditConfig.enrich(
+                            CefAuditEvent.builder(
+                                    AuditEventType.KAFKA_RULES_SOURCE_CONFIGURED
+                            )
+                    )
+                    .put("bootstrap", kafkaBootstrap)
+                    .put("protocol", String.valueOf(
+                            kafkaClientProps.getOrDefault(
+                                    "security.protocol", 
+                                    "TCP"
+                            )
+                    ))
+                    .put("connectionUser", vaultSecrets.kafkaUser())
+                    .put("topic", kafkaTopic)
+                    .put("groupId", kafkaGroup)
+                    .build()
             );
         }
 
-        KafkaSource<CacheUpdateEvent> kafkaSource = KafkaSource.<CacheUpdateEvent>builder()
-                .setBootstrapServers(kafkaBootstrap)
-                .setTopics(kafkaTopic)
-                .setGroupId(kafkaGroup)
-                .setStartingOffsets(OffsetsInitializer.latest())
-                .setProperties(kafkaClientProps)
-                .setValueOnlyDeserializer(new CacheUpdateEventDeserializationSchema())
-                .build();
+        // Источник полных снимков кэша
+        DataStream<CacheBundleState> updates = env.addSource(
+                new CacheSnapshotSource(
+                        pt,
+                        vaultSecrets.jwt(),
+                        kafkaClientProps,
+                        kafkaBootstrap,
+                        kafkaTopic,
+                        kafkaGroup
+                ),
+                "cache-snapshot-source",
+                CacheBundleStateTypeInfo.INSTANCE
+            )
+            .name("cache-snapshot-source")
+            .uid("cache-snapshot-source-v1")
+            .setParallelism(1);
 
-        DataStream<CacheUpdateEvent> updates = env
-                .fromSource(kafkaSource, WatermarkStrategy.noWatermarks(), "rules-kafka")
-                .name("rules-kafka")
-                .uid("rules-kafka-source")
-                .setParallelism(1);
-
-        MapStateDescriptor<String, CacheUpdateEvent> bcDesc =
-                new MapStateDescriptor<>(
-                        "cache-update-broadcast",
-                        Types.STRING,
-                        Types.POJO(CacheUpdateEvent.class)
-                );
-
-        BroadcastStream<CacheUpdateEvent> bcUpdates = updates.broadcast(bcDesc);
-
+        // Полный кэш сохраняется в checkpoint в источнике и в координаторе активации.
+        // Единый поток предложений поступает в subtask 0; координатор подготавливает каждого worker.
         SingleOutputStreamOperator<ProcessingResult> processed = inputStream
-                .connect(bcUpdates)
-                .process(new RulesReloadBroadcastProcessFunction(bcDesc, vaultSecrets.jwt(), vaultSecrets))
-                .name("process-with-rules-reload")
-                .uid("process-with-rules-reload")
+                .connect(updates.global())
+                .transform(
+                        "process-with-coordinated-cache", 
+                        Types.POJO(ProcessingResult.class),
+                        new RulesProcessingOperatorFactory(
+                                vaultSecrets.jwt(), 
+                                vaultSecrets,
+                                pt.getInt("cache.activation.max-pending-messages", 100000),
+                                pt.getLong("cache.activation.max-pending-bytes", 64L * 1024 * 1024)
+                        )
+                )
+                .uid("process-with-cache-bundle-v1")
                 .setParallelism(processParallelism);
 
         DataStream<ProcessingResult> flinkAuditResults =
                 processed.getSideOutput(
-                        RulesReloadBroadcastProcessFunction.FLINK_AUDIT_RESULT_TAG
+                        RulesProcessingFunction.FLINK_AUDIT_RESULT_TAG
                 );
 
         if ("mq".equals(backend)) {
@@ -408,7 +405,7 @@ public class Main {
 
                             String shortJson = result.getShortJson();
                             if (shortJson == null || shortJson.isBlank()) {
-                                return;
+                                throw new IllegalStateException("Missing reply eventId=" + result.getEventId());
                             }
 
                             out.collect(MessageReply.forMq(result.getMqCorrelationId(), shortJson));
@@ -451,7 +448,7 @@ public class Main {
 
                             String shortJson = result.getShortJson();
                             if (shortJson == null || shortJson.isBlank()) {
-                                return;
+                                throw new IllegalStateException("Missing reply eventId=" + result.getEventId());
                             }
 
                             out.collect(MessageReply.forJms(result.getJmsCorrelationId(), shortJson));
@@ -487,10 +484,14 @@ public class Main {
                                     .setValueSerializationSchema(new SimpleStringSchema())
                                     .build()
                     )
-                    .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                    .setDeliveryGuarantee(
+                        checkpointingEnabled
+                            ? DeliveryGuarantee.AT_LEAST_ONCE
+                            : DeliveryGuarantee.NONE
+                    )
                     .build();
 
-            flinkAuditResults
+            SingleOutputStreamOperator<String> auditRecords = flinkAuditResults
                     .flatMap(new RichFlatMapFunction<ProcessingResult, String>() {
                         private transient ObjectMapper mapper;
 
@@ -564,16 +565,32 @@ public class Main {
 
                                 out.collect(mapper.writeValueAsString(audit));
                             } catch (Exception e) {
-                                log.warn("Failed to serialize Flink audit record", e);
+                                throw new IllegalStateException("Failed to serialize Flink audit eventId=" + result.getEventId(), e);
                             }
                         }
                     })
                     .returns(Types.STRING)
                     .name("build-flink-audit-record-json")
                     .uid("build-flink-audit-record-json")
+                    .setParallelism(auditParallelism)
+                    // This is a separate Flink task / task thread from rules processing.
+                    // Note: this is NOT a durable queue and doesn't eliminate backpressure.
+                    .startNewChain();
+
+            // Both audit operators stay in the same slot sharing group by default.
+            // Optionally isolate them in dedicated slots, at the cost of extra slots.
+            if (!auditSlotSharingGroup.isBlank()) {
+                auditRecords.slotSharingGroup(auditSlotSharingGroup);
+            }
+
+            DataStreamSink<String> auditSink = auditRecords
                     .sinkTo(auditKafkaSink)
                     .name("flink-audit-kafka-sink")
-                    .uid("flink-audit-kafka-sink");
+                    .uid("flink-audit-kafka-sink")
+                    .setParallelism(auditParallelism);
+            if (!auditSlotSharingGroup.isBlank()) {
+                auditSink.slotSharingGroup(auditSlotSharingGroup);
+            }
 
             log.info("[MAIN] Flink audit Kafka sink enabled: bootstrap={}, topic={}",
                     auditKafkaBootstrap, auditKafkaTopic);
@@ -610,6 +627,25 @@ public class Main {
         }
     }
 
+    private static int positiveParallelism(String key, int value) {
+        if (value < 1) {
+            throw new IllegalArgumentException(key + " must be >= 1, got " + value);
+        }
+        return value;
+    }
+
+    private static void logIgnoredLegacyFlinkProperties(ParameterTool pt) {
+        for (String property : new String[]{
+                "flink.restart.attempts", "flink.restart.delay.ms",
+                "flink.checkpoint.enabled", "flink.checkpoint.interval.ms",
+                "flink.checkpoint.timeout.ms", "flink.checkpoint.min.pause.ms",
+                "flink.checkpoint.max.concurrent"
+        }) {
+            if (pt.has(property)) {
+                log.warn("[MAIN] Ignoring legacy job property '{}': configure Flink in config.yaml instead", property);
+            }
+        }
+    }
 
     private static void publishJobPropertiesAudit(
             ParameterTool pt,
@@ -979,7 +1015,7 @@ public class Main {
         try {
             return mapper.readTree(json);
         } catch (Exception e) {
-            return mapper.getNodeFactory().textNode(json);
+            throw new IllegalStateException("Invalid JSON in processing audit", e);
         }
     }
 }

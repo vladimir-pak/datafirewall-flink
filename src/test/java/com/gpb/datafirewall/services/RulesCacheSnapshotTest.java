@@ -7,7 +7,6 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 
 class RulesCacheSnapshotTest {
 
@@ -69,11 +68,12 @@ class RulesCacheSnapshotTest {
                 "20"
         );
 
-        assertSame(initial.compiledRules(), politicsV2.compiledRules());
+        // Snapshot constructors defensively copy maps; values, not container identity, are preserved.
+        assertEquals(initial.compiledRules(), politicsV2.compiledRules());
         assertEquals("1", politicsV2.compiledRulesVersion());
         assertEquals("area-v2", politicsV2.controlAreaByDataset("dataset-v2"));
         assertEquals("20", politicsV2.politicsVersion());
-        assertSame(initial.referencedFieldsByRule(), politicsV2.referencedFieldsByRule());
+        assertEquals(initial.referencedFieldsByRule(), politicsV2.referencedFieldsByRule());
 
         // Rule2 ещё не загружено: для совместимости со старой версией
         // snapshot оставляет хотя бы якорный атрибут politics-кэша.
@@ -84,8 +84,8 @@ class RulesCacheSnapshotTest {
                 "2"
         );
 
-        assertSame(politicsV2.dataset2ControlArea(), rulesV2.dataset2ControlArea());
-        assertSame(politicsV2.controlAreaRules(), rulesV2.controlAreaRules());
+        assertEquals(politicsV2.dataset2ControlArea(), rulesV2.dataset2ControlArea());
+        assertEquals(politicsV2.controlAreaRules(), rulesV2.controlAreaRules());
         assertEquals("2", rulesV2.compiledRulesVersion());
         assertEquals("20", rulesV2.politicsVersion());
         assertEquals("area-v2", rulesV2.controlAreaByDataset("dataset-v2"));

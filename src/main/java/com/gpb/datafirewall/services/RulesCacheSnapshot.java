@@ -34,6 +34,7 @@ public final class RulesCacheSnapshot {
     private final Map<String, String> typeDulMapping;
     private final String compiledRulesVersion;
     private final String politicsVersion;
+    private final long cacheEpoch;
 
     private final Map<String, Set<String>> referencedFieldsByRule;
     private final Map<String, Set<String>> referencedFieldsByControlArea;
@@ -61,6 +62,36 @@ public final class RulesCacheSnapshot {
                 typeDulMapping,
                 compiledRulesVersion,
                 politicsVersion,
+                -1L,
+                null
+        );
+    }
+
+    public RulesCacheSnapshot(
+            Map<String, Rule> compiledRules,
+            Map<String, String> dataset2ControlArea,
+            Map<String, Map<String, Set<String>>> controlAreaRules,
+            Map<String, Map<String, String>> errorMessagesByRule,
+            Map<String, Set<String>> excludedBlocksByControlArea,
+            Map<String, Boolean> filterFlagsByControlArea,
+            Map<String, String> genderMapping,
+            Map<String, String> typeDulMapping,
+            String compiledRulesVersion,
+            String politicsVersion,
+            long cacheEpoch
+    ) {
+        this(
+                compiledRules, 
+                dataset2ControlArea, 
+                controlAreaRules, 
+                errorMessagesByRule,
+                excludedBlocksByControlArea, 
+                filterFlagsByControlArea, 
+                genderMapping,
+                typeDulMapping, 
+                compiledRulesVersion, 
+                politicsVersion, 
+                cacheEpoch, 
                 null
         );
     }
@@ -76,22 +107,24 @@ public final class RulesCacheSnapshot {
             Map<String, String> typeDulMapping,
             String compiledRulesVersion,
             String politicsVersion,
+            long cacheEpoch,
             Map<String, Set<String>> preparedReferencedFieldsByRule
     ) {
         this.compiledRules = safeMap(compiledRules);
         this.dataset2ControlArea = safeMap(dataset2ControlArea);
-        this.controlAreaRules = safeMap(controlAreaRules);
-        this.errorMessagesByRule = safeMap(errorMessagesByRule);
-        this.excludedBlocksByControlArea = safeMap(excludedBlocksByControlArea);
+        this.controlAreaRules = freezeNestedSets(controlAreaRules);
+        this.errorMessagesByRule = freezeNested(errorMessagesByRule);
+        this.excludedBlocksByControlArea = freezeSets(excludedBlocksByControlArea);
         this.filterFlagsByControlArea = safeMap(filterFlagsByControlArea);
         this.genderMapping = safeMap(genderMapping);
         this.typeDulMapping = safeMap(typeDulMapping);
         this.compiledRulesVersion = compiledRulesVersion;
         this.politicsVersion = politicsVersion;
+        this.cacheEpoch = cacheEpoch;
 
         this.referencedFieldsByRule = preparedReferencedFieldsByRule == null
                 ? buildReferencedFieldsByRule(this.compiledRules)
-                : preparedReferencedFieldsByRule;
+                : freezeSets(preparedReferencedFieldsByRule);
         this.referencedFieldsByControlArea = buildReferencedFieldsByControlArea(
                 this.controlAreaRules,
                 this.referencedFieldsByRule
@@ -153,6 +186,8 @@ public final class RulesCacheSnapshot {
         return politicsVersion;
     }
 
+    public long cacheEpoch() { return cacheEpoch; }
+
     public Map<String, Set<String>> referencedFieldsByRule() {
         return referencedFieldsByRule;
     }
@@ -202,7 +237,8 @@ public final class RulesCacheSnapshot {
                 genderMapping,
                 typeDulMapping,
                 newCompiledRulesVersion,
-                politicsVersion
+                politicsVersion,
+                cacheEpoch
         );
     }
 
@@ -230,6 +266,7 @@ public final class RulesCacheSnapshot {
                 newTypeDulMapping,
                 compiledRulesVersion,
                 newPoliticsVersion,
+                cacheEpoch,
                 referencedFieldsByRule
         );
     }
@@ -346,6 +383,30 @@ public final class RulesCacheSnapshot {
     }
 
     private static <K, V> Map<K, V> safeMap(Map<K, V> value) {
-        return value == null ? Map.of() : value;
+        return value == null ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(value));
+    }
+
+    private static Map<String, Set<String>> freezeSets(Map<String, Set<String>> m) {
+        if (m == null) return Map.of();
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        m.forEach((k, v) -> result.put(k, freezeSet(v)));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static Map<String, Map<String, Set<String>>> freezeNestedSets(
+            Map<String, Map<String, Set<String>>> m) {
+        if (m == null) return Map.of();
+        Map<String, Map<String, Set<String>>> result = new LinkedHashMap<>();
+        m.forEach((k, v) -> result.put(k, freezeSets(v)));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static Map<String, Map<String, String>> freezeNested(
+            Map<String, Map<String, String>> m) {
+        if (m == null) return Map.of();
+        Map<String, Map<String, String>> result = new LinkedHashMap<>();
+        m.forEach((k, v) -> result.put(k, safeMap(v)));
+        return Collections.unmodifiableMap(result);
     }
 }

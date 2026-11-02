@@ -387,8 +387,7 @@ public final class MessageProcessingService {
             return buildProcessingResult(in, shortJson, detailJson, raw);
 
         } catch (Exception e) {
-            log.error("[PIPE][eventId={}] Failed to build answers.", eventId, e);
-            return null;
+            throw new IllegalStateException("Failed to process message eventId=" + eventId, e);
         }
     }
 

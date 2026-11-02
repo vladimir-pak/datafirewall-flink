@@ -1,414 +1,67 @@
 package com.gpb.datafirewall.services;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.gpb.datafirewall.cache.CompiledRulesRegistry;
-import com.gpb.datafirewall.cache.GenderMappingCache;
-import com.gpb.datafirewall.cache.TypeDulMappingCache;
-import com.gpb.datafirewall.cache.PoliticsControlAreaRulesCache;
-import com.gpb.datafirewall.cache.PoliticsDatasetControlAreaCache;
-import com.gpb.datafirewall.cache.PoliticsDatasetExclusionCache;
-import com.gpb.datafirewall.cache.PoliticsErrorMessagesCache;
-import com.gpb.datafirewall.cache.PoliticsFilterFlagCache;
-import com.gpb.datafirewall.config.IgniteRulesApiClient;
-import com.gpb.datafirewall.converter.CachePayloadConverter;
-import com.gpb.datafirewall.dto.CacheResponseDto;
-import com.gpb.datafirewall.dto.HttpBytecodeSource;
-import com.gpb.datafirewall.dto.IgniteBytecodeSource;
-import com.gpb.datafirewall.ignite.BytecodeSource;
-import com.gpb.datafirewall.ignite.IgniteClientFacade;
-import com.gpb.datafirewall.ignite.impl.IgniteClientFacadeImpl;
-import com.gpb.datafirewall.kafka.CacheUpdateEvent;
+import com.gpb.datafirewall.bundle.CacheBundleState;
 import com.gpb.datafirewall.model.Rule;
 import com.gpb.datafirewall.rule.RulesReloader;
-
 import org.apache.flink.api.java.utils.ParameterTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
+/** No API/HTTP/Ignite dependencies. One atomic activation per full cache epoch. */
 public final class RulesCacheRuntime implements AutoCloseable {
 
-    private static final Logger log = LoggerFactory.getLogger(RulesCacheRuntime.class);
+    public static final String CACHE_COMPILED_RULES="compiled_rules";
+    public static final String CACHE_POLITICS="politics";
+    public static final String CACHE_GENDER_MAPPING="gender_mapping";
+    public static final String CACHE_TYPE_DUL_MAPPING="type_dul_mapping";
 
-    public static final String CACHE_COMPILED_RULES = "compiled_rules";
-    public static final String CACHE_POLITICS = "politics";
-    public static final String CACHE_GENDER_MAPPING = "gender_mapping";
-    public static final String CACHE_TYPE_DUL_MAPPING = "type_dul_mapping";
-
-    private static final String CACHE_POLITICS_DATASET2CONTROL_AREA =
-            "politics_dataset2control_area";
-    private static final String CACHE_POLITICS_CONTROL_AREA_RULES =
-            "politics_control_area_rules";
-    private static final String CACHE_POLITICS_ERROR_MESSAGES =
-            "politics_error_messages";
-    private static final String CACHE_POLITICS_DATASET_EXCLUSION =
-            "politics_dataset_exclusion";
-    private static final String CACHE_POLITICS_FILTER_FLAG =
-            "politics_filter_flag";
-
-    private final ObjectMapper mapper;
-    private final String jwt;
-    private final AtomicReference<RulesCacheSnapshot> activeSnapshot =
+    private final AtomicReference<RulesCacheSnapshot> active =
             new AtomicReference<>(RulesCacheSnapshot.empty());
 
-    private CompiledRulesRegistry rulesRegistry;
-    private RulesReloader reloader;
-    private BytecodeSource bytecodeSource;
-    private AutoCloseable closeable;
-    private IgniteRulesApiClient igniteApiClient;
-    private CachePayloadConverter cachePayloadConverter;
+    private final RulesReloader reloader = new RulesReloader();
 
-    private PoliticsDatasetControlAreaCache dataset2ControlAreaCache;
-    private PoliticsControlAreaRulesCache controlAreaRulesCache;
-    private PoliticsErrorMessagesCache errorMessagesCache;
-    private PoliticsDatasetExclusionCache datasetExclusionCache;
-    private PoliticsFilterFlagCache filterFlagCache;
-    private GenderMappingCache genderMappingCache;
-    private TypeDulMappingCache typeDulMappingCache;
+    public RulesCacheRuntime(
+            ObjectMapper mapper,
+            String jwt) { /* compatibility */ }
 
-    public RulesCacheRuntime(ObjectMapper mapper, String jwt) {
-        this.mapper = mapper;
-        this.jwt = jwt;
-    }
+    public void open(ParameterTool pt) { /* no remote initialization */ }
 
-    public void open(ParameterTool pt) {
-        this.cachePayloadConverter = new CachePayloadConverter(mapper);
+    public RulesCacheSnapshot prepare(CacheBundleState bundle) {
+        bundle.verify();
+        RulesReloader.PreparedRules prepared =
+                reloader.loadFromBytecodes(
+                        bundle.classNameToBytecode(),
+                        bundle.compiledRulesVersion()
+                );
 
-        this.rulesRegistry = new CompiledRulesRegistry();
-        this.dataset2ControlAreaCache = new PoliticsDatasetControlAreaCache();
-        this.controlAreaRulesCache = new PoliticsControlAreaRulesCache();
-        this.errorMessagesCache = new PoliticsErrorMessagesCache();
-        this.datasetExclusionCache = new PoliticsDatasetExclusionCache();
-        this.filterFlagCache = new PoliticsFilterFlagCache();
-        this.genderMappingCache = new GenderMappingCache();
-        this.typeDulMappingCache = new TypeDulMappingCache();
-
-        initRulesLoader(pt);
-
-        String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
-        String igniteApiCaPem = pt.get("ignite.api.tls.ca.pem", null);
-        this.igniteApiClient = new IgniteRulesApiClient(igniteApiUrl, igniteApiCaPem, jwt);
-
-        boolean testCachesEnabled = pt.getBoolean("test.politic.caches.enabled", false);
-        if (testCachesEnabled) {
-            initTestCaches(pt);
-        } else {
-            log.info("[TEST] test caches initialization is disabled.");
-        }
-
-        boolean bootstrapEnabled = pt.getBoolean("cache.bootstrap.enabled", true);
-        boolean politicsBootstrapEnabled = pt.getBoolean("politics.bootstrap.enabled", false);
-
-        if (bootstrapEnabled) {
-            CacheBootstrapService bootstrapService = new CacheBootstrapService(
-                    igniteApiClient, reloader, rulesRegistry, dataset2ControlAreaCache,
-                    controlAreaRulesCache, errorMessagesCache, datasetExclusionCache,
-                    filterFlagCache, genderMappingCache, typeDulMappingCache,
-                    politicsBootstrapEnabled);
-            initializeBootstrapWithRetry(bootstrapService, pt);
-        } else {
-            log.info("[INIT] startup cache bootstrap is disabled. Waiting for Kafka cache update events.");
-        }
-
-        // open() выполняется до начала обработки сообщений, поэтому стартовый
-        // набор правил и politics-кэшей публикуется одной заменой ссылки.
-        publishFullSnapshot();
-    }
-
-    private void initializeBootstrapWithRetry(CacheBootstrapService bootstrapService, ParameterTool pt) {
-        long initialDelayMs = Math.max(1_000L, pt.getLong("cache.reload.retry.initial.ms", 5_000L));
-        long maxDelayMs = Math.max(initialDelayMs, pt.getLong("cache.reload.retry.max.ms", 60_000L));
-        long delayMs = initialDelayMs;
-        int attempt = 1;
-        while (true) {
-            long t0 = System.nanoTime();
-            try {
-                log.info("[CACHE][SPRING][BOOTSTRAP] loading startup caches attempt={}", attempt);
-                bootstrapService.initializeAll();
-                long ms = (System.nanoTime() - t0) / 1_000_000L;
-                if (attempt == 1) {
-                    log.info("[CACHE][SPRING][BOOTSTRAP] startup caches loaded successfully in {}ms", ms);
-                } else {
-                    log.info("[CACHE][SPRING][BOOTSTRAP] Spring connection restored, startup caches loaded successfully attempt={} durationMs={}", attempt, ms);
-                }
-                return;
-            } catch (Exception ex) {
-                log.warn("[CACHE][SPRING][BOOTSTRAP] Spring cache service unavailable attempt={} retryInMs={} cause={}", attempt, delayMs, rootMessage(ex));
-                try {
-                    Thread.sleep(delayMs);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException("Startup cache bootstrap retry interrupted", interrupted);
-                }
-                delayMs = nextRetryDelay(delayMs, initialDelayMs, maxDelayMs);
-                attempt++;
-            }
-        }
-    }
-
-    private static long nextRetryDelay(long previousDelayMs, long initialDelayMs, long maxDelayMs) {
-        long doubled = previousDelayMs >= maxDelayMs / 2 ? maxDelayMs : previousDelayMs * 2;
-        return Math.min(maxDelayMs, Math.max(initialDelayMs, doubled));
-    }
-
-    private static String rootMessage(Throwable throwable) {
-        if (throwable == null) {
-            return "unknown";
-        }
-        Throwable current = throwable;
-        while (current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        return current.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
-    }
-
-    private void initRulesLoader(ParameterTool pt) {
-        String mode = pt.get("rules.loader", "http").toLowerCase(Locale.ROOT).trim();
-
-        BytecodeSource rawSource;
-
-        if ("http".equals(mode)) {
-            String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
-            String igniteApiCaPem = pt.get("ignite.api.tls.ca.pem", null);
-
-            IgniteRulesApiClient apiClient = new IgniteRulesApiClient(igniteApiUrl, igniteApiCaPem, jwt);
-            rawSource = new HttpBytecodeSource(apiClient);
-            this.closeable = null;
-
-            log.info("[RULES] loader=http apiUrl={}", igniteApiUrl);
-
-        } else if ("thin".equals(mode)) {
-            String igniteHost = pt.get("ignite.host", "127.0.0.1");
-            int ignitePort = pt.getInt("ignite.port", 10800);
-
-            IgniteClientFacadeImpl ignite = new IgniteClientFacadeImpl(igniteHost, ignitePort);
-            IgniteClientFacade facade = ignite;
-            rawSource = new IgniteBytecodeSource(facade);
-            this.closeable = ignite;
-
-            log.info("[RULES] loader=thin host={} port={}", igniteHost, ignitePort);
-
-        } else {
-            throw new IllegalArgumentException("Unknown rules.loader=" + mode + " (use thin|http)");
-        }
-
-        this.bytecodeSource = new TimedBytecodeSource(rawSource, log::info);
-        this.reloader = new RulesReloader(bytecodeSource, rulesRegistry);
-
-        log.info("[RULES] rules loader initialized. Actual cache versions will be loaded during startup bootstrap.");
-    }
-
-    public void reload(CacheUpdateEvent ev) {
-        if (ev == null || !ev.isValid()) {
-            return;
-        }
-
-        switch (ev.cacheName) {
-            case CACHE_COMPILED_RULES -> reloadCompiledRules(ev.version);
-            case CACHE_POLITICS -> reloadPoliticsCaches(ev.version);
-            default -> throw new IllegalArgumentException("Unsupported cacheName=" + ev.cacheName);
-        }
-    }
-
-    private void reloadCompiledRules(long version) {
-        String fullCacheName = CACHE_COMPILED_RULES + "_" + version;
-
-        log.info("[CACHE] Reloading compiled rules from {}", fullCacheName);
-
-        reloader.reloadAllStrict(fullCacheName);
-        publishCompiledRulesSnapshot();
-
-        log.info("[CACHE] compiled_rules reloaded: version={}, size={}",
-                version, rulesRegistry.size());
-    }
-
-    private void reloadPoliticsCaches(long version) {
-        String versionStr = String.valueOf(version);
-
-        String dataset2ControlAreaName = CACHE_POLITICS_DATASET2CONTROL_AREA + "_" + version;
-        String controlAreaRulesName = CACHE_POLITICS_CONTROL_AREA_RULES + "_" + version;
-        String errorMessagesName = CACHE_POLITICS_ERROR_MESSAGES + "_" + version;
-        String datasetExclusionName = CACHE_POLITICS_DATASET_EXCLUSION + "_" + version;
-        String filterFlagName = CACHE_POLITICS_FILTER_FLAG + "_" + version;
-        String genderMappingName = CACHE_GENDER_MAPPING + "_" + version;
-        String typeDulMappingName = CACHE_TYPE_DUL_MAPPING + "_" + version;
-
-        log.info("[CACHE] Reloading politics bundle for version={}", version);
-
-        CacheResponseDto<String, Object> dataset2ControlAreaResponse =
-                igniteApiClient.getVersionedCache(dataset2ControlAreaName);
-
-        CacheResponseDto<String, Object> controlAreaRulesResponse =
-                igniteApiClient.getVersionedCache(controlAreaRulesName);
-
-        CacheResponseDto<String, Object> errorMessagesResponse =
-                igniteApiClient.getVersionedCache(errorMessagesName);
-
-        CacheResponseDto<String, Object> datasetExclusionResponse =
-                igniteApiClient.getVersionedCache(datasetExclusionName);
-
-        CacheResponseDto<String, Object> filterFlagResponse =
-                igniteApiClient.getVersionedCache(filterFlagName);
-        CacheResponseDto<String, Object> genderMappingResponse =
-                igniteApiClient.getVersionedCache(genderMappingName);
-        CacheResponseDto<String, Object> typeDulMappingResponse =
-                igniteApiClient.getVersionedCache(typeDulMappingName);
-
-        Map<String, String> dataset2ControlArea =
-                cachePayloadConverter.toStringMap(dataset2ControlAreaResponse.getCache(), dataset2ControlAreaName);
-
-        Map<String, Map<String, Set<String>>> controlAreaRules =
-                cachePayloadConverter.toNestedRulesMap(controlAreaRulesResponse.getCache(), controlAreaRulesName);
-
-        Map<String, Map<String, String>> errorMessages =
-                cachePayloadConverter.toNestedStringMap(errorMessagesResponse.getCache(), errorMessagesName);
-
-        Map<String, Set<String>> datasetExclusion =
-                cachePayloadConverter.toSetMap(datasetExclusionResponse.getCache(), datasetExclusionName);
-
-        Map<String, Boolean> filterFlags =
-                cachePayloadConverter.toBooleanMap(filterFlagResponse.getCache(), filterFlagName);
-        Map<String, String> genderMapping =
-                cachePayloadConverter.toStringMap(genderMappingResponse.getCache(), genderMappingName);
-        Map<String, String> typeDulMapping =
-                cachePayloadConverter.toStringMap(typeDulMappingResponse.getCache(), typeDulMappingName);
-
-        // Внутренние cache-объекты сначала полностью подготавливают immutable
-        // карты. Только после этого весь politics bundle становится видимым
-        // обработчикам сообщений одной атомарной публикацией.
-        dataset2ControlAreaCache.replaceAll(dataset2ControlArea, versionStr);
-        controlAreaRulesCache.replaceAll(controlAreaRules, versionStr);
-        errorMessagesCache.replaceAll(errorMessages, versionStr);
-        datasetExclusionCache.replaceAll(datasetExclusion, versionStr);
-        filterFlagCache.replaceAll(filterFlags, versionStr);
-        genderMappingCache.replaceAll(genderMapping, versionStr);
-        typeDulMappingCache.replaceAll(typeDulMapping, versionStr);
-        publishPoliticsSnapshot();
-
-        log.info(
-                "[CACHE] politics reloaded: version={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}, genderMapping={}, typeDulMapping={}",
-                version,
-                dataset2ControlArea.size(),
-                controlAreaRules.size(),
-                errorMessages.size(),
-                datasetExclusion.size(),
-                filterFlags.size(),
-                genderMapping.size(),
-                typeDulMapping.size()
+        return new RulesCacheSnapshot(
+                prepared.rules(),
+                bundle.dataset2ControlArea(),
+                bundle.controlAreaRules(),
+                bundle.errorMessages(),
+                bundle.datasetExclusion(),
+                bundle.filterFlags(),
+                bundle.genderMapping(),
+                bundle.typeDulMapping(),
+                prepared.version(),
+                bundle.politicsVersion(),
+                bundle.cacheEpoch()
         );
     }
 
-    private void initTestCaches(ParameterTool pt) {
-        String path = pt.get("test.politic.caches.path", "").trim();
-
-        if (path.isBlank()) {
-            throw new IllegalArgumentException(
-                    "test.politic.caches.path must be provided for test caches initialization"
-            );
-        }
-
-        try {
-            com.gpb.datafirewall.dto.TestCachesConfigDto cfg =
-                    mapper.readValue(
-                            Files.readString(
-                                    Path.of(path),
-                                    StandardCharsets.UTF_8
-                            ),
-                            com.gpb.datafirewall.dto.TestCachesConfigDto.class
-                    );
-
-            String version = (cfg.getVersion() == null || cfg.getVersion().isBlank())
-                    ? "test"
-                    : cfg.getVersion().trim();
-
-            rulesRegistry.replaceAll(Map.of(), version);
-
-            dataset2ControlAreaCache.replaceAll(
-                    cfg.getDataset2ControlArea() == null ? Map.of() : cfg.getDataset2ControlArea(),
-                    version
-            );
-
-            Map<String, Map<String, Set<String>>> controlAreaRules = new LinkedHashMap<>();
-            if (cfg.getControlAreaRules() != null) {
-                for (Map.Entry<String, Map<String, List<String>>> areaEntry : cfg.getControlAreaRules().entrySet()) {
-                    Map<String, Set<String>> fieldRules = new LinkedHashMap<>();
-                    if (areaEntry.getValue() != null) {
-                        for (Map.Entry<String, List<String>> fieldEntry : areaEntry.getValue().entrySet()) {
-                            fieldRules.put(
-                                    fieldEntry.getKey(),
-                                    fieldEntry.getValue() == null
-                                            ? Set.of()
-                                            : new LinkedHashSet<>(fieldEntry.getValue())
-                            );
-                        }
-                    }
-                    controlAreaRules.put(areaEntry.getKey(), fieldRules);
-                }
-            }
-
-            Map<String, Set<String>> datasetExclusion = new LinkedHashMap<>();
-            if (cfg.getDatasetExclusion() != null) {
-                for (Map.Entry<String, List<String>> entry : cfg.getDatasetExclusion().entrySet()) {
-                    datasetExclusion.put(
-                            entry.getKey(),
-                            entry.getValue() == null
-                                    ? Set.of()
-                                    : new LinkedHashSet<>(entry.getValue())
-                    );
-                }
-            }
-
-            controlAreaRulesCache.replaceAll(controlAreaRules, version);
-            errorMessagesCache.replaceAll(
-                    cfg.getErrorMessages() == null ? Map.of() : cfg.getErrorMessages(),
-                    version
-            );
-            datasetExclusionCache.replaceAll(datasetExclusion, version);
-            filterFlagCache.replaceAll(
-                    cfg.getFilterFlag() == null ? Map.of() : cfg.getFilterFlag(),
-                    version
-            );
-            genderMappingCache.replaceAll(
-                    cfg.getGenderMapping() == null ? Map.of() : cfg.getGenderMapping(), version);
-            typeDulMappingCache.replaceAll(
-                    cfg.getTypeDulMapping() == null ? Map.of() : cfg.getTypeDulMapping(), version);
-
-            log.info(
-                    "[TEST] caches initialized from file: path={}, version={}, rules={}, dataset2controlArea={}, controlAreaRules={}, errorMessages={}, datasetExclusion={}, filterFlag={}, genderMapping={}, typeDulMapping={}",
-                    path,
-                    version,
-                    rulesRegistry.size(),
-                    dataset2ControlAreaCache.size(),
-                    controlAreaRulesCache.size(),
-                    errorMessagesCache.size(),
-                    datasetExclusionCache.size(),
-                    filterFlagCache.size(),
-                    genderMappingCache.size(),
-                    typeDulMappingCache.size()
-            );
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to initialize test caches from file: " + path, e);
-        }
+    public void activate(RulesCacheSnapshot prepared) {
+        if (prepared == null || prepared.cacheEpoch() < 0) 
+                throw new IllegalArgumentException("Invalid snapshot");
+        active.set(prepared);
     }
 
     public RulesCacheSnapshot snapshot() {
-        return activeSnapshot.get();
+        return active.get();
     }
 
-    public Map<String, Rule> rulesSnapshot() {
+    public Map<String,Rule> rulesSnapshot() {
         return snapshot().compiledRules();
     }
 
@@ -416,32 +69,32 @@ public final class RulesCacheRuntime implements AutoCloseable {
         return snapshot().compiledRules().size();
     }
 
-    public String controlAreaByDataset(String datasetCode) {
-        return snapshot().controlAreaByDataset(datasetCode);
+    public String controlAreaByDataset(String ds) {
+        return snapshot().controlAreaByDataset(ds);
     }
 
-    public Map<String, Set<String>> fieldToRules(String controlArea) {
-        return snapshot().fieldToRules(controlArea);
+    public Map<String,Set<String>> fieldToRules(String area) {
+        return snapshot().fieldToRules(area);
     }
 
-    public Set<String> referencedFields(String controlArea) {
-        return snapshot().referencedFields(controlArea);
+    public Set<String> referencedFields(String area) {
+        return snapshot().referencedFields(area);
     }
 
-    public Map<String, Set<String>> referencedFieldsByRuleSnapshot() {
+    public Map<String,Set<String>> referencedFieldsByRuleSnapshot() {
         return snapshot().referencedFieldsByRule();
     }
 
-    public Map<String, Map<String, String>> errorMessagesSnapshot() {
+    public Map<String,Map<String,String>> errorMessagesSnapshot() {
         return snapshot().errorMessagesByRule();
     }
 
-    public Set<String> excludedBlocks(String controlArea) {
-        return snapshot().excludedBlocks(controlArea);
+    public Set<String> excludedBlocks(String area) {
+        return snapshot().excludedBlocks(area);
     }
 
-    public Boolean filterFlag(String controlArea) {
-        return snapshot().filterFlag(controlArea);
+    public Boolean filterFlag(String area) {
+        return snapshot().filterFlag(area);
     }
 
     public int dataset2ControlAreaSize() {
@@ -464,11 +117,11 @@ public final class RulesCacheRuntime implements AutoCloseable {
         return snapshot().filterFlagsByControlArea().size();
     }
 
-    public Map<String, String> genderMappingSnapshot() {
+    public Map<String,String> genderMappingSnapshot() {
         return snapshot().genderMapping();
     }
 
-    public Map<String, String> typeDulMappingSnapshot() {
+    public Map<String,String> typeDulMappingSnapshot() {
         return snapshot().typeDulMapping();
     }
 
@@ -489,138 +142,20 @@ public final class RulesCacheRuntime implements AutoCloseable {
     }
 
     public long compiledRulesVersion() {
-        return numericVersion(snapshot().compiledRulesVersion());
+        return numeric(snapshot().compiledRulesVersion());
     }
 
     public long politicsVersion() {
-        return numericVersion(snapshot().politicsVersion());
+        return numeric(snapshot().politicsVersion());
     }
 
-    private void publishFullSnapshot() {
-        String politicsVersion = validatedPoliticsVersion();
-
-        RulesCacheSnapshot next = new RulesCacheSnapshot(
-                rulesRegistry.snapshot(),
-                dataset2ControlAreaCache.snapshot(),
-                controlAreaRulesCache.snapshot(),
-                errorMessagesCache.snapshot(),
-                datasetExclusionCache.snapshot(),
-                filterFlagCache.snapshot(),
-                genderMappingCache.snapshot(),
-                typeDulMappingCache.snapshot(),
-                rulesRegistry.version(),
-                politicsVersion
-        );
-
-        activeSnapshot.set(next);
-        logReferencedFieldsIndex("full", next);
-    }
-
-    private void publishCompiledRulesSnapshot() {
-        Map<String, Rule> rules = rulesRegistry.snapshot();
-        String version = rulesRegistry.version();
-
-        RulesCacheSnapshot next = activeSnapshot.updateAndGet(current ->
-                current.withCompiledRules(rules, version));
-        logReferencedFieldsIndex("compiled_rules", next);
-    }
-
-    private void publishPoliticsSnapshot() {
-        String version = validatedPoliticsVersion();
-
-        Map<String, String> dataset2ControlArea = dataset2ControlAreaCache.snapshot();
-        Map<String, Map<String, Set<String>>> controlAreaRules = controlAreaRulesCache.snapshot();
-        Map<String, Map<String, String>> errorMessages = errorMessagesCache.snapshot();
-        Map<String, Set<String>> datasetExclusion = datasetExclusionCache.snapshot();
-        Map<String, Boolean> filterFlags = filterFlagCache.snapshot();
-        Map<String, String> genderMapping = genderMappingCache.snapshot();
-        Map<String, String> typeDulMapping = typeDulMappingCache.snapshot();
-
-        RulesCacheSnapshot next = activeSnapshot.updateAndGet(current -> current.withPolitics(
-                dataset2ControlArea,
-                controlAreaRules,
-                errorMessages,
-                datasetExclusion,
-                filterFlags,
-                genderMapping,
-                typeDulMapping,
-                version
-        ));
-        logReferencedFieldsIndex("politics", next);
-    }
-
-    private void logReferencedFieldsIndex(
-            String trigger,
-            RulesCacheSnapshot snapshot
-    ) {
-        int ruleFields = countFields(snapshot.referencedFieldsByRule());
-        int controlAreaFields = countFields(snapshot.referencedFieldsByControlArea());
-
-        log.info(
-                "[CACHE] referenced fields indexed: trigger={}, rules={}, ruleFields={}, controlAreas={}, controlAreaFields={}",
-                trigger,
-                snapshot.referencedFieldsByRule().size(),
-                ruleFields,
-                snapshot.referencedFieldsByControlArea().size(),
-                controlAreaFields
-        );
-    }
-
-    private static int countFields(Map<String, Set<String>> fieldsByKey) {
-        if (fieldsByKey == null || fieldsByKey.isEmpty()) {
-            return 0;
-        }
-
-        int result = 0;
-        for (Set<String> fields : fieldsByKey.values()) {
-            if (fields != null) {
-                result += fields.size();
-            }
-        }
-        return result;
-    }
-
-    private String validatedPoliticsVersion() {
-        String version = dataset2ControlAreaCache.version();
-
-        if (!Objects.equals(version, controlAreaRulesCache.version())
-                || !Objects.equals(version, errorMessagesCache.version())
-                || !Objects.equals(version, datasetExclusionCache.version())
-                || !Objects.equals(version, filterFlagCache.version())
-                || !Objects.equals(version, genderMappingCache.version())
-                || !Objects.equals(version, typeDulMappingCache.version())) {
-            throw new IllegalStateException(
-                    "Cannot publish inconsistent politics snapshot: "
-                            + "dataset=" + version
-                            + ", rules=" + controlAreaRulesCache.version()
-                            + ", errors=" + errorMessagesCache.version()
-                            + ", exclusion=" + datasetExclusionCache.version()
-                            + ", filterFlag=" + filterFlagCache.version()
-                            + ", genderMapping=" + genderMappingCache.version()
-                            + ", typeDulMapping=" + typeDulMappingCache.version()
-            );
-        }
-
-        return version;
-    }
-
-    private static long numericVersion(String version) {
-        if (version == null) return -1L;
+    private static long numeric(String s) {
         try {
-            return Long.parseLong(version);
-        } catch (NumberFormatException ignored) {
-            return -1L; // Test configurations can use a non-numeric version.
+            return Long.parseLong(s);
+        } catch (Exception ex) {
+            return -1;
         }
     }
-
-    @Override
-    public void close() {
-        try {
-            if (closeable != null) {
-                closeable.close();
-            }
-        } catch (Exception e) {
-            log.warn("Failed to close cache runtime resources", e);
-        }
-    }
+    
+    @Override public void close() { /* nothing to close */ }
 }

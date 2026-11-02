@@ -32,7 +32,8 @@ public final class DetailAnswerService {
         Set<String> excludedBlocks,
         String controlArea
     ) {
-        if (originalEvent == null || validation == null) return null;
+        if (originalEvent == null || validation == null)
+            throw new IllegalArgumentException("Original event and validation are required");
 
         try {
             ObjectNode node = builder.buildDetailAnswer(
@@ -46,8 +47,7 @@ public final class DetailAnswerService {
             );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
-            log.warn("Failed to build detail answer", e);
-            return null;
+            throw new IllegalStateException("Failed to build detail answer", e);
         }
     }
 }

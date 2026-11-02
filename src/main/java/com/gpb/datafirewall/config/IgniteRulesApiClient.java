@@ -3,6 +3,8 @@ package com.gpb.datafirewall.config;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.dto.CacheResponseDto;
+import com.gpb.datafirewall.bundle.CacheManifest;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
@@ -63,6 +65,38 @@ public final class IgniteRulesApiClient {
         this.http = builder.build();
     }
 
+    /** New Spring API contract: immutable manifest by epoch, and an atomic latest pointer. */
+    public CacheManifest getBundleManifest(Long epoch) {
+        String url = baseUrl + "/api/v1/cache/bundle-manifest/" +
+                (epoch == null ? "latest" : epoch.toString());
+        try {
+            HttpResponse<String> resp = http.send(
+                    requestBuilder(url).GET().build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (resp.statusCode() / 100 != 2) {
+                throw new CacheApiException(resp.statusCode(), url);
+            }
+            JsonNode node = OM.readTree(resp.body());
+            // Versions are strings: compiledRulesVersion and politicsVersion are independent.
+            CacheManifest result = new CacheManifest(
+                    node.path("cacheEpoch").asLong(-1),
+                    node.path("compiledRulesVersion").asText(null),
+                    node.path("politicsVersion").asText(null),
+                    node.path("handler").asText("flink"),
+                    node.path("checksum").asText(null));
+            if (epoch != null && result.cacheEpoch() != epoch) {
+                throw new IllegalStateException("Manifest epoch mismatch: requested=" + epoch
+                        + ", received=" + result.cacheEpoch());
+            }
+            return result;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Cache request interrupted", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to fetch cache manifest " + url, e);
+        }
+    }
+
     public CacheResponseDto<String, Object> getActualCache(String cacheName) {
         String url = String.format("%s/api/v1/cache/%s/latest",
                 baseUrl, URLEncoder.encode(cacheName, StandardCharsets.UTF_8));
@@ -76,10 +110,7 @@ public final class IgniteRulesApiClient {
             );
 
             if (resp.statusCode() / 100 != 2) {
-                throw new RuntimeException(
-                        "Ignite latest cache API HTTP " + resp.statusCode() + " for " + url +
-                                ": " + truncate(resp.body(), 800)
-                );
+                throw new CacheApiException(resp.statusCode(), url);
             }
 
             return OM.readValue(
@@ -91,6 +122,9 @@ public final class IgniteRulesApiClient {
                     )
             );
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Cache request interrupted", e);
         } catch (Exception e) {
             throw new RuntimeException("Failed to call Ignite latest cache API: " + url, e);
         }
@@ -109,10 +143,7 @@ public final class IgniteRulesApiClient {
             );
 
             if (resp.statusCode() / 100 != 2) {
-                throw new RuntimeException(
-                        "Ignite cache API HTTP " + resp.statusCode() + " for " + url +
-                                ": " + truncate(resp.body(), 800)
-                );
+                throw new CacheApiException(resp.statusCode(), url);
             }
 
             return OM.readValue(
@@ -124,6 +155,9 @@ public final class IgniteRulesApiClient {
                     )
             );
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Cache request interrupted", e);
         } catch (Exception e) {
             throw new RuntimeException("Failed to call Ignite cache API: " + url, e);
         }

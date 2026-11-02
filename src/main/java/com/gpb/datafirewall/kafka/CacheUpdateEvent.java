@@ -12,11 +12,13 @@ public class CacheUpdateEvent implements Serializable {
     public final long version;
     public final String cacheName;
     public final String handler;
+    public final long cacheEpoch;
 
     public CacheUpdateEvent() {
         this.version = -1;
         this.cacheName = null;
         this.handler = null;
+        this.cacheEpoch = -1;
     }
 
     public CacheUpdateEvent(long version, String cacheName) {
@@ -24,15 +26,19 @@ public class CacheUpdateEvent implements Serializable {
     }
 
     public CacheUpdateEvent(long version, String cacheName, String handler) {
+        this(version, cacheName, handler, -1L);
+    }
+    public CacheUpdateEvent(long version, String cacheName, String handler, long cacheEpoch) {
         this.version = version;
         this.cacheName = cacheName;
         this.handler = handler == null ? null : handler.trim();
+        this.cacheEpoch = cacheEpoch;
     }
 
     public boolean isValid() {
-        return version >= 0
+        return cacheEpoch >= 0 || (version >= 0
                 && cacheName != null
-                && !cacheName.trim().isEmpty();
+                && !cacheName.trim().isEmpty());
     }
 
     public DynamicHandler handlerAsEnum(DynamicHandler defaultValue) {
@@ -42,7 +48,7 @@ public class CacheUpdateEvent implements Serializable {
     @Override
     public String toString() {
         return "CacheUpdateEvent{" +
-                "version=" + version +
+                "cacheEpoch=" + cacheEpoch + ", version=" + version +
                 ", cacheName='" + cacheName + '\'' +
                 ", handler='" + handler + '\'' +
                 '}';
@@ -50,14 +56,14 @@ public class CacheUpdateEvent implements Serializable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(version, cacheName, handler);
+        return Objects.hash(version, cacheName, handler, cacheEpoch);
     }
 
     @Override
     public boolean equals(Object obj) {
         if (this == obj) return true;
         if (!(obj instanceof CacheUpdateEvent other)) return false;
-        return version == other.version &&
+        return version == other.version && cacheEpoch == other.cacheEpoch &&
                 Objects.equals(cacheName, other.cacheName) &&
                 Objects.equals(handler, other.handler);
     }

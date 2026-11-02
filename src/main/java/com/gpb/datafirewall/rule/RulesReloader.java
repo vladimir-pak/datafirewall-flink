@@ -1,90 +1,52 @@
 package com.gpb.datafirewall.rule;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-
 import com.gpb.datafirewall.cache.CompiledRulesRegistry;
 import com.gpb.datafirewall.ignite.BytecodeSource;
 import com.gpb.datafirewall.model.Rule;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
+/** Builds rule objects without modifying the active rules registry. */
 public final class RulesReloader {
-
     private final BytecodeSource source;
     private final CompiledRulesRegistry registry;
 
-    public RulesReloader(BytecodeSource source, CompiledRulesRegistry registry) {
-        this.source = Objects.requireNonNull(source, "source");
-        this.registry = Objects.requireNonNull(registry, "registry");
+    public RulesReloader() { this.source = null; this.registry = null; }
+    /** Legacy API retained for callers that have not migrated yet. */
+    public RulesReloader(BytecodeSource source,CompiledRulesRegistry registry) {
+        this.source=source;this.registry=registry;
     }
+    public record PreparedRules(Map<String,Rule> rules,String version) {}
 
-    public void reloadAllStrict(String name) {
-        if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("name must not be null/blank");
+    public PreparedRules loadFromBytecodes(Map<String,byte[]> bytecodes,String version) {
+        if (version == null || version.isBlank()) throw new IllegalArgumentException("Missing rules version");
+        if (bytecodes == null || bytecodes.isEmpty()) throw new IllegalArgumentException("Empty bytecodes");
+        for(String name:bytecodes.keySet()) {
+            if(name == null || name.isBlank() || bytecodes.get(name)==null || bytecodes.get(name).length==0)
+                throw new IllegalArgumentException("Missing name/bytecode for rule " + name);
         }
-
-        Map<String, byte[]> bytecodes = source.loadAll(name);
-        if (bytecodes == null) {
-            throw new IllegalStateException("BytecodeSource returned null for name=" + name);
-        }
-
-        List<String> classNames = new ArrayList<>(bytecodes.keySet());
-        classNames.sort(String::compareTo);
-
-        long totalBytes = 0;
-
-        for (String clsName : classNames) {
-            byte[] bytes = bytecodes.get(clsName);
-            if (clsName == null || clsName.isBlank()) {
-                throw new IllegalStateException("Found empty/null class name key in '" + name + "'");
-            }
-            if (bytes == null || bytes.length == 0) {
-                throw new IllegalStateException(
-                        "Empty bytecode for class '" + clsName + "' in '" + name + "'"
-                );
-            }
-            totalBytes += bytes.length;
-        }
-
-        RuleClassLoader cl = new RuleClassLoader(bytecodes);
-        Map<String, Rule> newRules = new HashMap<>();
-
-        for (String clsName : classNames) {
+        List<String> classes = new ArrayList<>(bytecodes.keySet());
+        classes.sort(String::compareTo);
+        RuleClassLoader loader=new RuleClassLoader(bytecodes);
+        Map<String,Rule> prepared=new LinkedHashMap<>();
+        for(String name:classes) {
             try {
-                Class<? extends Rule> ruleClass = cl.loadRule(clsName);
-                Rule rule = ruleClass.getDeclaredConstructor().newInstance();
-                newRules.put(clsName, rule);
-            } catch (Throwable e) {
-                throw new RuntimeException(
-                        "Failed to load rule '" + clsName + "' from '" + name +
-                                "'. Available keys=" + classNames,
-                        e
-                );
+                Class<? extends Rule> cls=loader.loadRule(name);
+                prepared.put(name,cls.getDeclaredConstructor().newInstance());
+            } catch (ReflectiveOperationException | LinkageError | ClassCastException ex) {
+                throw new IllegalStateException("Failed to prepare rule " + name + " version=" + version,ex);
             }
         }
-
-        String version = extractVersion(name);
-        registry.replaceAll(newRules, version);
+        return new PreparedRules(Collections.unmodifiableMap(prepared),version);
     }
-
-    private String extractVersion(String name) {
-        int idx = name.lastIndexOf('_');
-        if (idx < 0 || idx == name.length() - 1) {
-            throw new IllegalArgumentException(
-                    "Cannot extract version from cache name '" + name +
-                            "'. Expected format: <cache_name>_<version>"
-            );
-        }
-
-        String version = name.substring(idx + 1).trim();
-        if (version.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "Extracted empty version from cache name '" + name + "'"
-            );
-        }
-
-        return version;
+    public void reloadAllStrict(String fullName) {
+        if(source==null || registry==null) throw new IllegalStateException("Legacy loader is not initialized");
+        int index=fullName.lastIndexOf('_');
+        if(index<0 || index==fullName.length()-1)throw new IllegalArgumentException("Invalid full name "+fullName);
+        PreparedRules prepared=loadFromBytecodes(source.loadAll(fullName),fullName.substring(index+1));
+        registry.replaceAll(prepared.rules(),prepared.version());
     }
 }

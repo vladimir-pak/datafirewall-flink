@@ -1,13 +1,20 @@
 package com.gpb.datafirewall.services;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gpb.datafirewall.bundle.CacheBundleState;
 import com.gpb.datafirewall.dto.ProcessingResult;
-import com.gpb.datafirewall.kafka.CacheUpdateEvent;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
-
 import org.apache.flink.api.common.ExecutionConfig;
-import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.BroadcastState;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
+import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.function.Consumer;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.configuration.Configuration;
@@ -16,114 +23,79 @@ import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
-public class RulesReloadBroadcastProcessFunction
-        extends BroadcastProcessFunction<MessageRecord, CacheUpdateEvent, ProcessingResult> {
-
-    private static final Logger log =
-            LoggerFactory.getLogger(RulesReloadBroadcastProcessFunction.class);
-
-    private static final String CACHE_HANDLER = "handler";
-
-    /**
-     * Отдельный выходной поток только для результата внутренней Flink-обработки.
-     *
-     * handler=flink:
-     * - основной output: Flink result -> MQ/Artemis;
-     * - side output: тот же Flink result -> Kafka audit.
-     *
-     * handler=dotnet:
-     * - основной output: внешний result -> MQ/Artemis;
-     * - side output: внутренний Flink result -> Kafka audit.
-     */
+/** Consumers never call the cache API. Only full verified epochs are activated. */
+public final class RulesReloadBroadcastProcessFunction
+        extends BroadcastProcessFunction<MessageRecord, CacheBundleState, ProcessingResult>
+        implements CheckpointedFunction {
+    private static final Logger log = LoggerFactory.getLogger(RulesReloadBroadcastProcessFunction.class);
+    private static final String STATE_KEY = "active";
     public static final OutputTag<ProcessingResult> FLINK_AUDIT_RESULT_TAG =
-            new OutputTag<ProcessingResult>("flink-audit-result") {
-            };
+            new OutputTag<ProcessingResult>("flink-audit-result") {};
 
-    private final MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc;
+    private final MapStateDescriptor<String, CacheBundleState> rulesBroadcastDesc;
     private final String jwt;
     private final VaultSecretsDto vaultSecrets;
-
     private transient ObjectMapper mapper;
     private transient RulesCacheRuntime cacheRuntime;
     private transient MessageProcessingService messageProcessor;
     private transient DotnetHandlerClient dotnetHandlerClient;
     private transient HandlerRoutingState handlerRoutingState;
-    private transient ScheduledExecutorService cacheRetryExecutor;
-    private transient AtomicReference<CacheUpdateEvent> pendingCompiledRules;
-    private transient AtomicReference<CacheUpdateEvent> pendingPolitics;
-    private transient AtomicBoolean compiledRulesRetryActive;
-    private transient AtomicBoolean politicsRetryActive;
-    private transient AtomicLong appliedCompiledRulesVersion;
-    private transient AtomicLong appliedPoliticsVersion;
-    private transient Object cacheReloadLock;
-    private transient long cacheRetryInitialDelayMs;
-    private transient long cacheRetryMaxDelayMs;
+    private transient Deque<MessageRecord> startupPending;
+    private transient ListState<byte[]> startupPendingState;
+    private transient int maxStartupPending;
 
-    public RulesReloadBroadcastProcessFunction(
-            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
-            String jwt
-    ) {
-        this(rulesBroadcastDesc, jwt, null);
+    public RulesReloadBroadcastProcessFunction(MapStateDescriptor<String,CacheBundleState> descriptor,
+                                               String jwt,VaultSecretsDto secrets) {
+        this.rulesBroadcastDesc=descriptor;this.jwt=jwt;this.vaultSecrets=secrets;
     }
+    @Override public void open(
+            Configuration parameters) {
 
-    public RulesReloadBroadcastProcessFunction(
-            MapStateDescriptor<String, CacheUpdateEvent> rulesBroadcastDesc,
-            String jwt,
-            VaultSecretsDto vaultSecrets
-    ) {
-        this.rulesBroadcastDesc = rulesBroadcastDesc;
-        this.jwt = jwt;
-        this.vaultSecrets = vaultSecrets;
-    }
+        ExecutionConfig.GlobalJobParameters global =
+                getRuntimeContext()
+                        .getExecutionConfig()
+                        .getGlobalJobParameters();
 
-    @Override
-    public void open(Configuration parameters) {
-        RuntimeContext rc = getRuntimeContext();
+        ParameterTool pt =
+                global == null 
+                        ? ParameterTool.fromMap(Map.of()) 
+                        : ParameterTool.fromMap(global.toMap());
 
-        ExecutionConfig.GlobalJobParameters globalParams =
-                rc.getExecutionConfig().getGlobalJobParameters();
+        boolean logPayloads = 
+                pt.getBoolean(
+                        "log.payloads",
+                        false
+                );
 
-        ParameterTool pt = globalParams == null
-                ? ParameterTool.fromMap(Map.of())
-                : ParameterTool.fromMap(globalParams.toMap());
-
-        boolean logPayloads = pt.getBoolean("log.payloads", false);
-
-        DynamicHandler defaultHandler = DynamicHandler.from(
-                pt.get("handler", pt.get("handler.default", "flink")),
-                DynamicHandler.FLINK
+        maxStartupPending = Math.max(
+                1,
+                pt.getInt(
+                        "cache.startup.max-pending-messages",
+                        10000
+                )
         );
 
+        if (startupPending == null) startupPending = new ArrayDeque<>();
+        
+        DynamicHandler defaultHandler = 
+                DynamicHandler.from(
+                        pt.get(
+                                "handler",
+                                pt.get(
+                                        "handler.default",
+                                        "flink"
+                                )
+                        ),
+                        DynamicHandler.FLINK
+                );
+
         this.handlerRoutingState = new HandlerRoutingState(defaultHandler);
-
         this.mapper = new ObjectMapper();
+        this.cacheRuntime = new RulesCacheRuntime(mapper,jwt);
 
-        this.cacheRuntime = new RulesCacheRuntime(mapper, jwt);
         this.cacheRuntime.open(pt);
-        this.pendingCompiledRules = new AtomicReference<>();
-        this.pendingPolitics = new AtomicReference<>();
-        this.compiledRulesRetryActive = new AtomicBoolean(false);
-        this.politicsRetryActive = new AtomicBoolean(false);
-        this.appliedCompiledRulesVersion = new AtomicLong(cacheRuntime.compiledRulesVersion());
-        this.appliedPoliticsVersion = new AtomicLong(cacheRuntime.politicsVersion());
-        this.cacheReloadLock = new Object();
-        this.cacheRetryInitialDelayMs = Math.max(1_000L, pt.getLong("cache.reload.retry.initial.ms", 5_000L));
-        this.cacheRetryMaxDelayMs = Math.max(cacheRetryInitialDelayMs, pt.getLong("cache.reload.retry.max.ms", 60_000L));
-        this.cacheRetryExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread thread = new Thread(r, "cache-spring-retry-" + rc.getIndexOfThisSubtask());
-            thread.setDaemon(true);
-            return thread;
-        });
-        log.info("[CACHE][SPRING] background retry initialized subtask={} initialDelayMs={} maxDelayMs={}", rc.getIndexOfThisSubtask(), cacheRetryInitialDelayMs, cacheRetryMaxDelayMs);
 
         this.messageProcessor = new MessageProcessingService(
                 mapper,
@@ -132,6 +104,7 @@ public class RulesReloadBroadcastProcessFunction
         );
 
         String dotnetUrl = pt.get("handler.dotnet.url");
+
         long dotnetTimeoutMs = pt.getLong(
                 "handler.dotnet.timeout.ms",
                 20_000L
@@ -144,7 +117,10 @@ public class RulesReloadBroadcastProcessFunction
                 vaultSecrets == null ? null : vaultSecrets.truststorePassword();
 
         String dotnetJwt = firstNotBlank(
-                pt.get("handler.dotnet.jwt", null),
+                pt.get(
+                        "handler.dotnet.jwt", 
+                        null
+                ),
                 vaultDotnetJwt
         );
 
@@ -152,7 +128,10 @@ public class RulesReloadBroadcastProcessFunction
                 pt.get("handler.dotnet.ssl.truststore.location");
 
         String dotnetTrustStorePassword = firstNotBlank(
-                pt.get("handler.dotnet.ssl.truststore.password", null),
+                pt.get(
+                        "handler.dotnet.ssl.truststore.password", 
+                        null
+                ),
                 vaultTruststorePassword
         );
 
@@ -173,45 +152,92 @@ public class RulesReloadBroadcastProcessFunction
                 verifySsl
         );
 
-        log.info(
-                "[INIT] subtask={} handler.default={} dotnetUrl={} dotnetTimeoutMs={} "
-                        + "dotnetSslVerify={} rulesLoaded={} dataset2controlAreaLoaded={} "
-                        + "controlAreaRulesLoaded={} errorMessagesLoaded={} "
-                        + "datasetExclusionLoaded={} filterFlagLoaded={} "
-                        + "genderMappingLoaded={} typeDulMappingLoaded={} "
-                        + "referencedRulesLoaded={} referencedControlAreasLoaded={}",
-                rc.getIndexOfThisSubtask(),
-                defaultHandler.value(),
-                dotnetUrl,
-                dotnetTimeoutMs,
-                verifySsl,
-                cacheRuntime.rulesSize(),
-                cacheRuntime.dataset2ControlAreaSize(),
-                cacheRuntime.controlAreaRulesSize(),
-                cacheRuntime.errorMessagesSize(),
-                cacheRuntime.datasetExclusionSize(),
-                cacheRuntime.filterFlagSize(),
-                cacheRuntime.genderMappingSize(),
-                cacheRuntime.typeDulMappingSize(),
-                cacheRuntime.referencedRulesSize(),
-                cacheRuntime.referencedControlAreasSize()
+
+        log.info("[CACHE] processor subtask={} ready for broadcast, no API call during open",
+                getRuntimeContext().getIndexOfThisSubtask());
+    }
+
+    private void activate(
+            CacheBundleState bundle) {
+
+        bundle.verify();
+        
+        long currentEpoch = 
+                cacheRuntime
+                        .snapshot()
+                        .cacheEpoch();
+
+        if (bundle.cacheEpoch() <= currentEpoch) return;
+
+        // Prepare does not touch active state; exceptions leave old snapshot intact.
+        RulesCacheSnapshot prepared = cacheRuntime.prepare(bundle);
+
+        cacheRuntime.activate(prepared);
+
+        handlerRoutingState.update(
+                DynamicHandler.from(
+                        bundle.handler(),
+                        DynamicHandler.FLINK
+                )
         );
 
         log.info(
-                "[INIT-DIAG] subtask={} rulesSnapshot.size={} diagnosticsEnabled=true",
-                rc.getIndexOfThisSubtask(),
-                cacheRuntime.rulesSnapshot() == null ? 0 : cacheRuntime.rulesSnapshot().size()
+                "[CACHE] subtask={} activated epoch={} rules={} compiledVersion={} politicsVersion={}",
+                getRuntimeContext().getIndexOfThisSubtask(), 
+                prepared.cacheEpoch(),
+                prepared.compiledRules().size(),
+                prepared.compiledRulesVersion(),
+                prepared.politicsVersion()
         );
     }
 
     @Override
     public void processElement(
-            MessageRecord in,
+            MessageRecord in, 
             ReadOnlyContext ctx,
-            Collector<ProcessingResult> out
-    ) {
-        String eventId = in == null ? "unknown" : in.eventId();
+            Collector<ProcessingResult> out) throws Exception {
+        CacheBundleState bundle =
+                ctx.getBroadcastState(rulesBroadcastDesc).get(STATE_KEY);
 
+        if (bundle == null) {
+            // Prevent empty-rules execution when MQ and bundle inputs race at cold start.
+            if (startupPending.size() >= maxStartupPending)
+                    throw new IllegalStateException("Cache startup message buffer full: " + maxStartupPending);
+
+            startupPending.addLast(in);
+            return;
+        }
+
+        if (bundle.cacheEpoch() > cacheRuntime.snapshot().cacheEpoch()) activate(bundle);
+
+        drainPending(result->ctx.output(FLINK_AUDIT_RESULT_TAG,result),out);
+
+        processReady(in,result->ctx.output(FLINK_AUDIT_RESULT_TAG,result),out);
+    }
+
+    private void drainPending(
+            Consumer<ProcessingResult> audit,
+            Collector<ProcessingResult> out) {
+
+        if (startupPending == null) return;
+
+        while (!startupPending.isEmpty()) {
+            processReady(
+                    startupPending.peekFirst(),
+                    audit,
+                    out
+            );
+            startupPending.removeFirst();
+        }
+    }
+
+    private void processReady(
+            MessageRecord in, 
+            Consumer<ProcessingResult> audit,
+            Collector<ProcessingResult> out) {
+
+        String eventId = in == null ? "unknown" : in.eventId();
+        
         DynamicHandler handler = handlerRoutingState.currentHandler();
 
         log.debug(
@@ -220,12 +246,11 @@ public class RulesReloadBroadcastProcessFunction
                 handler.value()
         );
 
-        if (handler == DynamicHandler.DOTNET) {
-            processWithDotnetHandler(in, eventId, ctx, out);
-            return;
+        if(handler == DynamicHandler.DOTNET) {
+            processWithDotnetHandler(in,eventId,audit,out);
+        } else {
+            processWithFlinkHandler(in,eventId,audit,out);
         }
-
-        processWithFlinkHandler(in, eventId, ctx, out);
     }
 
     /**
@@ -237,7 +262,7 @@ public class RulesReloadBroadcastProcessFunction
     private void processWithFlinkHandler(
             MessageRecord in,
             String eventId,
-            ReadOnlyContext ctx,
+            Consumer<ProcessingResult> audit,
             Collector<ProcessingResult> out
     ) {
         log.debug(
@@ -277,7 +302,7 @@ public class RulesReloadBroadcastProcessFunction
             );
 
             // Отдельный выход: внутренний результат в Kafka audit.
-            ctx.output(FLINK_AUDIT_RESULT_TAG, flinkResult);
+            audit.accept(flinkResult);
 
             log.debug(
                     "[FLINK][eventId={}] result sent to Kafka audit side output",
@@ -306,7 +331,7 @@ public class RulesReloadBroadcastProcessFunction
     private void processWithDotnetHandler(
             MessageRecord in,
             String eventId,
-            ReadOnlyContext ctx,
+            Consumer<ProcessingResult> audit,
             Collector<ProcessingResult> out
     ) {
         /*
@@ -384,10 +409,7 @@ public class RulesReloadBroadcastProcessFunction
                         flinkDurationMs
                 );
 
-                ctx.output(
-                        FLINK_AUDIT_RESULT_TAG,
-                        flinkResult
-                );
+                audit.accept(flinkResult);
 
                 log.debug(
                         "[FLINK-AUDIT][eventId={}] result sent to Kafka audit side output",
@@ -430,223 +452,76 @@ public class RulesReloadBroadcastProcessFunction
     }
 
     @Override
-    public void processBroadcastElement(CacheUpdateEvent ev, Context ctx, Collector<ProcessingResult> out) throws Exception {
-        if (ev == null || !ev.isValid()) {
+    public void processBroadcastElement(
+            CacheBundleState bundle, 
+            Context ctx,
+            Collector<ProcessingResult> out) throws Exception {
+
+        if (bundle==null) return;
+
+        BroadcastState<String,CacheBundleState> state =
+                ctx.getBroadcastState(rulesBroadcastDesc);
+
+        CacheBundleState prior = state.get(STATE_KEY);
+
+        if (prior != null && bundle.cacheEpoch() <= prior.cacheEpoch()) {
+            // After restore, broadcast state may already contain this epoch,
+            // while the transient local ClassLoader has not been rebuilt.
+            activate(prior);
+            drainPending(
+                    result -> ctx.output(
+                            FLINK_AUDIT_RESULT_TAG,
+                            result
+                    ),
+                    out
+            );
             return;
         }
-        BroadcastState<String, CacheUpdateEvent> st = ctx.getBroadcastState(rulesBroadcastDesc);
-        CacheUpdateEvent current = st.get(ev.cacheName);
-        if (CACHE_HANDLER.equalsIgnoreCase(ev.cacheName)) {
-            DynamicHandler newHandler = DynamicHandler.from(ev.handler, null);
-            if (newHandler == null) {
-                log.warn("[HANDLER][KAFKA] ignore handler event with invalid handler='{}'", ev.handler);
-                return;
-            }
-            DynamicHandler currentHandler = handlerRoutingState.currentHandler();
-            if (currentHandler == newHandler) {
-                log.info("[HANDLER][KAFKA] ignore handler event handler={} current={}", newHandler.value(), currentHandler.value());
-                return;
-            }
-            handlerRoutingState.update(newHandler);
-            st.put(ev.cacheName, ev);
-            log.info("[HANDLER][KAFKA] handler switched from {} to {} by event", currentHandler.value(), newHandler.value());
-            return;
-        }
-        long appliedVersion = appliedVersion(ev.cacheName);
-        long stateVersion = current == null ? -1L : current.version;
-        long effectiveCurrentVersion = Math.max(appliedVersion, stateVersion);
-        if (ev.version <= effectiveCurrentVersion) {
-            log.info("[CACHE][KAFKA] ignore cacheName={} version={} currentVersion={}", ev.cacheName, ev.version, effectiveCurrentVersion);
-            return;
-        }
-        log.info("[CACHE][KAFKA] new event cacheName={} version={} currentVersion={} -> reloading", ev.cacheName, ev.version, effectiveCurrentVersion);
-        long t0 = System.nanoTime();
-        try {
-            synchronized (cacheReloadLock) {
-                long latestApplied = appliedVersion(ev.cacheName);
-                if (ev.version <= latestApplied) {
-                    log.info("[CACHE][KAFKA] reload skipped cacheName={} version={} alreadyApplied={}", ev.cacheName, ev.version, latestApplied);
-                    return;
-                }
-                cacheRuntime.reload(ev);
-                markApplied(ev.cacheName, ev.version);
-            }
-            long ms = (System.nanoTime() - t0) / 1_000_000L;
-            st.put(ev.cacheName, ev);
-            clearPendingUpTo(ev.cacheName, ev.version);
-            log.info("[CACHE][KAFKA] reload OK cacheName={} version={} in {}ms", ev.cacheName, ev.version, ms);
-        } catch (Exception ex) {
-            long ms = (System.nanoTime() - t0) / 1_000_000L;
-            log.warn("[CACHE][SPRING] reload failed cacheName={} requestedVersion={} currentVersion={} afterMs={} -> keep old snapshot and retry in background. cause={}", ev.cacheName, ev.version, appliedVersion(ev.cacheName), ms, rootMessage(ex));
-            registerPendingReload(ev);
-        }
+        activate(bundle);
+        state.put(STATE_KEY,bundle);
+        drainPending(
+                result -> ctx.output(
+                        FLINK_AUDIT_RESULT_TAG,
+                        result
+                ),
+                out
+        );
     }
 
-    private void registerPendingReload(CacheUpdateEvent ev) {
-        AtomicReference<CacheUpdateEvent> pendingRef = pendingReference(ev.cacheName);
-        AtomicBoolean activeRef = retryActiveReference(ev.cacheName);
-        if (pendingRef == null || activeRef == null) {
-            log.warn("[CACHE][SPRING] background retry is not supported for cacheName={}", ev.cacheName);
-            return;
-        }
-        CacheUpdateEvent previous = pendingRef.getAndUpdate(current -> current == null || ev.version > current.version ? ev : current);
-        CacheUpdateEvent actual = pendingRef.get();
-        if (previous == null) {
-            log.warn("[CACHE][SPRING] pending reload registered cacheName={} pendingVersion={} retryInMs={}", ev.cacheName, actual.version, cacheRetryInitialDelayMs);
-        } else if (actual.version > previous.version) {
-            log.info("[CACHE][KAFKA] newer pending version received cacheName={} oldPendingVersion={} newPendingVersion={}", ev.cacheName, previous.version, actual.version);
-        } else {
-            log.info("[CACHE][KAFKA] pending version unchanged cacheName={} pendingVersion={} receivedVersion={}", ev.cacheName, actual.version, ev.version);
-        }
-        if (activeRef.compareAndSet(false, true)) {
-            scheduleRetry(ev.cacheName, cacheRetryInitialDelayMs, 1);
-        }
+    @Override public void initializeState(
+            FunctionInitializationContext context)throws Exception {
+
+        startupPendingState = 
+                context
+                        .getOperatorStateStore()
+                        .getListState(
+                                new ListStateDescriptor<>(
+                                        "cache-startup-pending-v1",
+                                        BytePrimitiveArraySerializer.INSTANCE
+                                )
+                        );
+                        
+        startupPending = new ArrayDeque<>();
+
+        if (context.isRestored()) for (byte[] bytes : startupPendingState.get())
+            startupPending.addLast(
+                    MessageRecordCodec.decode(bytes)
+            );
     }
 
-    private void scheduleRetry(String cacheName, long delayMs, int attempt) {
-        if (cacheRetryExecutor == null || cacheRetryExecutor.isShutdown()) {
-            finishRetryLoop(cacheName);
-            return;
-        }
-        cacheRetryExecutor.schedule(() -> retryPending(cacheName, delayMs, attempt), delayMs, TimeUnit.MILLISECONDS);
+    @Override public void snapshotState(
+            FunctionSnapshotContext context)throws Exception {
+
+        java.util.List<byte[]> values = 
+                new java.util.ArrayList<>(startupPending.size());
+
+        for (MessageRecord in : startupPending) values.add(MessageRecordCodec.encode(in));
+
+        startupPendingState.update(values);
     }
 
-    private void retryPending(String cacheName, long previousDelayMs, int attempt) {
-        AtomicReference<CacheUpdateEvent> pendingRef = pendingReference(cacheName);
-        if (pendingRef == null) {
-            finishRetryLoop(cacheName);
-            return;
-        }
-        CacheUpdateEvent pending = pendingRef.get();
-        if (pending == null) {
-            finishRetryLoop(cacheName);
-            return;
-        }
-        long alreadyApplied = appliedVersion(cacheName);
-        if (pending.version <= alreadyApplied) {
-            pendingRef.compareAndSet(pending, null);
-            continueOrFinishRetry(cacheName, cacheRetryInitialDelayMs, 1);
-            return;
-        }
-        log.warn("[CACHE][SPRING] retrying cache reload cacheName={} pendingVersion={} currentVersion={} attempt={}", cacheName, pending.version, alreadyApplied, attempt);
-        long t0 = System.nanoTime();
-        try {
-            synchronized (cacheReloadLock) {
-                long latestApplied = appliedVersion(cacheName);
-                if (pending.version > latestApplied) {
-                    cacheRuntime.reload(pending);
-                    markApplied(cacheName, pending.version);
-                }
-            }
-            long ms = (System.nanoTime() - t0) / 1_000_000L;
-            pendingRef.compareAndSet(pending, null);
-            CacheUpdateEvent newer = pendingRef.get();
-            if (newer == null) {
-                log.info("[CACHE][SPRING] connection restored cacheName={} loadedVersion={} attempts={} durationMs={}", cacheName, pending.version, attempt, ms);
-            } else {
-                log.info("[CACHE][SPRING] version {} loaded for cacheName={}, but newer pendingVersion={} exists", pending.version, cacheName, newer.version);
-            }
-            continueOrFinishRetry(cacheName, cacheRetryInitialDelayMs, 1);
-        } catch (Exception ex) {
-            long nextDelayMs = nextRetryDelay(previousDelayMs);
-            CacheUpdateEvent latest = pendingRef.get();
-            long pendingVersion = latest == null ? pending.version : latest.version;
-            log.warn("[CACHE][SPRING] Spring cache service unavailable cacheName={} attemptedVersion={} pendingVersion={} currentVersion={} attempt={} retryInMs={} cause={}", cacheName, pending.version, pendingVersion, appliedVersion(cacheName), attempt, nextDelayMs, rootMessage(ex));
-            scheduleRetry(cacheName, nextDelayMs, attempt + 1);
-        }
-    }
-
-    private void continueOrFinishRetry(String cacheName, long delayMs, int attempt) {
-        AtomicReference<CacheUpdateEvent> pendingRef = pendingReference(cacheName);
-        AtomicBoolean activeRef = retryActiveReference(cacheName);
-        if (pendingRef != null && pendingRef.get() != null) {
-            scheduleRetry(cacheName, delayMs, attempt);
-            return;
-        }
-        if (activeRef != null) {
-            activeRef.set(false);
-            if (pendingRef != null && pendingRef.get() != null && activeRef.compareAndSet(false, true)) {
-                scheduleRetry(cacheName, delayMs, attempt);
-            }
-        }
-    }
-
-    private void finishRetryLoop(String cacheName) {
-        AtomicBoolean activeRef = retryActiveReference(cacheName);
-        if (activeRef != null) {
-            activeRef.set(false);
-        }
-    }
-
-    private long nextRetryDelay(long previousDelayMs) {
-        long doubled = previousDelayMs >= cacheRetryMaxDelayMs / 2 ? cacheRetryMaxDelayMs : previousDelayMs * 2;
-        return Math.min(cacheRetryMaxDelayMs, Math.max(cacheRetryInitialDelayMs, doubled));
-    }
-
-    private AtomicReference<CacheUpdateEvent> pendingReference(String cacheName) {
-        if (RulesCacheRuntime.CACHE_COMPILED_RULES.equals(cacheName)) {
-            return pendingCompiledRules;
-        }
-        if (RulesCacheRuntime.CACHE_POLITICS.equals(cacheName)) {
-            return pendingPolitics;
-        }
-        return null;
-    }
-
-    private AtomicBoolean retryActiveReference(String cacheName) {
-        if (RulesCacheRuntime.CACHE_COMPILED_RULES.equals(cacheName)) {
-            return compiledRulesRetryActive;
-        }
-        if (RulesCacheRuntime.CACHE_POLITICS.equals(cacheName)) {
-            return politicsRetryActive;
-        }
-        return null;
-    }
-
-    private long appliedVersion(String cacheName) {
-        if (RulesCacheRuntime.CACHE_COMPILED_RULES.equals(cacheName)) {
-            return appliedCompiledRulesVersion.get();
-        }
-        if (RulesCacheRuntime.CACHE_POLITICS.equals(cacheName)) {
-            return appliedPoliticsVersion.get();
-        }
-        return 0L;
-    }
-
-    private void markApplied(String cacheName, long version) {
-        if (RulesCacheRuntime.CACHE_COMPILED_RULES.equals(cacheName)) {
-            appliedCompiledRulesVersion.accumulateAndGet(version, Math::max);
-        } else if (RulesCacheRuntime.CACHE_POLITICS.equals(cacheName)) {
-            appliedPoliticsVersion.accumulateAndGet(version, Math::max);
-        }
-    }
-
-    private void clearPendingUpTo(String cacheName, long version) {
-        AtomicReference<CacheUpdateEvent> pendingRef = pendingReference(cacheName);
-        if (pendingRef != null) {
-            pendingRef.updateAndGet(current -> current != null && current.version <= version ? null : current);
-        }
-    }
-
-    private static String rootMessage(Throwable throwable) {
-        if (throwable == null) {
-            return "unknown";
-        }
-        Throwable current = throwable;
-        while (current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        return current.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
-    }
-
-    @Override
-    public void close() {
-        if (cacheRetryExecutor != null) {
-            cacheRetryExecutor.shutdownNow();
-        }
-        if (cacheRuntime != null) {
-            cacheRuntime.close();
-        }
+    @Override public void close() throws Exception {
+        if (cacheRuntime != null) cacheRuntime.close();
+        super.close();
     }
 }
