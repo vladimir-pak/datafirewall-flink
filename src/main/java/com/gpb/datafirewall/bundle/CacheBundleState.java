@@ -11,9 +11,8 @@ import java.util.Set;
 public final class CacheBundleState implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    public static final int SCHEMA_VERSION = 1;
+    public static final int SCHEMA_VERSION = 2;
     private final int schemaVersion;
-    private final long cacheEpoch;
     private final String compiledRulesVersion;
     private final String politicsVersion;
     private final Map<String, byte[]> classNameToBytecode;
@@ -29,7 +28,6 @@ public final class CacheBundleState implements Serializable {
 
     CacheBundleState(
             int schemaVersion, 
-            long cacheEpoch, 
             String compiledRulesVersion,
             String politicsVersion, 
             Map<String, byte[]> classNameToBytecode,
@@ -43,16 +41,13 @@ public final class CacheBundleState implements Serializable {
             String handler, 
             String checksum) {
 
-        if (schemaVersion != SCHEMA_VERSION || cacheEpoch < 0) {
+        if (schemaVersion != SCHEMA_VERSION) {
             throw new IllegalArgumentException(
-                    "Unsupported bundle schema/epoch " 
-                            + schemaVersion 
-                            + "/" + cacheEpoch
+                    "Unsupported bundle schema " + schemaVersion
             );
         }
 
         this.schemaVersion = schemaVersion;
-        this.cacheEpoch = cacheEpoch;
 
         this.compiledRulesVersion = required(
                 compiledRulesVersion, 
@@ -101,7 +96,6 @@ public final class CacheBundleState implements Serializable {
     }
 
     public static CacheBundleState create(
-            long epoch, 
             String compiledVersion, 
             String politicsVersion,
             Map<String, byte[]> bytecodes, 
@@ -118,7 +112,6 @@ public final class CacheBundleState implements Serializable {
         CacheBundleState unsigned = 
                 new CacheBundleState(
                         SCHEMA_VERSION, 
-                        epoch, 
                         compiledVersion,
                         politicsVersion, 
                         bytecodes, 
@@ -138,10 +131,24 @@ public final class CacheBundleState implements Serializable {
         );
     }
 
+    /** Replace only bytecode, preserving every policy and dictionary from this immutable bundle. */
+    public CacheBundleState withRules(String rulesVersion, Map<String, byte[]> codes, String newHandler) {
+        return create(rulesVersion, politicsVersion, codes,
+                dataset2ControlArea, controlAreaRules, errorMessages, datasetExclusion,
+                filterFlags, genderMapping, typeDulMapping, newHandler);
+    }
+
+    /** Used only to compose a subsequent full cache update, not on handler-only notifications. */
+    public CacheBundleState withHandler(String nextHandler) {
+        if (handler.equals(nextHandler)) return this;
+        return create(compiledRulesVersion, politicsVersion, classNameToBytecode,
+                dataset2ControlArea, controlAreaRules, errorMessages, datasetExclusion,
+                filterFlags, genderMapping, typeDulMapping, nextHandler);
+    }
+
     CacheBundleState withChecksum(String sum) {
         return new CacheBundleState(
                 schemaVersion, 
-                cacheEpoch, 
                 compiledRulesVersion, 
                 politicsVersion,
                 classNameToBytecode, 
@@ -164,7 +171,8 @@ public final class CacheBundleState implements Serializable {
                 )
         )
             throw new IllegalStateException(
-                    "Cache bundle checksum mismatch, epoch=" + cacheEpoch
+                    "Cache bundle checksum mismatch, rules=" + compiledRulesVersion
+                            + ", politics=" + politicsVersion
             );
     }
 
@@ -229,10 +237,6 @@ public final class CacheBundleState implements Serializable {
         return schemaVersion; 
     }
     
-    public long cacheEpoch() { 
-        return cacheEpoch; 
-    }
-
     public String compiledRulesVersion() { 
         return compiledRulesVersion; 
     }

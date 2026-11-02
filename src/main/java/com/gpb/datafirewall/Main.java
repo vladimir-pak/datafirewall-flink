@@ -1,19 +1,14 @@
 package com.gpb.datafirewall;
 
-import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.utils.ParameterTool;
-import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
-import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,28 +18,23 @@ import com.gpb.datafirewall.util.HostnameUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.gpb.datafirewall.artemis.ArtemisConnectionUrlBuilder;
 import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.audit.AuditEventType;
 import com.gpb.datafirewall.audit.AuditPropertiesUtil;
 import com.gpb.datafirewall.audit.CefAuditEvent;
 import com.gpb.datafirewall.audit.CefAuditPublisher;
-import com.gpb.datafirewall.bundle.CacheBundleState;
-import com.gpb.datafirewall.bundle.CacheBundleStateTypeInfo;
-import com.gpb.datafirewall.artemis.ArtemisSink;
-import com.gpb.datafirewall.artemis.ArtemisSource;
 import com.gpb.datafirewall.config.JobConfig;
 import com.gpb.datafirewall.dto.AuditRecord;
 import com.gpb.datafirewall.dto.ProcessingResult;
-import com.gpb.datafirewall.mq.MqSink;
-import com.gpb.datafirewall.mq.MqSource;
 import com.gpb.datafirewall.services.DynamicHandler;
-import com.gpb.datafirewall.services.MessageRecord;
-import com.gpb.datafirewall.services.MessageReply;
-import com.gpb.datafirewall.services.RulesProcessingFunction;
-import com.gpb.datafirewall.operators.RulesProcessingOperatorFactory;
 import com.gpb.datafirewall.bundle.CacheBundleEnvelope;
 import com.gpb.datafirewall.source.CacheSnapshotSource;
+import com.gpb.datafirewall.transaction.TransactionSettings;
+import com.gpb.datafirewall.transaction.TransactionPulseSource;
+import com.gpb.datafirewall.transaction.TransactionalRulesOperatorFactory;
+import com.gpb.datafirewall.transaction.artemis.ArtemisConnectionUrlBuilder;
+import com.gpb.datafirewall.transaction.ProcessingAuditDiscardSink;
+import com.gpb.datafirewall.transaction.BestEffortKafkaAuditSink;
 import com.gpb.datafirewall.vault.VaultClient;
 import com.gpb.datafirewall.vault.VaultClientConfig;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
@@ -63,7 +53,6 @@ public class Main {
     private static final String DEFAULT_KAFKA_BOOTSTRAP = "localhost:9092";
     private static final String DEFAULT_KAFKA_TOPIC = "rules-update";
     private static final String DEFAULT_KAFKA_GROUP = "dfw-rules-group";
-    // private static final String DEFAULT_DETAIL_KAFKA_TOPIC = "detail-answer";
     private static final String DEFAULT_MESSAGING_BACKEND = "mq";
     private static final int DEFAULT_PARALLELISM = 1;
     private static final String DEFAULT_ARTEMIS_BROKER_URL = "tcp://localhost:61616";
@@ -89,12 +78,8 @@ public class Main {
             env.setParallelism(parallelism);
         }
 
-        final int sourceParallelism = positiveParallelism(
-                "parallelism.source", pt.getInt("parallelism.source", parallelism));
         final int processParallelism = positiveParallelism(
                 "parallelism.process", pt.getInt("parallelism.process", parallelism));
-        final int sinkParallelism = positiveParallelism(
-                "parallelism.sink", pt.getInt("parallelism.sink", parallelism));
         final int auditParallelism = positiveParallelism(
                 "parallelism.audit", pt.getInt("parallelism.audit", processParallelism));
         // Set audit.slot-sharing-group only when audit needs dedicated slot capacity.
@@ -112,8 +97,8 @@ public class Main {
                 env.getCheckpointConfig().getCheckpointingConsistencyMode(),
                 env.getCheckpointConfig().getMaxConcurrentCheckpoints(),
                 env.getCheckpointConfig().getMinPauseBetweenCheckpoints());
-        log.info("[MAIN] parallelism: default={}, source={}, process={}, sink={}, audit={}, auditSlotSharingGroup={}",
-                parallelism, sourceParallelism, processParallelism, sinkParallelism, auditParallelism,
+        log.info("[MAIN] parallelism: default={}, transactionalWorkers={}, audit={}, auditSlotSharingGroup={}",
+                parallelism, processParallelism, auditParallelism,
                 auditSlotSharingGroup.isBlank() ? "<inherited>" : auditSlotSharingGroup);
 
         VaultSecretsDto vaultSecrets = VaultClient.loadSecrets(
@@ -187,7 +172,7 @@ public class Main {
                 artemisKeyStorePassword,
                 artemisCipherSuites
         );
-        log.info("Artemis URL: {}", artemisBrokerUrl);
+        log.info("Artemis URL: {}", maskConnectionUrl(artemisBrokerUrl));
 
         String igniteApiUrl = pt.get("ignite.apiUrl", "http://127.0.0.1:8080");
         String rulesLoader = pt.get("rules.loader", "http");
@@ -253,59 +238,14 @@ public class Main {
                 cfg
         );
 
-        final DataStream<MessageRecord> inputStream;
-
-        switch (backend) {
-            case "mq" -> {
-                log.info("[MAIN] INPUT -> MQ");
-
-                inputStream = env.addSource(
-                                new MqSource(
-                                        cfg.mqHost(),
-                                        cfg.mqPort(),
-                                        cfg.mqChannel(),
-                                        cfg.mqQmgr(),
-                                        cfg.mqInQueue(),
-                                        cfg.mqUser(),
-                                        cfg.mqPassword(),
-                                        logPayloads,
-                                        pt.getInt("log.preview.len", 600),
-                                        pt.getInt("mq.wait.interval.ms", 1000),
-                                        mqTlsEnabled,
-                                        mqTlsCipherSuite,
-                                        mqTrustStore,
-                                        mqTrustStorePassword,
-                                        cefAuditConfig
-                                ),
-                                "mq-source"
-                        )
-                        .name("mq-source")
-                        .uid("mq-source")
-                        .setParallelism(sourceParallelism);
-            }
-
-            case "artemis" -> {
-                log.info("[MAIN] INPUT -> ARTEMIS");
-
-                inputStream = env.addSource(
-                                new ArtemisSource(
-                                        artemisBrokerUrl,
-                                        artemisUser,
-                                        artemisPassword,
-                                        artemisInQueue,
-                                        artemisReceiveTimeoutMs,
-                                        cefAuditConfig
-                                ),
-                                "artemis-source"
-                        )
-                        .name("artemis-source")
-                        .uid("artemis-source")
-                        .setParallelism(sourceParallelism);
-            }
-
-            default -> throw new IllegalArgumentException(
-                    "Unsupported messaging.backend=" + backend + ". Supported: mq|artemis"
-            );
+        if (!"mq".equals(backend) && !"artemis".equals(backend)) {
+            throw new IllegalArgumentException("Unsupported messaging.backend=" + backend);
+        }
+        // A broker transaction needs one local connection for RECEIVE + SEND + COMMIT.
+        // parallelism.process is the number of independent transactional workers.
+        if (pt.has("parallelism.source") || pt.has("parallelism.sink")) {
+            log.warn("parallelism.source/sink are ignored by transactional broker processing; "
+                    + "set parallelism.process instead");
         }
 
         Properties kafkaClientProps = buildKafkaClientProperties(pt, "kafka", vaultSecrets);
@@ -352,7 +292,7 @@ public class Main {
         }
 
         // Источник полных снимков кэша
-        DataStream<CacheBundleState> updates = env.addSource(
+        DataStream<CacheBundleEnvelope> cacheUpdates = env.addSource(
                 new CacheSnapshotSource(
                         pt,
                         vaultSecrets.jwt(),
@@ -362,138 +302,63 @@ public class Main {
                         kafkaGroup
                 ),
                 "cache-snapshot-source",
-                CacheBundleStateTypeInfo.INSTANCE
+                Types.POJO(CacheBundleEnvelope.class)
             )
             .name("cache-snapshot-source")
-            .uid("cache-snapshot-source-v1")
+            .uid("cache-snapshot-source-v2")
             .setParallelism(1);
 
-        // Encode once on the single cache branch, then broadcast bytes to every processor.
-        DataStream<CacheBundleEnvelope> cacheUpdates = updates
-                .map(CacheBundleEnvelope::fromBundle)
-                .returns(Types.POJO(CacheBundleEnvelope.class))
-                .name("encode-cache-bundle")
-                .uid("encode-cache-bundle-v1")
-                .setParallelism(1);
+        // Independent broker transactions: a worker owns its own MQ manager/JMS session.
+        // Kafka cache updates are delivered over the second input and prepared off-mailbox.
+        TransactionSettings txSettings = new TransactionSettings(
+                backend,
+                cfg.mqHost(), cfg.mqPort(), cfg.mqChannel(), cfg.mqQmgr(),
+                "mq".equals(backend) ? cfg.mqInQueue() : artemisInQueue,
+                "mq".equals(backend) ? cfg.mqOutQueue() : artemisOutQueue,
+                "mq".equals(backend)
+                        ? pt.get("mq.error.queue", "")
+                        : pt.get("artemis.error.queue", ""),
+                "mq".equals(backend) ? cfg.mqUser() : artemisUser,
+                "mq".equals(backend) ? cfg.mqPassword() : artemisPassword,
+                mqTlsEnabled, mqTlsCipherSuite, mqTrustStore, mqTrustStorePassword,
+                mqReplyXFrom, mqReplyXServiceId, artemisBrokerUrl,
+                "mq".equals(backend)
+                        ? pt.getInt("mq.wait.interval.ms", 100)
+                        : artemisReceiveTimeoutMs);
 
-        SingleOutputStreamOperator<ProcessingResult> processed = inputStream
-                .connect(cacheUpdates.broadcast())
-                .transform(
-                        "process-with-broadcast-cache", 
-                        Types.POJO(ProcessingResult.class),
-                        new RulesProcessingOperatorFactory(
-                                vaultSecrets.jwt(), 
-                                vaultSecrets,
-                                pt.getInt("cache.startup.max-pending-messages",
-                                        pt.getInt("cache.activation.max-pending-messages", 100000)),
-                                pt.getLong("cache.startup.max-pending-bytes",
-                                        pt.getLong("cache.activation.max-pending-bytes", 64L * 1024 * 1024))
-                        )
-                )
-                .uid("process-with-cache-bundle-v1")
+        DataStream<Long> pulses = env.addSource(
+                        new TransactionPulseSource(pt.getLong("transaction.pulse.interval.ms", 100L)),
+                        "transaction-pulse")
+                .name("transaction-pulse")
+                .uid("transaction-pulse-v1")
                 .setParallelism(processParallelism);
 
-        DataStream<ProcessingResult> flinkAuditResults =
-                processed.getSideOutput(
-                        RulesProcessingFunction.FLINK_AUDIT_RESULT_TAG
-                );
+        SingleOutputStreamOperator<ProcessingResult> processed = pulses
+                .connect(cacheUpdates.broadcast())
+                .transform(
+                        "transactional-broker-worker",
+                        Types.POJO(ProcessingResult.class),
+                        new TransactionalRulesOperatorFactory(
+                                vaultSecrets.jwt(), vaultSecrets, txSettings, cefAuditConfig))
+                .uid("transactional-broker-worker-v3")
+                .setParallelism(processParallelism);
 
-        if ("mq".equals(backend)) {
-            DataStream<MessageReply> shortReplies = processed
-                    .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
-                        @Override
-                        public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
-                            if (result == null) {
-                                return;
-                            }
-
-                            String shortJson = result.getShortJson();
-                            if (shortJson == null || shortJson.isBlank()) {
-                                throw new IllegalStateException("Missing reply eventId=" + result.getEventId());
-                            }
-
-                            out.collect(MessageReply.forMq(result.getMqCorrelationId(), shortJson));
-                        }
-                    })
-                    .returns(Types.POJO(MessageReply.class))
-                    .name("build-short-reply")
-                    .uid("build-short-reply");
-
-            shortReplies
-                    .addSink(new MqSink(
-                            cfg.mqHost(),
-                            cfg.mqPort(),
-                            cfg.mqChannel(),
-                            cfg.mqQmgr(),
-                            cfg.mqOutQueue(),
-                            cfg.mqUser(),
-                            cfg.mqPassword(),
-                            mqTlsEnabled,
-                            mqTlsCipherSuite,
-                            mqTrustStore,
-                            mqTrustStorePassword,
-                            mqReplyXFrom,
-                            mqReplyXServiceId,
-                            cefAuditConfig
-                    ))
-                    .name("mq-sink")
-                    .uid("mq-sink")
-                    .setParallelism(sinkParallelism);
-
-            log.info("[MAIN] MQ output sink enabled");
-        } else if ("artemis".equals(backend)) {
-            DataStream<MessageReply> shortReplies = processed
-                    .flatMap(new FlatMapFunction<ProcessingResult, MessageReply>() {
-                        @Override
-                        public void flatMap(ProcessingResult result, Collector<MessageReply> out) {
-                            if (result == null) {
-                                return;
-                            }
-
-                            String shortJson = result.getShortJson();
-                            if (shortJson == null || shortJson.isBlank()) {
-                                throw new IllegalStateException("Missing reply eventId=" + result.getEventId());
-                            }
-
-                            out.collect(MessageReply.forJms(result.getJmsCorrelationId(), shortJson));
-                        }
-                    })
-                    .returns(Types.POJO(MessageReply.class))
-                    .name("build-short-reply")
-                    .uid("build-short-reply");
-
-            shortReplies
-                    .addSink(new ArtemisSink(
-                            artemisBrokerUrl,
-                            artemisUser,
-                            artemisPassword,
-                            artemisOutQueue,
-                            cefAuditConfig
-                    ))
-                    .name("artemis-sink")
-                    .uid("artemis-sink")
-                    .setParallelism(sinkParallelism);
-
-            log.info("[MAIN] Artemis output sink enabled");
-        }
+        // Only the independent Kafka audit is emitted after successful broker commit.
+        // It is NOT part of the MQ/JMS transaction and is not a durable outbox.
+        DataStream<ProcessingResult> flinkAuditResults = processed;
 
         if (auditKafkaEnabled) {
-
-            KafkaSink<String> auditKafkaSink = KafkaSink.<String>builder()
-                    .setBootstrapServers(auditKafkaBootstrap)
-                    .setKafkaProducerConfig(auditKafkaClientProps)
-                    .setRecordSerializer(
-                            KafkaRecordSerializationSchema.builder()
-                                    .setTopic(auditKafkaTopic)
-                                    .setValueSerializationSchema(new SimpleStringSchema())
-                                    .build()
-                    )
-                    .setDeliveryGuarantee(
-                        checkpointingEnabled
-                            ? DeliveryGuarantee.AT_LEAST_ONCE
-                            : DeliveryGuarantee.NONE
-                    )
-                    .build();
+            // Deliberately lossy audit. Kafka producer errors must never fail the broker job.
+            // Legacy delivery guarantees are not applicable to this fire-and-forget sink.
+            String configuredGuarantee = pt.get("audit.kafka.delivery-guarantee", "NONE").trim();
+            if (!"NONE".equalsIgnoreCase(configuredGuarantee)) {
+                log.warn("[MAIN] Ignoring audit.kafka.delivery-guarantee={}; "
+                        + "audit is now best-effort and never checkpoints Kafka transactions",
+                        configuredGuarantee);
+            }
+            BestEffortKafkaAuditSink auditKafkaSink = new BestEffortKafkaAuditSink(
+                    auditKafkaBootstrap, auditKafkaTopic, auditKafkaClientProps,
+                    pt.getLong("audit.kafka.best-effort.max-block.ms", 100L));
 
             SingleOutputStreamOperator<String> auditRecords = flinkAuditResults
                     .flatMap(new RichFlatMapFunction<ProcessingResult, String>() {
@@ -569,7 +434,8 @@ public class Main {
 
                                 out.collect(mapper.writeValueAsString(audit));
                             } catch (Exception e) {
-                                throw new IllegalStateException("Failed to serialize Flink audit eventId=" + result.getEventId(), e);
+                                log.warn("Dropping malformed Kafka processing audit eventId={}: {}",
+                                        result.getEventId(), e.toString());
                             }
                         }
                     })
@@ -588,9 +454,9 @@ public class Main {
             }
 
             DataStreamSink<String> auditSink = auditRecords
-                    .sinkTo(auditKafkaSink)
+                    .addSink(auditKafkaSink)
                     .name("flink-audit-kafka-sink")
-                    .uid("flink-audit-kafka-sink")
+                    .uid("flink-audit-kafka-best-effort-v1")
                     .setParallelism(auditParallelism);
             if (!auditSlotSharingGroup.isBlank()) {
                 auditSink.slotSharingGroup(auditSlotSharingGroup);
@@ -599,7 +465,11 @@ public class Main {
             log.info("[MAIN] Flink audit Kafka sink enabled: bootstrap={}, topic={}",
                     auditKafkaBootstrap, auditKafkaTopic);
         } else {
-            log.info("[MAIN] audit kafka sink is disabled.");
+            processed.addSink(new ProcessingAuditDiscardSink())
+                    .name("broker-commit-events-discard")
+                    .uid("broker-commit-events-discard-v1")
+                    .setParallelism(auditParallelism);
+            log.info("[MAIN] audit kafka sink is disabled; broker transactions remain enabled.");
         }
 
         try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
@@ -629,6 +499,13 @@ public class Main {
             }
             throw e;
         }
+    }
+
+    private static String maskConnectionUrl(String value) {
+        return value == null ? null : value
+                .replaceAll("(?i)(trustStorePassword=)[^&]*", "$1***")
+                .replaceAll("(?i)(keyStorePassword=)[^&]*", "$1***")
+                .replaceAll("(?i)(password=)[^&]*", "$1***");
     }
 
     private static int positiveParallelism(String key, int value) {
@@ -959,7 +836,7 @@ public class Main {
                 auditKafkaBootstrap,
                 auditKafkaTopic,
                 checkpointingEnabled,
-                artemisBrokerUrl,
+                maskConnectionUrl(artemisBrokerUrl),
                 artemisInQueue,
                 artemisOutQueue,
                 artemisTlsEnabled,

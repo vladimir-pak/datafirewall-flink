@@ -18,7 +18,7 @@ public final class TestBundles {
                 for (int j = 0; j < from.length; j++) if (bytes[i+j] != from[j]) match = false;
                 if (match) System.arraycopy(to, 0, bytes, i, to.length);
             }
-            return CacheBundleState.create(epoch, "11", "8", Map.of(RULE, bytes),
+            return CacheBundleState.create(Long.toString(epoch), "8", Map.of(RULE, bytes),
                     Map.of("DS", "CA"), Map.of("CA", Map.of("field", Set.of(referencedRule))),
                     Map.of(), Map.of(), Map.of("CA", false), Map.of(), Map.of(), "flink");
         } catch (IOException ex) { throw new IllegalStateException(ex); }

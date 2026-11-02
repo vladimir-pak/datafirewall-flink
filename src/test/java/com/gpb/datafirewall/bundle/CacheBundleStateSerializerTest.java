@@ -17,7 +17,6 @@ class CacheBundleStateSerializerTest {
         codes.put("z.Rule", new byte[] {1, 2, 3});
         codes.put("a.Rule", new byte[] {4, 5});
         return CacheBundleState.create(
-                42L,
                 "11",
                 "8",
                 codes,
@@ -37,11 +36,23 @@ class CacheBundleStateSerializerTest {
         assertNotEquals(initial.compiledRulesVersion(), initial.politicsVersion());
         CacheBundleState restored =
                 CacheBundleStateSerializer.decode(CacheBundleStateSerializer.encode(initial));
-        assertEquals(initial.cacheEpoch(), restored.cacheEpoch());
+        assertEquals(initial.compiledRulesVersion(), restored.compiledRulesVersion());
+        assertEquals(initial.politicsVersion(), restored.politicsVersion());
         assertEquals(initial.checksum(), restored.checksum());
         assertEquals(initial.controlAreaRules(), restored.controlAreaRules());
         byte[] first = CacheBundleStateSerializer.encode(restored);
         assertArrayEquals(first, CacheBundleStateSerializer.encode(initial));
+    }
+
+    @Test
+    void rulesUpdatePreservesIndependentPoliticsState() {
+        CacheBundleState initial = sample();
+        CacheBundleState changed = initial.withRules("12", Map.of("b.Rule", new byte[] {6, 7}), "flink");
+        assertEquals("12", changed.compiledRulesVersion());
+        assertEquals("8", changed.politicsVersion());
+        assertEquals(initial.controlAreaRules(), changed.controlAreaRules());
+        assertEquals(initial.dataset2ControlArea(), changed.dataset2ControlArea());
+        assertNotEquals(initial.checksum(), changed.checksum());
     }
 
     @Test

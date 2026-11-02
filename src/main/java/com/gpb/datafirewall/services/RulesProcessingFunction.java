@@ -115,39 +115,64 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
                 getRuntimeContext().getIndexOfThisSubtask());
     }
 
-    /** Runs on the cache preparation executor. Never modifies the active epoch. */
-    public RuntimeEpoch prepareEpoch(CacheBundleState bundle) {
+    /** Runs on the cache preparation executor. Never modifies the active runtime. */
+    public PreparedRuntime prepareBundle(CacheBundleState bundle) {
         RulesCacheSnapshot next = cacheRuntime.prepare(bundle);
-        DynamicHandler handler = DynamicHandler.from(bundle.handler(), DynamicHandler.FLINK);
-        if (handler == DynamicHandler.DOTNET && !dotnetHandlerClient.isConfigured()) {
+        DynamicHandler handler = validateHandler(bundle.handler());
+        return new PreparedRuntime(next, handler);
+    }
+
+    /** Validate routing before changing operator state or publishing a new handler. */
+    public DynamicHandler validateHandler(String handler) {
+        DynamicHandler target = DynamicHandler.from(handler, null);
+        if (target == DynamicHandler.DOTNET && !dotnetHandlerClient.isConfigured()) {
             throw new IllegalStateException("Cannot activate dotnet handler without URL and JWT");
         }
-        return new RuntimeEpoch(next, handler);
+        return target;
+    }
+
+    /** Handler-only event: reuse the EXACT same prepared rules and indexes. Mailbox only. */
+    public void activateHandler(String handler) {
+        DynamicHandler next = validateHandler(handler);
+        PreparedRuntime old = cacheRuntime.activeRuntime();
+        if (old.snapshot().compiledRulesVersion() == null) {
+            return; // Operator retains the desired handler until first cache preparation completes.
+        }
+        if (old.handler() == next) return;
+        cacheRuntime.activate(new PreparedRuntime(old.snapshot(), next));
+        log.info("[CACHE] subtask={} handler changed to {} without rules/politics reload",
+                getRuntimeContext().getIndexOfThisSubtask(), next);
     }
 
     /** Runs on the mailbox, between messages. One atomic publication for the complete runtime. */
-    public void activate(RuntimeEpoch epoch) {
-        cacheRuntime.activate(epoch);
-        log.info("[CACHE] subtask={} atomically activated epoch={} handler={}",
-                getRuntimeContext().getIndexOfThisSubtask(), epoch.cacheEpoch(), epoch.handler());
+    public void activate(PreparedRuntime runtime) {
+        cacheRuntime.activate(runtime);
+        log.info("[CACHE] subtask={} atomically activated rules={} politics={} handler={}",
+                getRuntimeContext().getIndexOfThisSubtask(),
+                runtime.compiledRulesVersion(), runtime.politicsVersion(), runtime.handler());
     }
 
-    public long activeEpoch() {
-        return cacheRuntime.snapshot().cacheEpoch();
+    public PreparedRuntime currentRuntime() {
+        return cacheRuntime.activeRuntime();
+    }
+
+    public boolean cacheReady() {
+        return cacheRuntime.snapshot().compiledRulesVersion() != null
+                && cacheRuntime.snapshot().politicsVersion() != null;
     }
 
     public void process(MessageRecord in, Consumer<ProcessingResult> reply,
                         Consumer<ProcessingResult> audit) {
         Objects.requireNonNull(in, "message");
-        RuntimeEpoch epoch = cacheRuntime.epoch();
-        if (epoch.cacheEpoch() < 0) throw new IllegalStateException("Cache is not active");
+        PreparedRuntime active = cacheRuntime.activeRuntime();
+        if (active.snapshot().compiledRulesVersion() == null) throw new IllegalStateException("Cache is not active");
         ProcessingResult internal;
         ProcessingResult response;
-        if (epoch.handler() == DynamicHandler.DOTNET) {
+        if (active.handler() == DynamicHandler.DOTNET) {
             response = requireResult(dotnetHandlerClient.process(in), in);
-            internal = requireResult(messageProcessor.process(in, epoch.snapshot()), in);
+            internal = requireResult(messageProcessor.process(in, active.snapshot()), in);
         } else {
-            internal = requireResult(messageProcessor.process(in, epoch.snapshot()), in);
+            internal = requireResult(messageProcessor.process(in, active.snapshot()), in);
             response = internal;
         }
         reply.accept(response);

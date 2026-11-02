@@ -34,7 +34,6 @@ public final class RulesCacheSnapshot {
     private final Map<String, String> typeDulMapping;
     private final String compiledRulesVersion;
     private final String politicsVersion;
-    private final long cacheEpoch;
 
     private final Map<String, Set<String>> referencedFieldsByRule;
     private final Map<String, Set<String>> referencedFieldsByControlArea;
@@ -62,36 +61,6 @@ public final class RulesCacheSnapshot {
                 typeDulMapping,
                 compiledRulesVersion,
                 politicsVersion,
-                -1L,
-                null
-        );
-    }
-
-    public RulesCacheSnapshot(
-            Map<String, Rule> compiledRules,
-            Map<String, String> dataset2ControlArea,
-            Map<String, Map<String, Set<String>>> controlAreaRules,
-            Map<String, Map<String, String>> errorMessagesByRule,
-            Map<String, Set<String>> excludedBlocksByControlArea,
-            Map<String, Boolean> filterFlagsByControlArea,
-            Map<String, String> genderMapping,
-            Map<String, String> typeDulMapping,
-            String compiledRulesVersion,
-            String politicsVersion,
-            long cacheEpoch
-    ) {
-        this(
-                compiledRules, 
-                dataset2ControlArea, 
-                controlAreaRules, 
-                errorMessagesByRule,
-                excludedBlocksByControlArea, 
-                filterFlagsByControlArea, 
-                genderMapping,
-                typeDulMapping, 
-                compiledRulesVersion, 
-                politicsVersion, 
-                cacheEpoch, 
                 null
         );
     }
@@ -107,7 +76,6 @@ public final class RulesCacheSnapshot {
             Map<String, String> typeDulMapping,
             String compiledRulesVersion,
             String politicsVersion,
-            long cacheEpoch,
             Map<String, Set<String>> preparedReferencedFieldsByRule
     ) {
         this.compiledRules = safeMap(compiledRules);
@@ -120,7 +88,6 @@ public final class RulesCacheSnapshot {
         this.typeDulMapping = safeMap(typeDulMapping);
         this.compiledRulesVersion = compiledRulesVersion;
         this.politicsVersion = politicsVersion;
-        this.cacheEpoch = cacheEpoch;
 
         this.referencedFieldsByRule = preparedReferencedFieldsByRule == null
                 ? buildReferencedFieldsByRule(this.compiledRules)
@@ -186,7 +153,6 @@ public final class RulesCacheSnapshot {
         return politicsVersion;
     }
 
-    public long cacheEpoch() { return cacheEpoch; }
 
     public Map<String, Set<String>> referencedFieldsByRule() {
         return referencedFieldsByRule;
@@ -237,8 +203,7 @@ public final class RulesCacheSnapshot {
                 genderMapping,
                 typeDulMapping,
                 newCompiledRulesVersion,
-                politicsVersion,
-                cacheEpoch
+                politicsVersion
         );
     }
 
@@ -266,7 +231,6 @@ public final class RulesCacheSnapshot {
                 newTypeDulMapping,
                 compiledRulesVersion,
                 newPoliticsVersion,
-                cacheEpoch,
                 referencedFieldsByRule
         );
     }

@@ -1,7 +1,5 @@
 package com.gpb.datafirewall.rule;
 
-import com.gpb.datafirewall.cache.CompiledRulesRegistry;
-import com.gpb.datafirewall.ignite.BytecodeSource;
 import com.gpb.datafirewall.model.Rule;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -11,14 +9,6 @@ import java.util.Map;
 
 /** Builds rule objects without modifying the active rules registry. */
 public final class RulesReloader {
-    private final BytecodeSource source;
-    private final CompiledRulesRegistry registry;
-
-    public RulesReloader() { this.source = null; this.registry = null; }
-    /** Legacy API retained for callers that have not migrated yet. */
-    public RulesReloader(BytecodeSource source,CompiledRulesRegistry registry) {
-        this.source=source;this.registry=registry;
-    }
     public record PreparedRules(Map<String,Rule> rules,String version) {}
 
     public PreparedRules loadFromBytecodes(Map<String,byte[]> bytecodes,String version) {
@@ -41,12 +31,5 @@ public final class RulesReloader {
             }
         }
         return new PreparedRules(Collections.unmodifiableMap(prepared),version);
-    }
-    public void reloadAllStrict(String fullName) {
-        if(source==null || registry==null) throw new IllegalStateException("Legacy loader is not initialized");
-        int index=fullName.lastIndexOf('_');
-        if(index<0 || index==fullName.length()-1)throw new IllegalArgumentException("Invalid full name "+fullName);
-        PreparedRules prepared=loadFromBytecodes(source.loadAll(fullName),fullName.substring(index+1));
-        registry.replaceAll(prepared.rules(),prepared.version());
     }
 }

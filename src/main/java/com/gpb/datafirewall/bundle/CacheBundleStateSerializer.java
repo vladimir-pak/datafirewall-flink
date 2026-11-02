@@ -25,7 +25,7 @@ import org.apache.flink.core.memory.DataOutputView;
 public final class CacheBundleStateSerializer extends TypeSerializer<CacheBundleState> {
     private static final long serialVersionUID = 1L;
     private static final int MAGIC = 0x43424E44; // CBND
-    private static final int WIRE_VERSION = 1;
+    private static final int WIRE_VERSION = 2;
     private static final int MAX_LENGTH = 256 * 1024 * 1024;
     private static final int MAX_COLLECTION = 1_000_000;
 
@@ -69,7 +69,6 @@ public final class CacheBundleStateSerializer extends TypeSerializer<CacheBundle
 
             DataInputStream p = new DataInputStream(new ByteArrayInputStream(payload));
             int schemaVersion = p.readInt();
-            long epoch = p.readLong();
             String compiled = readString(p);
             String politics = readString(p);
             String handler = readString(p);
@@ -86,7 +85,7 @@ public final class CacheBundleStateSerializer extends TypeSerializer<CacheBundle
             }
 
             CacheBundleState bundle = new CacheBundleState(
-                    schemaVersion, epoch, compiled, politics, bytecodes, dataset, rules, errors,
+                    schemaVersion, compiled, politics, bytecodes, dataset, rules, errors,
                     excluded, flags, genders, duls, handler, checksum);
             bundle.verify();
             return bundle;
@@ -108,7 +107,6 @@ public final class CacheBundleStateSerializer extends TypeSerializer<CacheBundle
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(bytes);
         out.writeInt(b.schemaVersion());
-        out.writeLong(b.cacheEpoch());
         writeString(out, b.compiledRulesVersion());
         writeString(out, b.politicsVersion());
         writeString(out, b.handler());

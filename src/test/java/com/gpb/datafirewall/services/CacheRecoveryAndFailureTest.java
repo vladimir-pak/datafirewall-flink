@@ -14,7 +14,8 @@ class CacheRecoveryAndFailureTest {
         runtime.activate(runtime.prepare(CacheBundleStateSerializer.decode(saved)));
         var rule = runtime.snapshot().compiledRules().get(TestBundles.RULE);
         assertInstanceOf(RuleClassLoader.class, rule.getClass().getClassLoader());
-        assertEquals(42, runtime.snapshot().cacheEpoch());
+        assertEquals("42", runtime.snapshot().compiledRulesVersion());
+        assertEquals("8", runtime.snapshot().politicsVersion());
         assertTrue(rule.apply(Map.of("field", "bad")));
         assertFalse(rule.apply(Map.of("field", "ok")));
     }
@@ -22,7 +23,7 @@ class CacheRecoveryAndFailureTest {
         var runtime = new RulesCacheRuntime(null, null);
         runtime.activate(runtime.prepare(TestBundles.bundle(41)));
         assertThrows(IllegalStateException.class, () -> runtime.prepare(TestBundles.bundle(42, "absent")));
-        assertEquals(41, runtime.snapshot().cacheEpoch());
+        assertEquals("41", runtime.snapshot().compiledRulesVersion());
     }
     @Test void propagatesTechnicalProcessingFailure() {
         var mapper = new ObjectMapper() {

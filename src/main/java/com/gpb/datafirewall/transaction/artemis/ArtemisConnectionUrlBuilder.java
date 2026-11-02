@@ -1,4 +1,4 @@
-package com.gpb.datafirewall.artemis;
+package com.gpb.datafirewall.transaction.artemis;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;

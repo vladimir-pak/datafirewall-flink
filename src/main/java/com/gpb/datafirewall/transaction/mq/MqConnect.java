@@ -1,4 +1,4 @@
-package com.gpb.datafirewall.mq;
+package com.gpb.datafirewall.transaction.mq;
 
 import com.ibm.mq.MQException;
 import com.ibm.mq.MQQueueManager;

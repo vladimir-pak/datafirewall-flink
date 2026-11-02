@@ -9,7 +9,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** No API/HTTP/Ignite dependencies. One atomic activation per full cache epoch. */
+/** No API/HTTP/Ignite dependencies. One atomic activation per full cache bundle. */
 public final class RulesCacheRuntime implements AutoCloseable {
 
     public static final String CACHE_COMPILED_RULES="compiled_rules";
@@ -17,8 +17,8 @@ public final class RulesCacheRuntime implements AutoCloseable {
     public static final String CACHE_GENDER_MAPPING="gender_mapping";
     public static final String CACHE_TYPE_DUL_MAPPING="type_dul_mapping";
 
-    private final AtomicReference<RuntimeEpoch> active =
-            new AtomicReference<>(new RuntimeEpoch(RulesCacheSnapshot.empty(), DynamicHandler.FLINK));
+    private final AtomicReference<PreparedRuntime> active =
+            new AtomicReference<>(new PreparedRuntime(RulesCacheSnapshot.empty(), DynamicHandler.FLINK));
 
     private final RulesReloader reloader = new RulesReloader();
 
@@ -47,8 +47,7 @@ public final class RulesCacheRuntime implements AutoCloseable {
                 bundle.genderMapping(),
                 bundle.typeDulMapping(),
                 prepared.version(),
-                bundle.politicsVersion(),
-                bundle.cacheEpoch()
+                bundle.politicsVersion()
         );
     }
 
@@ -56,32 +55,32 @@ public final class RulesCacheRuntime implements AutoCloseable {
         bundle.controlAreaRules().forEach((area, fields) -> fields.forEach((field, ids) -> {
             for (String id : ids) {
                 if (RuleIdLookup.resolve(rules, id) == null) {
-                    throw new IllegalStateException("Bundle epoch=" + bundle.cacheEpoch()
+                    throw new IncompatibleCacheBundleException("Bundle rules=" + bundle.compiledRulesVersion() + " politics=" + bundle.politicsVersion()
                             + " references missing rule=" + id + " area=" + area + " field=" + field);
                 }
             }
         }));
         bundle.dataset2ControlArea().forEach((dataset, area) -> {
             if (!bundle.controlAreaRules().containsKey(area)) {
-                throw new IllegalStateException("Bundle epoch=" + bundle.cacheEpoch()
+                throw new IncompatibleCacheBundleException("Bundle rules=" + bundle.compiledRulesVersion() + " politics=" + bundle.politicsVersion()
                         + " dataset=" + dataset + " references missing control area=" + area);
             }
         });
     }
 
     public void activate(RulesCacheSnapshot prepared) {
-        if (prepared == null || prepared.cacheEpoch() < 0) 
+        if (prepared == null || prepared.compiledRulesVersion() == null || prepared.politicsVersion() == null)
                 throw new IllegalArgumentException("Invalid snapshot");
-        activate(new RuntimeEpoch(prepared, DynamicHandler.FLINK));
+        activate(new PreparedRuntime(prepared, DynamicHandler.FLINK));
     }
 
-    public void activate(RuntimeEpoch prepared) {
-        if (prepared == null || prepared.cacheEpoch() < 0)
-            throw new IllegalArgumentException("Invalid runtime epoch");
+    public void activate(PreparedRuntime prepared) {
+        if (prepared == null || prepared.compiledRulesVersion() == null || prepared.politicsVersion() == null)
+            throw new IllegalArgumentException("Invalid runtime bundle");
         active.set(prepared);
     }
 
-    public RuntimeEpoch epoch() { return active.get(); }
+    public PreparedRuntime activeRuntime() { return active.get(); }
 
     public RulesCacheSnapshot snapshot() {
         return active.get().snapshot();
