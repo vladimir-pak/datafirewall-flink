@@ -1,4 +1,4 @@
-package com.gpb.datafirewall.transaction;
+package com.gpb.datafirewall.transaction.kafka;
 
 import java.time.Duration;
 import java.util.Properties;

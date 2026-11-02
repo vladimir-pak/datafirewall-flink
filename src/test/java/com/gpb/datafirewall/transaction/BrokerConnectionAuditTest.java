@@ -35,7 +35,7 @@ class BrokerConnectionAuditTest {
         Path file = tempDirectory.resolve("mq-cef.log");
         try (BrokerConnectionAudit audit = BrokerConnectionAudit.mq(config(file), 2, 8,
                 "localhost", 1414, "TEST.CHANNEL", "QM1",
-                "INPUT.Q", "OUTPUT.Q", "ERROR.Q", "testuser", false,
+                "INPUT.Q", "OUTPUT.Q", "testuser", false,
                 null, null, "DFW", "SERVICE")) {
             audit.connecting();
             audit.connected();
@@ -49,9 +49,9 @@ class BrokerConnectionAuditTest {
         assertTrue(lines.get(3).contains("IBM MQ Sink Connected"));
         assertTrue(lines.get(4).contains("IBM MQ Source Disconnected"));
         assertTrue(lines.get(5).contains("IBM MQ Sink Disconnected"));
-        assertTrue(lines.get(4).contains("subtaskIndex=2"));
-        assertTrue(lines.get(4).contains("parallelism=8"));
-        assertTrue(lines.get(4).contains("transactional=true"));
+        assertTrue(lines.get(4).contains("subtaskIndex\\=2"));
+        assertTrue(lines.get(4).contains("parallelism\\=8"));
+        assertTrue(lines.get(4).contains("transactional\\=true"));
     }
 
     @Test
@@ -59,7 +59,7 @@ class BrokerConnectionAuditTest {
         Path file = tempDirectory.resolve("artemis-cef.log");
         try (BrokerConnectionAudit audit = BrokerConnectionAudit.artemis(config(file), 1, 4,
                 "tcp://localhost:61616?trustStorePassword=secret&keyStorePassword=top-secret",
-                "IN.Q", "OUT.Q", "ERR.Q", "testuser", 500)) {
+                "IN.Q", "OUT.Q", "testuser", 500)) {
             audit.connecting();
             audit.connectionFailed(new IOException("connection refused"));
         }

@@ -7,34 +7,35 @@ import org.junit.jupiter.api.Test;
 
 class TransactionSettingsTest {
 
-    private static TransactionSettings settings(String input, String output, String error) {
+    private static TransactionSettings settings(String input, String output) {
         return new TransactionSettings(
                 "mq", "localhost", 1414, "DEV.APP.SVRCONN", "QM1",
-                input, output, error, "user", "password",
+                input, output, "user", "password",
                 false, null, null, null, "DFW", "service",
                 null, 100);
     }
 
     @Test
-    void allowsDistinctQueues() {
-        assertEquals("ERROR.Q", settings("INPUT.Q", "OUTPUT.Q", "ERROR.Q").errorQueue());
+    void allowsDistinctInputAndOutputQueues() {
+        assertEquals("INPUT.Q", settings("INPUT.Q", "OUTPUT.Q").inputQueue());
+        assertEquals("OUTPUT.Q", settings("INPUT.Q", "OUTPUT.Q").outputQueue());
     }
 
     @Test
-    void rejectsMissingErrorQueue() {
+    void rejectsMissingInputQueue() {
         assertThrows(IllegalArgumentException.class,
-                () -> settings("INPUT.Q", "OUTPUT.Q", ""));
+                () -> settings("", "OUTPUT.Q"));
+    }
+
+    @Test
+    void rejectsMissingOutputQueue() {
+        assertThrows(IllegalArgumentException.class,
+                () -> settings("INPUT.Q", ""));
     }
 
     @Test
     void rejectsInputOutputOverlap() {
         assertThrows(IllegalArgumentException.class,
-                () -> settings("INPUT.Q", "INPUT.Q", "ERROR.Q"));
-    }
-
-    @Test
-    void rejectsErrorOutputOverlap() {
-        assertThrows(IllegalArgumentException.class,
-                () -> settings("INPUT.Q", "ERROR.Q", "ERROR.Q"));
+                () -> settings("INPUT.Q", "INPUT.Q"));
     }
 }

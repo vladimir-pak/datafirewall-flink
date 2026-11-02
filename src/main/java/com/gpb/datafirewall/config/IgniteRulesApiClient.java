@@ -3,7 +3,6 @@ package com.gpb.datafirewall.config;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gpb.datafirewall.dto.CacheResponseDto;
-import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
@@ -190,13 +189,6 @@ public final class IgniteRulesApiClient {
 
     private static boolean isNotBlank(String s) {
         return s != null && !s.isBlank();
-    }
-
-    private static String truncate(String s, int max) {
-        if (s == null) {
-            return "";
-        }
-        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     private HttpRequest.Builder requestBuilder(String url) {

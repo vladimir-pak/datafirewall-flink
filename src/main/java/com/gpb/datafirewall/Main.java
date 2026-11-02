@@ -31,10 +31,10 @@ import com.gpb.datafirewall.bundle.CacheBundleEnvelope;
 import com.gpb.datafirewall.source.CacheSnapshotSource;
 import com.gpb.datafirewall.transaction.TransactionSettings;
 import com.gpb.datafirewall.transaction.TransactionPulseSource;
-import com.gpb.datafirewall.transaction.TransactionalRulesOperatorFactory;
+import com.gpb.datafirewall.transaction.kafka.TransactionalRulesOperatorFactory;
 import com.gpb.datafirewall.transaction.artemis.ArtemisConnectionUrlBuilder;
-import com.gpb.datafirewall.transaction.ProcessingAuditDiscardSink;
-import com.gpb.datafirewall.transaction.BestEffortKafkaAuditSink;
+import com.gpb.datafirewall.transaction.kafka.BestEffortKafkaAuditSink;
+import com.gpb.datafirewall.transaction.kafka.ProcessingAuditDiscardSink;
 import com.gpb.datafirewall.vault.VaultClient;
 import com.gpb.datafirewall.vault.VaultClientConfig;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
@@ -315,9 +315,6 @@ public class Main {
                 cfg.mqHost(), cfg.mqPort(), cfg.mqChannel(), cfg.mqQmgr(),
                 "mq".equals(backend) ? cfg.mqInQueue() : artemisInQueue,
                 "mq".equals(backend) ? cfg.mqOutQueue() : artemisOutQueue,
-                "mq".equals(backend)
-                        ? pt.get("mq.error.queue", "")
-                        : pt.get("artemis.error.queue", ""),
                 "mq".equals(backend) ? cfg.mqUser() : artemisUser,
                 "mq".equals(backend) ? cfg.mqPassword() : artemisPassword,
                 mqTlsEnabled, mqTlsCipherSuite, mqTrustStore, mqTrustStorePassword,

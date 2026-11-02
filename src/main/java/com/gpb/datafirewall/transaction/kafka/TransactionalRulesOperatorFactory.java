@@ -1,9 +1,10 @@
-package com.gpb.datafirewall.transaction;
+package com.gpb.datafirewall.transaction.kafka;
 
 import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.bundle.CacheBundleEnvelope;
 import com.gpb.datafirewall.dto.ProcessingResult;
 import com.gpb.datafirewall.services.RulesProcessingFunction;
+import com.gpb.datafirewall.transaction.TransactionSettings;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;

@@ -1,4 +1,4 @@
-package com.gpb.datafirewall.transaction;
+package com.gpb.datafirewall.transaction.kafka;
 
 import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.bundle.CacheBundleEnvelope;
@@ -8,6 +8,11 @@ import com.gpb.datafirewall.dto.ProcessingResult;
 import com.gpb.datafirewall.services.DynamicHandler;
 import com.gpb.datafirewall.services.PreparedRuntime;
 import com.gpb.datafirewall.services.RulesProcessingFunction;
+import com.gpb.datafirewall.transaction.BrokerReconnectBackoff;
+import com.gpb.datafirewall.transaction.TransactionBroker;
+import com.gpb.datafirewall.transaction.TransactionSettings;
+import com.gpb.datafirewall.transaction.TransactionalReply;
+
 import java.util.List;
 import javax.jms.JMSException;
 import javax.jms.JMSRuntimeException;

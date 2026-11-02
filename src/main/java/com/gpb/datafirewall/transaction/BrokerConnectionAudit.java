@@ -49,7 +49,7 @@ public final class BrokerConnectionAudit implements AutoCloseable {
     public static BrokerConnectionAudit mq(
             AuditConfig config, int subtaskIndex, int parallelism,
             String host, int port, String channel, String qmgr,
-            String inputQueue, String outputQueue, String errorQueue,
+            String inputQueue, String outputQueue,
             String user, boolean tls, String cipherSuite, String trustStore,
             String xFrom, String xServiceId) {
         Map<String, Object> common = new LinkedHashMap<>();
@@ -63,7 +63,6 @@ public final class BrokerConnectionAudit implements AutoCloseable {
         common.put("cipherSuite", displayValue(cipherSuite));
         common.put("trustStore", displayValue(trustStore));
         common.put("transactional", true);
-        common.put("errorQueue", errorQueue);
 
         Map<String, Object> source = new LinkedHashMap<>(common);
         source.put("component", "MqSource");
@@ -78,13 +77,12 @@ public final class BrokerConnectionAudit implements AutoCloseable {
 
     public static BrokerConnectionAudit artemis(
             AuditConfig config, int subtaskIndex, int parallelism,
-            String url, String inputQueue, String outputQueue, String errorQueue,
+            String url, String inputQueue, String outputQueue,
             String user, long timeoutMs) {
         Map<String, Object> common = new LinkedHashMap<>();
         common.put("brokerUrl", maskBrokerUrl(url));
         common.put("user", displayUser(user));
         common.put("transactional", true);
-        common.put("errorQueue", errorQueue);
         Map<String, Object> source = new LinkedHashMap<>(common);
         source.put("component", "ArtemisSource");
         source.put("queue", inputQueue);

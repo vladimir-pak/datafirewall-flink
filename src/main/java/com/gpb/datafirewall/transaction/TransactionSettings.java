@@ -10,7 +10,7 @@ import java.io.Serializable;
 public record TransactionSettings(
         String backend,
         String host, int port, String channel, String queueManager,
-        String inputQueue, String outputQueue, String errorQueue,
+        String inputQueue, String outputQueue,
         String username, String password,
         boolean tls, String tlsCipherSuite, String trustStore, String trustStorePassword,
         String xFrom, String xServiceId,
@@ -21,15 +21,11 @@ public record TransactionSettings(
         if (!"mq".equals(backend) && !"artemis".equals(backend)) {
             throw new IllegalArgumentException("Unknown broker: " + backend);
         }
-        if (errorQueue == null || errorQueue.isBlank()) {
-            throw new IllegalArgumentException(backend + ".error.queue must be configured");
-        }
         if (inputQueue == null || inputQueue.isBlank() || outputQueue == null || outputQueue.isBlank()) {
             throw new IllegalArgumentException("input/output queue must be configured");
         }
-        if (inputQueue.equals(errorQueue) || outputQueue.equals(errorQueue)
-                || inputQueue.equals(outputQueue)) {
-            throw new IllegalArgumentException("Broker input, output and error queues must be distinct");
+        if (inputQueue.equals(outputQueue)) {
+            throw new IllegalArgumentException("Broker input and output queues must be distinct");
         }
         if (receiveTimeoutMs < 1 || receiveTimeoutMs > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Invalid receive timeout: " + receiveTimeoutMs);
@@ -44,13 +40,13 @@ public record TransactionSettings(
             throws Exception {
         if ("mq".equals(backend)) {
             return new MqTransactionalBroker(
-                    host, port, channel, queueManager, inputQueue, outputQueue, errorQueue,
+                    host, port, channel, queueManager, inputQueue, outputQueue,
                     username, password, (int) receiveTimeoutMs,
                     tls, tlsCipherSuite, trustStore, trustStorePassword, xFrom, xServiceId,
                     auditConfig, subtaskIndex, parallelism);
         }
         return new ArtemisTransactionalBroker(
                 artemisUrl, username, password, inputQueue, outputQueue,
-                errorQueue, receiveTimeoutMs, auditConfig, subtaskIndex, parallelism);
+                receiveTimeoutMs, auditConfig, subtaskIndex, parallelism);
     }
 }

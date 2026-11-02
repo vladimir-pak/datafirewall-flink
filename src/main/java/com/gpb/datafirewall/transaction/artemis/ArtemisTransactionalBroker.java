@@ -3,10 +3,9 @@ package com.gpb.datafirewall.transaction.artemis;
 import com.gpb.datafirewall.audit.AuditConfig;
 
 import com.gpb.datafirewall.services.MessageRecord;
-import com.gpb.datafirewall.transaction.BrokerConnectionAudit;
 import com.gpb.datafirewall.transaction.TransactionBroker;
 import com.gpb.datafirewall.transaction.TransactionalReply;
-import com.gpb.datafirewall.transaction.TransactionBroker.Processor;
+import com.gpb.datafirewall.transaction.BrokerConnectionAudit;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -31,36 +30,30 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
     private final BrokerConnectionAudit audit;
     private final String inQueue;
     private final String outQueue;
-    private final String failureQueue;
     private final long timeoutMs;
     private Connection connection;
     private Session session;
     private MessageConsumer consumer;
     private MessageProducer replyProducer;
-    private MessageProducer failureProducer;
 
     public ArtemisTransactionalBroker(
             String url, String user, String password, String inQueue, String outQueue,
-            String failureQueue, long timeoutMs) throws JMSException {
-        this(url, user, password, inQueue, outQueue, failureQueue, timeoutMs,
+            long timeoutMs) throws JMSException {
+        this(url, user, password, inQueue, outQueue, timeoutMs,
                 null, -1, -1);
     }
 
     public ArtemisTransactionalBroker(
             String url, String user, String password, String inQueue, String outQueue,
-            String failureQueue, long timeoutMs,
+            long timeoutMs,
             AuditConfig auditConfig, int subtaskIndex, int parallelism) throws JMSException {
-        if (failureQueue == null || failureQueue.isBlank()) {
-            throw new IllegalArgumentException("artemis.error.queue is required for processing exceptions");
-        }
         this.factory = new ActiveMQConnectionFactory(url, user, password);
         this.inQueue = inQueue;
         this.outQueue = outQueue;
-        this.failureQueue = failureQueue;
         this.timeoutMs = timeoutMs;
         this.audit = BrokerConnectionAudit.artemis(
                 auditConfig, subtaskIndex, parallelism,
-                url, inQueue, outQueue, failureQueue, user, timeoutMs);
+                url, inQueue, outQueue, user, timeoutMs);
         try {
             connect();
         } catch (JMSException error) {
@@ -78,18 +71,14 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
             Session newSession = newConnection.createSession(true, Session.SESSION_TRANSACTED);
             Queue input = newSession.createQueue(inQueue);
             Queue output = newSession.createQueue(outQueue);
-            Queue errors = newSession.createQueue(failureQueue);
             MessageConsumer newConsumer = newSession.createConsumer(input);
             MessageProducer newReply = newSession.createProducer(output);
-            MessageProducer newFailure = newSession.createProducer(errors);
             newReply.setDeliveryMode(DeliveryMode.PERSISTENT);
-            newFailure.setDeliveryMode(DeliveryMode.PERSISTENT);
             newConnection.start();
             this.connection = newConnection;
             this.session = newSession;
             this.consumer = newConsumer;
             this.replyProducer = newReply;
-            this.failureProducer = newFailure;
             audit.connected();
         } catch (JMSException e) {
             audit.connectionFailed(e);
@@ -128,11 +117,14 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
                 if (!id.equals(response.reply().getJmsCorrelationId())) {
                     throw new IllegalStateException("Reply correlation ID does not match JMS request " + id);
                 }
+            } catch (JMSException brokerFailure) {
+                // A JMS/session failure requires rollback, not acknowledgement.
+                throw brokerFailure;
             } catch (Exception businessFailure) {
-                sendFailure(incoming, businessFailure);
+                // Business/validation failure: acknowledge input without a reply.
                 commit();
-                log.warn("Artemis message {} moved to {} after processing error: {}", id,
-                        failureQueue, businessFailure.toString());
+                log.warn("Artemis request {} committed without reply after processing error: {}",
+                        id, businessFailure.toString(), businessFailure);
                 return null;
             }
             try {
@@ -173,36 +165,6 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
         throw new IllegalArgumentException("Unsupported JMS message type: " + incoming.getClass());
     }
 
-    private void sendFailure(Message original, Exception cause) throws JMSException {
-        // Copy the entire original payload to the durable error queue in the SAME transaction.
-        Message error;
-        if (original instanceof TextMessage text) {
-            error = session.createTextMessage(text.getText());
-        } else if (original instanceof BytesMessage bytes) {
-            BytesMessage copy = session.createBytesMessage();
-            bytes.reset();
-            byte[] block = new byte[8192];
-            int count;
-            while ((count = bytes.readBytes(block)) > 0) {
-                copy.writeBytes(block, 0, count);
-            }
-            error = copy;
-        } else {
-            // Never commit a placeholder body for an unsupported JMS message type.
-            // The broker must redeliver it until an explicit error policy is configured.
-            throw new JMSException("Cannot preserve unsupported JMS message type in error queue: "
-                    + original.getClass().getName());
-        }
-        error.setStringProperty("dfw_original_message_id", original.getJMSMessageID());
-        error.setStringProperty("dfw_error_type", cause.getClass().getSimpleName());
-        try {
-            failureProducer.send(error);
-        } catch (JMSException failure) {
-            audit.sinkFailed(failure);
-            throw failure;
-        }
-    }
-
     private void commit() throws JMSException {
         try {
             session.commit();
@@ -228,7 +190,6 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
         session = null;
         consumer = null;
         replyProducer = null;
-        failureProducer = null;
         audit.close();
     }
 }
