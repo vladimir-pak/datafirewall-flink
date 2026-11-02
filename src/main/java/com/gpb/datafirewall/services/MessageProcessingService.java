@@ -56,6 +56,10 @@ public final class MessageProcessingService {
         return processMessage(in, cacheRuntime.snapshot());
     }
 
+    public ProcessingResult process(MessageRecord in, RulesCacheSnapshot snapshot) {
+        return processMessage(in, java.util.Objects.requireNonNull(snapshot, "snapshot"));
+    }
+
     private ProcessingResult processMessage(
             MessageRecord in,
             RulesCacheSnapshot cacheSnapshot

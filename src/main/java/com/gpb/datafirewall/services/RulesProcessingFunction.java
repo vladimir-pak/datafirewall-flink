@@ -15,7 +15,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 
-/** Mailbox-thread-only rule preparation and processing. Activation is owned by the coordinator. */
+/** Background preparation is pure; publication and processing run on the operator mailbox. */
 public final class RulesProcessingFunction extends AbstractRichFunction {
     private static final Logger log = LoggerFactory.getLogger(RulesProcessingFunction.class);
     public static final OutputTag<ProcessingResult> FLINK_AUDIT_RESULT_TAG =
@@ -26,9 +26,6 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
     private transient RulesCacheRuntime cacheRuntime;
     private transient MessageProcessingService messageProcessor;
     private transient DotnetHandlerClient dotnetHandlerClient;
-    private transient HandlerRoutingState handlerRoutingState;
-    private transient RulesCacheSnapshot prepared;
-    private transient CacheBundleState preparedBundle;
 
     public RulesProcessingFunction(String jwt, VaultSecretsDto secrets) {
         this.jwt = jwt;
@@ -53,19 +50,6 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
                         false
                 );
 
-        DynamicHandler defaultHandler = 
-                DynamicHandler.from(
-                        pt.get(
-                                "handler",
-                                pt.get(
-                                        "handler.default",
-                                        "flink"
-                                )
-                        ),
-                        DynamicHandler.FLINK
-                );
-
-        this.handlerRoutingState = new HandlerRoutingState(defaultHandler);
         this.mapper = new ObjectMapper();
         this.cacheRuntime = new RulesCacheRuntime(mapper,jwt);
 
@@ -127,28 +111,25 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
         );
 
 
-        log.info("[CACHE] processor subtask={} ready for coordinated activation, no API call during open",
+        log.info("[CACHE] processor subtask={} ready for local background activation, no API call during open",
                 getRuntimeContext().getIndexOfThisSubtask());
     }
 
-    public void prepare(CacheBundleState bundle) {
+    /** Runs on the cache preparation executor. Never modifies the active epoch. */
+    public RuntimeEpoch prepareEpoch(CacheBundleState bundle) {
         RulesCacheSnapshot next = cacheRuntime.prepare(bundle);
-        if ("dotnet".equals(bundle.handler()) && !dotnetHandlerClient.isConfigured()) {
+        DynamicHandler handler = DynamicHandler.from(bundle.handler(), DynamicHandler.FLINK);
+        if (handler == DynamicHandler.DOTNET && !dotnetHandlerClient.isConfigured()) {
             throw new IllegalStateException("Cannot activate dotnet handler without URL and JWT");
         }
-        prepared = next;
-        preparedBundle = bundle;
+        return new RuntimeEpoch(next, handler);
     }
 
-    public void activate(long epoch, String checksum) {
-        if (preparedBundle == null || preparedBundle.cacheEpoch() != epoch
-                || !preparedBundle.checksum().equals(checksum)) {
-            throw new IllegalStateException("Activation without matching prepared bundle: " + epoch);
-        }
-        cacheRuntime.activate(prepared);
-        handlerRoutingState.update(DynamicHandler.from(preparedBundle.handler(), DynamicHandler.FLINK));
-        log.info("[CACHE] subtask={} activated epoch={} checksum={}",
-                getRuntimeContext().getIndexOfThisSubtask(), epoch, checksum);
+    /** Runs on the mailbox, between messages. One atomic publication for the complete runtime. */
+    public void activate(RuntimeEpoch epoch) {
+        cacheRuntime.activate(epoch);
+        log.info("[CACHE] subtask={} atomically activated epoch={} handler={}",
+                getRuntimeContext().getIndexOfThisSubtask(), epoch.cacheEpoch(), epoch.handler());
     }
 
     public long activeEpoch() {
@@ -158,14 +139,15 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
     public void process(MessageRecord in, Consumer<ProcessingResult> reply,
                         Consumer<ProcessingResult> audit) {
         Objects.requireNonNull(in, "message");
-        if (activeEpoch() < 0) throw new IllegalStateException("Cache is not active");
+        RuntimeEpoch epoch = cacheRuntime.epoch();
+        if (epoch.cacheEpoch() < 0) throw new IllegalStateException("Cache is not active");
         ProcessingResult internal;
         ProcessingResult response;
-        if (handlerRoutingState.currentHandler() == DynamicHandler.DOTNET) {
+        if (epoch.handler() == DynamicHandler.DOTNET) {
             response = requireResult(dotnetHandlerClient.process(in), in);
-            internal = requireResult(messageProcessor.process(in), in);
+            internal = requireResult(messageProcessor.process(in, epoch.snapshot()), in);
         } else {
-            internal = requireResult(messageProcessor.process(in), in);
+            internal = requireResult(messageProcessor.process(in, epoch.snapshot()), in);
             response = internal;
         }
         reply.accept(response);

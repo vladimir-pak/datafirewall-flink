@@ -148,18 +148,16 @@ public final class CacheSnapshotSource extends RichSourceFunction<CacheBundleSta
     @Override public void run(
             SourceContext<CacheBundleState> ctx) throws Exception {
 
-        if (
-                !pt.getBoolean("cache.bootstrap.enabled", true) 
-                        && active==null
-        )
-            throw new IllegalStateException(
-                    "cache.bootstrap.enabled=false is incompatible with an empty CacheSnapshotSource");
+        if (active == null && !pt.getBoolean("cache.bootstrap.enabled", true)) {
+            log.warn("[CACHE-SOURCE] No restored bundle: bootstrap is required; "
+                    + "legacy cache.bootstrap.enabled=false is ignored");
+        }
 
         if (restored && active != null && nextOffset < 0)
             throw new IllegalStateException("Restored bundle has no Kafka offset");
 
         // Не дожидаясь получения метаданных Kafka перед выпуском восстановленного пакета. 
-        // Координатор обработки также может восстановить свой зафиксированный пакет независимо.
+        // Обработчики также восстанавливают собственные локальные снимки независимо.
         if (active != null) {
             active.verify();
 

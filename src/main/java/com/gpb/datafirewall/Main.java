@@ -42,7 +42,8 @@ import com.gpb.datafirewall.services.DynamicHandler;
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.services.MessageReply;
 import com.gpb.datafirewall.services.RulesProcessingFunction;
-import com.gpb.datafirewall.coordination.RulesProcessingOperatorFactory;
+import com.gpb.datafirewall.operators.RulesProcessingOperatorFactory;
+import com.gpb.datafirewall.bundle.CacheBundleEnvelope;
 import com.gpb.datafirewall.source.CacheSnapshotSource;
 import com.gpb.datafirewall.vault.VaultClient;
 import com.gpb.datafirewall.vault.VaultClientConfig;
@@ -99,14 +100,9 @@ public class Main {
         // Set audit.slot-sharing-group only when audit needs dedicated slot capacity.
         final String auditSlotSharingGroup = pt.get("audit.slot-sharing-group", "").trim();
         final boolean checkpointingEnabled = env.getCheckpointConfig().isCheckpointingEnabled();
-        if (!checkpointingEnabled
-                || env.getCheckpointConfig().getCheckpointingConsistencyMode()
-                    != org.apache.flink.core.execution.CheckpointingMode.EXACTLY_ONCE
-                || env.getCheckpointConfig().getMaxConcurrentCheckpoints() != 1) {
-            throw new IllegalStateException("Coordinated cache activation requires checkpointing, "
-                    + "EXACTLY_ONCE mode and max-concurrent-checkpoints=1 in Flink configuration");
+        if (!checkpointingEnabled) {
+            log.warn("[MAIN] Checkpointing is disabled: fresh starts/restarts bootstrap the cache from API");
         }
-
 
         log.info("[MAIN] Flink cluster checkpointing: enabled={}, intervalMs={}, timeoutMs={}, mode={}, " +
                         "maxConcurrent={}, minPauseMs={}",
@@ -372,18 +368,26 @@ public class Main {
             .uid("cache-snapshot-source-v1")
             .setParallelism(1);
 
-        // Полный кэш сохраняется в checkpoint в источнике и в координаторе активации.
-        // Единый поток предложений поступает в subtask 0; координатор подготавливает каждого worker.
+        // Encode once on the single cache branch, then broadcast bytes to every processor.
+        DataStream<CacheBundleEnvelope> cacheUpdates = updates
+                .map(CacheBundleEnvelope::fromBundle)
+                .returns(Types.POJO(CacheBundleEnvelope.class))
+                .name("encode-cache-bundle")
+                .uid("encode-cache-bundle-v1")
+                .setParallelism(1);
+
         SingleOutputStreamOperator<ProcessingResult> processed = inputStream
-                .connect(updates.global())
+                .connect(cacheUpdates.broadcast())
                 .transform(
-                        "process-with-coordinated-cache", 
+                        "process-with-broadcast-cache", 
                         Types.POJO(ProcessingResult.class),
                         new RulesProcessingOperatorFactory(
                                 vaultSecrets.jwt(), 
                                 vaultSecrets,
-                                pt.getInt("cache.activation.max-pending-messages", 100000),
-                                pt.getLong("cache.activation.max-pending-bytes", 64L * 1024 * 1024)
+                                pt.getInt("cache.startup.max-pending-messages",
+                                        pt.getInt("cache.activation.max-pending-messages", 100000)),
+                                pt.getLong("cache.startup.max-pending-bytes",
+                                        pt.getLong("cache.activation.max-pending-bytes", 64L * 1024 * 1024))
                         )
                 )
                 .uid("process-with-cache-bundle-v1")
