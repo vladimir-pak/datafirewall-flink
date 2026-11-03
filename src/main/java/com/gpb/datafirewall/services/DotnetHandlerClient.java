@@ -93,7 +93,7 @@ public final class DotnetHandlerClient {
 
         if (jwt == null || jwt.isBlank()) {
             log.error("[DOTNET][eventId={}] dotnet JWT is not configured", eventId);
-            throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
+            throw new IllegalStateException("dotnetJwt must be provided in configured secret source when runtime handler=dotnet");
         }
 
         log.debug("[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",

@@ -39,7 +39,7 @@ public record VaultSecretsDto(
 
     private static void requireNotBlank(String value, String name) {
         if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("Vault secret field is missing or blank: " + name);
+            throw new IllegalArgumentException("Secret field is missing or blank: " + name);
         }
     }
 

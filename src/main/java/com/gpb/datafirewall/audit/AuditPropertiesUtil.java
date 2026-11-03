@@ -15,7 +15,7 @@ import java.util.stream.Collectors;
 public final class AuditPropertiesUtil {
 
     private static final Set<String> SENSITIVE_PARTS = Set.of(
-            "password", "secret", "token", "keytab", "jaas", "credential"
+            "password", "secret", "token", "keytab", "jaas", "credential", "jwt"
     );
 
     private AuditPropertiesUtil() {

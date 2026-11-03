@@ -34,8 +34,7 @@ import com.gpb.datafirewall.transaction.kafka.TransactionalRulesOperatorFactory;
 import com.gpb.datafirewall.transaction.artemis.ArtemisConnectionUrlBuilder;
 import com.gpb.datafirewall.transaction.kafka.BestEffortKafkaAuditSink;
 import com.gpb.datafirewall.transaction.kafka.ProcessingAuditDiscardSink;
-import com.gpb.datafirewall.vault.VaultClient;
-import com.gpb.datafirewall.vault.VaultClientConfig;
+import com.gpb.datafirewall.vault.SecretsProvider;
 import com.gpb.datafirewall.vault.dto.VaultSecretsDto;
 
 import java.time.Instant;
@@ -67,7 +66,7 @@ public class Main {
         // Never override restart strategy or checkpoint settings from job.properties.
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         logIgnoredLegacyFlinkProperties(pt);
-        env.getConfig().setGlobalJobParameters(pt);
+        env.getConfig().setGlobalJobParameters(SecretsProvider.withoutLocalSecrets(pt));
 
         final int environmentParallelism = env.getParallelism() > 0
                 ? env.getParallelism() : DEFAULT_PARALLELISM;
@@ -100,9 +99,7 @@ public class Main {
                 parallelism, processParallelism, auditParallelism,
                 auditSlotSharingGroup.isBlank() ? "<inherited>" : auditSlotSharingGroup);
 
-        VaultSecretsDto vaultSecrets = VaultClient.loadSecrets(
-                VaultClientConfig.fromArgs(pt)
-        );
+        VaultSecretsDto vaultSecrets = SecretsProvider.load(pt);
 
         String backend = pt.get("messaging.backend", DEFAULT_MESSAGING_BACKEND).trim().toLowerCase();
         DynamicHandler startupHandler = DynamicHandler.from(
@@ -188,12 +185,12 @@ public class Main {
                     pt.get("handler.dotnet.url", pt.get("dotnet.handler.url", null)),
                     "handler.dotnet.url/dotnet.handler.url"
             );
-            requireNotBlank(vaultSecrets.dotnetJwt(), "dotnetJwt in vault");
+            requireNotBlank(vaultSecrets.dotnetJwt(), "dotnetJwt in configured secret source");
         }
 
         if ("artemis".equals(backend)) {
-            requireNotBlank(artemisUser, "mqUser in vault");
-            requireNotBlank(artemisPassword, "mqPassword in vault");
+            requireNotBlank(artemisUser, "mqUser in configured secret source");
+            requireNotBlank(artemisPassword, "mqPassword in configured secret source");
         }
 
         if ("mq".equals(backend)) {
@@ -293,7 +290,7 @@ public class Main {
         // Источник полных снимков кэша
         DataStream<CacheBundleEnvelope> cacheUpdates = env.addSource(
                 new CacheSnapshotSource(
-                        pt,
+                        SecretsProvider.withoutLocalSecrets(pt),
                         vaultSecrets.jwt(),
                         kafkaClientProps,
                         kafkaBootstrap,
@@ -714,8 +711,8 @@ public class Main {
     }
 
     private static String buildKafkaJaasConfig(String mechanism, VaultSecretsDto vaultSecrets) {
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaUser(), "kafkaUser in vault");
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), "kafkaPassword in vault");
+        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaUser(), "kafkaUser in configured secret source");
+        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), "kafkaPassword in configured secret source");
 
         String loginModule = "PLAIN".equalsIgnoreCase(mechanism)
                 ? "org.apache.kafka.common.security.plain.PlainLoginModule"
