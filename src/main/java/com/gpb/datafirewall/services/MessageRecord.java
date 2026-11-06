@@ -18,8 +18,13 @@ public final class MessageRecord implements Serializable {
 
     public MessageRecord() {}
 
-    private MessageRecord(byte[] mqMessageId, String jmsMessageId, String payload,
-                          Long createdDttm, Long readedDttm, Map<String, Object> headers) {
+    private MessageRecord(
+            byte[] mqMessageId, 
+            String jmsMessageId, 
+            String payload,
+            Long createdDttm, 
+            Long readedDttm, 
+            Map<String, Object> headers) {
         this.mqMessageId = mqMessageId == null ? null : normalizeMqId(mqMessageId);
         this.jmsMessageId = jmsMessageId;
         this.payload = payload;
@@ -28,23 +33,60 @@ public final class MessageRecord implements Serializable {
         this.headers = headers == null ? null : new LinkedHashMap<>(headers);
     }
 
-    public static MessageRecord fromMq(byte[] mqMessageId, String payload,
-                                       Long createdDttm, Long readedDttm) {
-        return fromMq(mqMessageId, payload, createdDttm, readedDttm, null);
+    public static MessageRecord fromMq(
+            byte[] mqMessageId, 
+            String payload,
+            Long createdDttm, 
+            Long readedDttm) {
+        return fromMq(
+                mqMessageId, 
+                payload, 
+                createdDttm, 
+                readedDttm, 
+                null
+        );
     }
 
-    public static MessageRecord fromMq(byte[] mqMessageId, String payload,
-                                       Long createdDttm, Long readedDttm, Map<String, Object> headers) {
-        return new MessageRecord(mqMessageId, null, payload, createdDttm, readedDttm, headers);
+    public static MessageRecord fromMq(
+            byte[] mqMessageId, 
+            String payload,
+            Long createdDttm, 
+            Long readedDttm, 
+            Map<String, Object> headers) {
+
+        return new MessageRecord(
+                mqMessageId, 
+                null, 
+                payload, 
+                createdDttm, 
+                readedDttm, 
+                headers
+        );
     }
 
-    public static MessageRecord fromJms(String jmsMessageId, String payload,
-                                        Long createdDttm, Long readedDttm) {
-        return new MessageRecord(null, jmsMessageId, payload, createdDttm, readedDttm, null);
+    public static MessageRecord fromJms(
+            String jmsMessageId, 
+            String payload,
+            Long createdDttm, 
+            Long readedDttm) {
+
+        return new MessageRecord(
+                null, 
+                jmsMessageId, 
+                payload, 
+                createdDttm, 
+                readedDttm, 
+                null
+        );
     }
 
-    public boolean isMq() { return mqMessageId != null; }
-    public boolean isJms() { return jmsMessageId != null && !jmsMessageId.isBlank(); }
+    public boolean isMq() { 
+        return mqMessageId != null; 
+    }
+
+    public boolean isJms() { 
+        return jmsMessageId != null && !jmsMessageId.isBlank(); 
+    }
 
     public String eventId() {
         if (isMq()) return mqIdToHex(mqMessageId);

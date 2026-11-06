@@ -329,7 +329,12 @@ public class Main {
                         "transactional-broker-worker",
                         Types.POJO(ProcessingResult.class),
                         new TransactionalRulesOperatorFactory(
-                                vaultSecrets.jwt(), vaultSecrets, txSettings, cefAuditConfig))
+                                vaultSecrets.jwt(),
+                                vaultSecrets, 
+                                txSettings, 
+                                cefAuditConfig
+                        )
+                )
                 .uid("transactional-broker-worker-v3")
                 .setParallelism(processParallelism);
 
@@ -341,11 +346,13 @@ public class Main {
             // Deliberately lossy audit. Kafka producer errors must never fail the broker job.
             // Legacy delivery guarantees are not applicable to this fire-and-forget sink.
             String configuredGuarantee = pt.get("audit.kafka.delivery-guarantee", "NONE").trim();
+
             if (!"NONE".equalsIgnoreCase(configuredGuarantee)) {
                 log.warn("[MAIN] Ignoring audit.kafka.delivery-guarantee={}; "
                         + "audit is now best-effort and never checkpoints Kafka transactions",
                         configuredGuarantee);
             }
+            
             BestEffortKafkaAuditSink auditKafkaSink = new BestEffortKafkaAuditSink(
                     auditKafkaBootstrap, auditKafkaTopic, auditKafkaClientProps,
                     pt.getLong("audit.kafka.best-effort.max-block.ms", 100L));

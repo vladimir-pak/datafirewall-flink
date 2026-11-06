@@ -9,11 +9,20 @@ import java.io.Serializable;
 /** Serializable connection settings; client connections are created only inside the subtask. */
 public record TransactionSettings(
         String backend,
-        String host, int port, String channel, String queueManager,
-        String inputQueue, String outputQueue,
-        String username, String password,
-        boolean tls, String tlsCipherSuite, String trustStore, String trustStorePassword,
-        String xFrom, String xServiceId,
+        String host, 
+        int port, 
+        String channel, 
+        String queueManager,
+        String inputQueue, 
+        String outputQueue,
+        String username, 
+        String password,
+        boolean tls, 
+        String tlsCipherSuite, 
+        String trustStore, 
+        String trustStorePassword,
+        String xFrom, 
+        String xServiceId,
         String artemisUrl,
         long receiveTimeoutMs) implements Serializable {
 
@@ -36,17 +45,44 @@ public record TransactionSettings(
         return connect(null, -1, -1);
     }
 
-    public TransactionBroker connect(AuditConfig auditConfig, int subtaskIndex, int parallelism)
-            throws Exception {
+    public TransactionBroker connect(
+            AuditConfig auditConfig, 
+            int subtaskIndex, 
+            int parallelism) throws Exception {
+
         if ("mq".equals(backend)) {
             return new MqTransactionalBroker(
-                    host, port, channel, queueManager, inputQueue, outputQueue,
-                    username, password, (int) receiveTimeoutMs,
-                    tls, tlsCipherSuite, trustStore, trustStorePassword, xFrom, xServiceId,
-                    auditConfig, subtaskIndex, parallelism);
+                    host,
+                    port,
+                    channel, 
+                    queueManager, 
+                    inputQueue, 
+                    outputQueue,
+                    username, 
+                    password, 
+                    (int) receiveTimeoutMs,
+                    tls, 
+                    tlsCipherSuite, 
+                    trustStore, 
+                    trustStorePassword, 
+                    xFrom, 
+                    xServiceId,
+                    auditConfig, 
+                    subtaskIndex, 
+                    parallelism
+            );
         }
+        
         return new ArtemisTransactionalBroker(
-                artemisUrl, username, password, inputQueue, outputQueue,
-                receiveTimeoutMs, auditConfig, subtaskIndex, parallelism);
+                artemisUrl, 
+                username, 
+                password, 
+                inputQueue, 
+                outputQueue,
+                receiveTimeoutMs, 
+                auditConfig, 
+                subtaskIndex, 
+                parallelism
+        );
     }
 }

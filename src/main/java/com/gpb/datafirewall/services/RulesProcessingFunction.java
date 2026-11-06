@@ -161,13 +161,19 @@ public final class RulesProcessingFunction extends AbstractRichFunction {
                 && cacheRuntime.snapshot().politicsVersion() != null;
     }
 
-    public void process(MessageRecord in, Consumer<ProcessingResult> reply,
-                        Consumer<ProcessingResult> audit) {
+    public void process(
+                MessageRecord in,
+                Consumer<ProcessingResult> reply,
+                Consumer<ProcessingResult> audit) {
         Objects.requireNonNull(in, "message");
         PreparedRuntime active = cacheRuntime.activeRuntime();
-        if (active.snapshot().compiledRulesVersion() == null) throw new IllegalStateException("Cache is not active");
+
+        if (active.snapshot().compiledRulesVersion() == null) 
+            throw new IllegalStateException("Cache is not active");
+
         ProcessingResult internal;
         ProcessingResult response;
+        
         if (active.handler() == DynamicHandler.DOTNET) {
             response = requireResult(dotnetHandlerClient.process(in), in);
             internal = requireResult(messageProcessor.process(in, active.snapshot()), in);

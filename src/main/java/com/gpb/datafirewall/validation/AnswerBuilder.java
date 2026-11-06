@@ -70,8 +70,7 @@ public final class AnswerBuilder {
                 "dfw_hostname", 
                 HostnameUtils.getHostname()
         );
-
-        out.put("dfw_action_dttm", Instant.now().toString());
+        
         out.put("dfw_query_id", qid);
 
         String processStatus = 

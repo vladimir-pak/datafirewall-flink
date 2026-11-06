@@ -32,14 +32,32 @@ public final class BrokerWorker implements AutoCloseable {
     private volatile boolean connected;
     private volatile boolean processing;
 
-    public BrokerWorker(String name, Connector connector, TransactionBroker.Processor processor,
-            Consumer<ProcessingResult> committedAudit, Consumer<Throwable> fatalError) {
-        this(name, connector, processor, committedAudit, fatalError, 5_000L, 60_000L);
+    public BrokerWorker(
+            String name, 
+            Connector connector, 
+            TransactionBroker.Processor processor,
+            Consumer<ProcessingResult> committedAudit, 
+            Consumer<Throwable> fatalError) {
+                
+        this(
+                name, 
+                connector, 
+                processor, 
+                committedAudit, 
+                fatalError, 
+                5_000L, 
+                60_000L
+        );
     }
 
-    BrokerWorker(String name, Connector connector, TransactionBroker.Processor processor,
-            Consumer<ProcessingResult> committedAudit, Consumer<Throwable> fatalError,
-            long retryInitialMs, long retryMaxMs) {
+    BrokerWorker(
+            String name, 
+            Connector connector, 
+            TransactionBroker.Processor processor,
+            Consumer<ProcessingResult> committedAudit, 
+            Consumer<Throwable> fatalError,
+            long retryInitialMs, 
+            long retryMaxMs) {
         this.connector = connector;
         this.processor = processor;
         this.committedAudit = committedAudit;
@@ -50,9 +68,18 @@ public final class BrokerWorker implements AutoCloseable {
     }
 
     public void start() { thread.start(); }
-    public boolean isConnected() { return connected; }
-    public boolean isProcessing() { return processing; }
-    public long repliesCommitted() { return repliesCommitted.get(); }
+
+    public boolean isConnected() { 
+        return connected; 
+    }
+
+    public boolean isProcessing() { 
+        return processing; 
+    }
+
+    public long repliesCommitted() { 
+        return repliesCommitted.get(); 
+    }
 
     private void run() {
         try {
@@ -86,8 +113,11 @@ public final class BrokerWorker implements AutoCloseable {
         }
     }
 
-    private TransactionalReply processUnlessClosed(MessageRecord message) throws Exception {
+    private TransactionalReply processUnlessClosed(
+            MessageRecord message) throws Exception {
+
         checkCancellation();
+
         processing = true;
         try {
             TransactionalReply result = processor.process(message);
@@ -96,7 +126,8 @@ public final class BrokerWorker implements AutoCloseable {
         } catch (Exception failure) {
             // A stop/interrupt is not a business error that may acknowledge the input.
             if (closed) {
-                CancellationException cancelled = new CancellationException("Broker worker stopped");
+                CancellationException cancelled = 
+                        new CancellationException("Broker worker stopped");
                 cancelled.initCause(failure);
                 throw cancelled;
             }
@@ -117,7 +148,8 @@ public final class BrokerWorker implements AutoCloseable {
         // the connection in finally. A finite broker receive timeout bounds an idle wait.
     }
 
-    public boolean awaitTermination(long timeoutMs) throws InterruptedException {
+    public boolean awaitTermination(
+            long timeoutMs) throws InterruptedException {
         if (Thread.currentThread() == thread) return false;
         thread.join(Math.max(1, timeoutMs));
         return !thread.isAlive();

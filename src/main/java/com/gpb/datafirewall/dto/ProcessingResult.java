@@ -19,8 +19,13 @@ public class ProcessingResult implements Serializable {
 
     public ProcessingResult() {}
 
-    public ProcessingResult(byte[] mqCorrelationId, String jmsCorrelationId, String eventId,
-                            String shortJson, String detailJson, String originalJson) {
+    public ProcessingResult(
+            byte[] mqCorrelationId, 
+            String jmsCorrelationId, 
+            String eventId,
+            String shortJson, 
+            String detailJson, 
+            String originalJson) {
         this.mqCorrelationId = copyBytes(mqCorrelationId);
         this.jmsCorrelationId = jmsCorrelationId;
         this.eventId = eventId;
@@ -29,51 +34,125 @@ public class ProcessingResult implements Serializable {
         this.originalJson = originalJson;
     }
 
-    public static ProcessingResult forMq(byte[] mqCorrelationId, String shortJson,
-                                         String detailJson, String originalJson) {
-        return new ProcessingResult(mqCorrelationId, null, mqIdToHex(mqCorrelationId),
-                shortJson, detailJson, originalJson);
+    public static ProcessingResult forMq(
+            byte[] mqCorrelationId, 
+            String shortJson,
+            String detailJson, 
+            String originalJson) {
+
+        return new ProcessingResult(
+                mqCorrelationId, 
+                null,
+                mqIdToHex(mqCorrelationId),
+                shortJson, 
+                detailJson, 
+                originalJson
+        );
     }
 
-    public static ProcessingResult forJms(String jmsCorrelationId, String shortJson,
-                                          String detailJson, String originalJson) {
-        return new ProcessingResult(null, jmsCorrelationId,
+    public static ProcessingResult forJms(
+            String jmsCorrelationId, 
+            String shortJson,
+            String detailJson, 
+            String originalJson) {
+
+        return new ProcessingResult(
+                null, 
+                jmsCorrelationId,
                 jmsCorrelationId == null || jmsCorrelationId.isBlank() ? "unknown" : jmsCorrelationId,
-                shortJson, detailJson, originalJson);
+                shortJson, 
+                detailJson, 
+                originalJson
+        );
     }
 
-    public byte[] getMqCorrelationId() { return copyBytes(mqCorrelationId); }
-    public void setMqCorrelationId(byte[] value) { this.mqCorrelationId = copyBytes(value); }
-    public String getJmsCorrelationId() { return jmsCorrelationId; }
-    public void setJmsCorrelationId(String value) { this.jmsCorrelationId = value; }
+    public byte[] getMqCorrelationId() {
+        return copyBytes(mqCorrelationId); 
+    }
+
+    public void setMqCorrelationId(byte[] value) { 
+        this.mqCorrelationId = copyBytes(value);
+    }
+
+    public String getJmsCorrelationId() {
+        return jmsCorrelationId;
+    }
+
+    public void setJmsCorrelationId(String value) {
+        this.jmsCorrelationId = value;
+    }
+
     public String getEventId() {
         if (eventId != null && !eventId.isBlank()) return eventId;
         if (mqCorrelationId != null && mqCorrelationId.length > 0) return mqIdToHex(mqCorrelationId);
         if (jmsCorrelationId != null && !jmsCorrelationId.isBlank()) return jmsCorrelationId;
         return "unknown";
     }
-    public void setEventId(String value) { this.eventId = value; }
-    public String getShortJson() { return shortJson; }
-    public void setShortJson(String value) { this.shortJson = value; }
-    public String getDetailJson() { return detailJson; }
-    public void setDetailJson(String value) { this.detailJson = value; }
-    public String getOriginalJson() { return originalJson; }
-    public void setOriginalJson(String value) { this.originalJson = value; }
+
+    public void setEventId(String value) {
+        this.eventId = value;
+    }
+
+    public String getShortJson() {
+        return shortJson;
+    }
+
+    public void setShortJson(String value) {
+        this.shortJson = value;
+    }
+
+    public String getDetailJson() {
+        return detailJson;
+    }
+
+    public void setDetailJson(String value) {
+        this.detailJson = value;
+    }
+
+    public String getOriginalJson() {
+        return originalJson;
+    }
+
+    public void setOriginalJson(String value) {
+        this.originalJson = value;
+    }
+
     public Map<String, Object> getHeaders() {
         return headers == null ? null : new LinkedHashMap<>(headers);
     }
+
     public void setHeaders(Map<String, Object> value) {
         this.headers = value == null ? null : new LinkedHashMap<>(value);
     }
-    public Long getCreatedDttm() { return createdDttm; }
-    public void setCreatedDttm(Long value) { this.createdDttm = value; }
-    public Long getReadedDttm() { return readedDttm; }
-    public void setReadedDttm(Long value) { this.readedDttm = value; }
-    public boolean isMq() { return mqCorrelationId != null; }
-    public boolean isJms() { return jmsCorrelationId != null && !jmsCorrelationId.isBlank(); }
+
+    public Long getCreatedDttm() { 
+        return createdDttm; 
+    }
+
+    public void setCreatedDttm(Long value) { 
+        this.createdDttm = value; 
+    }
+
+    public Long getReadedDttm() { 
+        return readedDttm; 
+    }
+
+    public void setReadedDttm(Long value) { 
+        this.readedDttm = value; 
+    }
+
+    public boolean isMq() { 
+        return mqCorrelationId != null; 
+    }
+
+    public boolean isJms() { 
+        return jmsCorrelationId != null && !jmsCorrelationId.isBlank(); 
+    }
 
     public static String mqIdToHex(byte[] bytes) {
-        if (bytes == null || bytes.length == 0) return "unknown";
+        if (bytes == null || bytes.length == 0) 
+            return "unknown";
+        
         return HexUtils.toUpperHex(bytes);
     }
 

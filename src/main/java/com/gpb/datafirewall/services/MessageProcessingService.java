@@ -40,7 +40,10 @@ public final class MessageProcessingService {
     private final MappingNormalizer normalizer;
     private final boolean logPayloads;
 
-    public MessageProcessingService(ObjectMapper mapper, RulesCacheRuntime cacheRuntime, boolean logPayloads) {
+    public MessageProcessingService(
+            ObjectMapper mapper, 
+            RulesCacheRuntime cacheRuntime, 
+            boolean logPayloads) {
         this.mapper = mapper;
         this.cacheRuntime = cacheRuntime;
         this.logPayloads = logPayloads;
@@ -56,8 +59,16 @@ public final class MessageProcessingService {
         return processMessage(in, cacheRuntime.snapshot());
     }
 
-    public ProcessingResult process(MessageRecord in, RulesCacheSnapshot snapshot) {
-        return processMessage(in, java.util.Objects.requireNonNull(snapshot, "snapshot"));
+    public ProcessingResult process(
+            MessageRecord in, 
+            RulesCacheSnapshot snapshot) {
+        return processMessage(
+                in, 
+                java.util.Objects.requireNonNull(
+                        snapshot, 
+                        "snapshot"
+                )
+        );
     }
 
     private ProcessingResult processMessage(
@@ -388,7 +399,12 @@ public final class MessageProcessingService {
                 log.warn("[PIPE][{}][eventId={}] DetailAnswerService returned null.", qid, eventId);
             }
 
-            return buildProcessingResult(in, shortJson, detailJson, raw);
+            return buildProcessingResult(
+                    in, 
+                    shortJson, 
+                    detailJson, 
+                    raw
+            );
 
         } catch (Exception e) {
             throw new IllegalStateException("Failed to process message eventId=" + eventId, e);
@@ -955,16 +971,29 @@ public final class MessageProcessingService {
         }
     }
 
-    private Map<String, Map<String, String>> safeFieldMap(Map<String, Map<String, String>> source) {
+    private Map<String, Map<String, String>> safeFieldMap(
+            Map<String, Map<String, String>> source) {
         return source == null ? Map.of() : source;
     }
 
-    private void mergeErrorsWithPrefix(Map<String, List<String>> target, String instanceKey, Map<String, List<String>> source) {
+    private void mergeErrorsWithPrefix(
+            Map<String, List<String>> target, 
+            String instanceKey, 
+            Map<String, List<String>> source) {
         if (source == null || source.isEmpty()) return;
 
         for (Map.Entry<String, List<String>> entry : source.entrySet()) {
-            if (entry.getKey() == null || entry.getKey().isBlank() || entry.getValue() == null || entry.getValue().isEmpty()) continue;
-            target.put(instanceKey + "::" + entry.getKey(), List.copyOf(new LinkedHashSet<>(entry.getValue())));
+            if (
+                    entry.getKey() == null 
+                            || entry.getKey().isBlank() 
+                            || entry.getValue() == null 
+                            || entry.getValue().isEmpty()
+            ) continue;
+
+            target.put(
+                    instanceKey + "::" + entry.getKey(),
+                    List.copyOf(new LinkedHashSet<>(entry.getValue()))
+            );
         }
     }
 
@@ -1134,16 +1163,34 @@ public final class MessageProcessingService {
         return v == null || v.isNull() ? def : v.asText(def);
     }
 
-    private ProcessingResult buildProcessingResult(MessageRecord in, String shortJson, String detailJson, String originalJson) {
+    private ProcessingResult buildProcessingResult(
+            MessageRecord in, 
+            String shortJson, 
+            String detailJson, 
+            String originalJson) {
+
         if (in == null) throw new IllegalArgumentException("MessageRecord is null");
 
         ProcessingResult result;
+
         if (in.mqMessageId != null) {
-            result = ProcessingResult.forMq(in.mqMessageId, shortJson, detailJson, originalJson);
+            result = ProcessingResult.forMq(
+                    in.mqMessageId, 
+                    shortJson, 
+                    detailJson, 
+                    originalJson
+            );
         } else if (in.jmsMessageId != null && !in.jmsMessageId.isBlank()) {
-            result = ProcessingResult.forJms(in.jmsMessageId, shortJson, detailJson, originalJson);
+            result = ProcessingResult.forJms(
+                    in.jmsMessageId, 
+                    shortJson, 
+                    detailJson, 
+                    originalJson
+            );
         } else {
-            throw new IllegalStateException("MessageRecord has neither mqMessageId nor jmsMessageId. Cannot build ProcessingResult. " + in);
+            throw new IllegalStateException(
+                    "MessageRecord has neither mqMessageId nor jmsMessageId. Cannot build ProcessingResult. " + in
+            );
         }
 
         result.setHeaders(in.headers);

@@ -18,23 +18,34 @@ import org.slf4j.LoggerFactory;
  */
 @SuppressWarnings("deprecation")
 public final class BestEffortKafkaAuditSink extends RichSinkFunction<String> {
-    private static final Logger log = LoggerFactory.getLogger(BestEffortKafkaAuditSink.class);
+
+    private static final Logger log = 
+            LoggerFactory.getLogger(BestEffortKafkaAuditSink.class);
+
     private final String bootstrap;
     private final String topic;
     private final Properties baseProperties;
     private final long maxBlockMs;
     private transient KafkaProducer<String, String> producer;
     private transient long nextProducerAttemptNanos;
+
     // A transport error pauses submissions for five seconds to prevent audit backpressure.
     private transient volatile long nextSendAttemptNanos;
     private transient AtomicLong dropped;
     private transient AtomicLong enqueued;
 
-    public BestEffortKafkaAuditSink(String bootstrap, String topic,
-            Properties baseProperties, long maxBlockMs) {
+    public BestEffortKafkaAuditSink(
+            String bootstrap, 
+            String topic,
+            Properties baseProperties, 
+            long maxBlockMs) {
+
         if (maxBlockMs < 1 || maxBlockMs > 1000) {
-            throw new IllegalArgumentException("audit.kafka.best-effort.max-block.ms must be 1..1000");
+            throw new IllegalArgumentException(
+                    "audit.kafka.best-effort.max-block.ms must be 1..1000"
+            );
         }
+
         this.bootstrap = bootstrap;
         this.topic = topic;
         this.baseProperties = new Properties();
@@ -46,23 +57,36 @@ public final class BestEffortKafkaAuditSink extends RichSinkFunction<String> {
     public void open(Configuration parameters) {
         dropped = new AtomicLong();
         enqueued = new AtomicLong();
-        getRuntimeContext().getMetricGroup().gauge("auditKafkaDropped", dropped::get);
-        getRuntimeContext().getMetricGroup().gauge("auditKafkaEnqueued", enqueued::get);
+
+        getRuntimeContext()
+                .getMetricGroup()
+                .gauge("auditKafkaDropped", dropped::get);
+
+        getRuntimeContext()
+                .getMetricGroup()
+                .gauge("auditKafkaEnqueued", enqueued::get);
         // Do not connect here: Kafka downtime during startup must not fail the task.
     }
 
     @Override
-    public void invoke(String value, Context context) {
+    public void invoke(
+            String value, 
+            Context context) {
+
         if (value == null) return;
+
         long now = System.nanoTime();
+
         if (nextSendAttemptNanos != 0 && now - nextSendAttemptNanos < 0) {
             dropped.incrementAndGet();
             return;
         }
+
         if (!ensureProducer()) {
             dropped.incrementAndGet();
             return;
         }
+
         try {
             producer.send(new ProducerRecord<>(topic, value), (metadata, error) -> {
                 if (error != null) {
@@ -72,6 +96,7 @@ public final class BestEffortKafkaAuditSink extends RichSinkFunction<String> {
                             topic, error.toString());
                 }
             });
+            
             enqueued.incrementAndGet();
         } catch (Exception error) {
             nextSendAttemptNanos = System.nanoTime() + Duration.ofSeconds(5).toNanos();

@@ -75,8 +75,11 @@ public final class TransactionalRulesOperator
         }
     }
 
-    public TransactionalRulesOperator(RulesProcessingFunction function,
-            MailboxExecutor mailbox, TransactionSettings settings, AuditConfig auditConfig) {
+    public TransactionalRulesOperator(
+            RulesProcessingFunction function,
+            MailboxExecutor mailbox, 
+            TransactionSettings settings, 
+            AuditConfig auditConfig) {
         super(function);
         this.mailbox = mailbox;
         this.settings = settings;
@@ -93,7 +96,9 @@ public final class TransactionalRulesOperator
         }
     }
 
-    private static Image newest(Image previous, Image candidate) {
+    private static Image newest(
+            Image previous, 
+            Image candidate) {
         if (previous == null) return candidate;
         if (candidate == null) return previous;
         if (candidate.rules < previous.rules || candidate.politics < previous.politics) {
@@ -144,6 +149,7 @@ public final class TransactionalRulesOperator
             worker.setDaemon(true);
             return worker;
         });
+
         // The initial restored cache must be active before we accept any broker input.
         // This step does not access the API and happens only during task startup.
         if (activeImage != null) {
@@ -151,14 +157,19 @@ public final class TransactionalRulesOperator
                     CacheBundleStateSerializer.decode(activeImage.bytes));
             userFunction.activate(withSelectedHandler(restored));
         }
+
         var global = getRuntimeContext().getExecutionConfig().getGlobalJobParameters();
+
         ParameterTool pt = ParameterTool.fromMap(global == null ? Map.of() : global.toMap());
+
         auditBuffer = new MailboxAuditBuffer(mailbox,
                 result -> output.collect(new StreamRecord<>(result)), this::failAsync,
                 pt.getInt("transaction.audit.buffer.max-records", 1024),
                 pt.getLong("transaction.audit.buffer.max-bytes", 16L * 1024 * 1024));
+
         startBrokerIfReady();
         startNextPreparation();
+        
         getRuntimeContext().getMetricGroup().gauge("brokerCacheReady", () -> ready() ? 1 : 0);
         getRuntimeContext().getMetricGroup().gauge("brokerCachePreparing", () -> building == null ? 0 : 1);
         getRuntimeContext().getMetricGroup().gauge("brokerConnected",
