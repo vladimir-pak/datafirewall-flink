@@ -80,6 +80,14 @@ public final class MessageRecord implements Serializable {
         );
     }
 
+    public Long getCreatedDttm() {
+        return createdDttm;
+    }
+
+    public Long getReadedDttm() {
+        return readedDttm;
+    }
+
     public boolean isMq() { 
         return mqMessageId != null; 
     }

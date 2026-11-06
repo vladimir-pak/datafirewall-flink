@@ -4,10 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.gpb.datafirewall.util.DfwDateTimeFormatter;
-import com.gpb.datafirewall.util.HostnameUtils;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -37,9 +34,7 @@ public final class DetailAnswerBuilder {
     public ObjectNode buildDetailAnswer(
             JsonNode originalEvent, 
             ValidationResult validation, 
-            String qid, 
-            Long createdDttm, 
-            Long readedDttm, 
+            String qid,
             Set<String> excludedBlocks,
             String controlArea) {
                 
@@ -120,29 +115,13 @@ public final class DetailAnswerBuilder {
 
         copyIfExists(originalEvent, result, List.of(
                 "dfw_query_id",
-                "dfw_hostname",
                 "dfw_user_login",
                 "dfw_dataset_code",
-                "dfw_readed_from_mq_dttm",
-                "dfw_created_dttm"
+                "dfw_readed_from_mq_dttm"
         ));
 
         result.put("dfw_dataset_code", controlArea);
         result.put("dfw_action_type", "ANSWER_DETAIL");
-        result.put(
-                "dfw_created_dttm", 
-                DfwDateTimeFormatter.formatEpochMillis(createdDttm)
-        );
-        result.put(
-                "dfw_readed_dttm", 
-                DfwDateTimeFormatter.formatEpochMillis(readedDttm)
-        );
-        result.put(
-                "dfw_hostname", 
-                HostnameUtils.getHostname()
-        );
-
-        result.put("dfw_action_dttm", Instant.now().toString());
         result.put("dfw_query_id", qid);
 
         return result;

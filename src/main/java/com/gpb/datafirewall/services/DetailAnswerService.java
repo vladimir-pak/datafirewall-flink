@@ -27,8 +27,6 @@ public final class DetailAnswerService {
         JsonNode originalEvent, 
         ValidationResult validation,
         String qid,
-        Long createdDttm,
-        Long readedDttm,
         Set<String> excludedBlocks,
         String controlArea
     ) {
@@ -40,8 +38,6 @@ public final class DetailAnswerService {
                 originalEvent,
                 validation,
                 qid,
-                createdDttm,
-                readedDttm,
                 excludedBlocks,
                 controlArea
             );

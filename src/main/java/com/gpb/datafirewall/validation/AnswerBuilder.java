@@ -4,10 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.gpb.datafirewall.util.DfwDateTimeFormatter;
-import com.gpb.datafirewall.util.HostnameUtils;
 
-import java.time.Instant;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -28,20 +25,15 @@ public final class AnswerBuilder {
     public ObjectNode buildAnswer(
             JsonNode originalEvent, 
             ValidationResult validation, 
-            String qid, 
-            Long createdDttm, 
-            Long readedDttm,
+            String qid,
             String controlArea) {
-        return buildAnswer(originalEvent, validation, qid, createdDttm,
-                readedDttm, controlArea, null);
+        return buildAnswer(originalEvent, validation, qid, controlArea, null);
     }
 
     public ObjectNode buildAnswer(
             JsonNode originalEvent,
             ValidationResult validation,
             String qid,
-            Long createdDttm,
-            Long readedDttm,
             String controlArea,
             ValidationMessages classifiedMessages) {
 
@@ -49,28 +41,13 @@ public final class AnswerBuilder {
 
         copyIfExists(originalEvent, out, List.of(
                 "dfw_query_id",
-                "dfw_hostname",
                 "dfw_user_login",
                 "dfw_dataset_code",
-                "dfw_readed_from_mq_dttm",
-                "dfw_created_dttm"
+                "dfw_readed_from_mq_dttm"
         ));
 
         out.put("dfw_dataset_code", controlArea);
         out.put("dfw_action_type", "ANSWER");
-        out.put(
-                "dfw_created_dttm", 
-                DfwDateTimeFormatter.formatEpochMillis(createdDttm)
-        );
-        out.put(
-                "dfw_readed_dttm", 
-                DfwDateTimeFormatter.formatEpochMillis(readedDttm)
-        );
-        out.put(
-                "dfw_hostname", 
-                HostnameUtils.getHostname()
-        );
-        
         out.put("dfw_query_id", qid);
 
         String processStatus = 

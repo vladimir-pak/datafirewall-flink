@@ -26,19 +26,15 @@ public final class ShortAnswerService {
         JsonNode originalEvent, 
         ValidationResult validation, 
         String qid,
-        Long createdDttm,
-        Long readedDttm,
         String controlArea
     ) {
-        return build(originalEvent, validation, qid, createdDttm, readedDttm, controlArea, null);
+        return build(originalEvent, validation, qid, controlArea, null);
     }
 
     public String build(
         JsonNode originalEvent,
         ValidationResult validation,
         String qid,
-        Long createdDttm,
-        Long readedDttm,
         String controlArea,
         ValidationMessages classifiedMessages
     ) {
@@ -50,8 +46,6 @@ public final class ShortAnswerService {
                 originalEvent, 
                 validation,
                 qid,
-                createdDttm,
-                readedDttm,
                 controlArea,
                 classifiedMessages
             );

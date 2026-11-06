@@ -5,6 +5,7 @@ import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.transaction.TransactionBroker;
 import com.gpb.datafirewall.transaction.TransactionalReply;
+import com.gpb.datafirewall.util.ReplyMetadataEnricher;
 import com.gpb.datafirewall.transaction.BrokerConnectionAudit;
 import com.ibm.mq.MQException;
 import com.ibm.mq.MQGetMessageOptions;
@@ -153,6 +154,8 @@ public final class MqTransactionalBroker implements TransactionBroker {
                         || !Arrays.equals(result.reply().getMqCorrelationId(), received.messageId)) {
                     throw new IllegalStateException("Reply correlation ID does not match MQ request");
                 }
+                // Stamp all response/audit metadata as late as possible, before MQPUT.
+                ReplyMetadataEnricher.enrich(result, record, Instant.now());
             } catch (CancellationException | InterruptedException cancellation) {
                 // A stopping worker must not acknowledge an unfinished request.
                 throw cancellation;

@@ -5,6 +5,7 @@ import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.transaction.TransactionBroker;
 import com.gpb.datafirewall.transaction.TransactionalReply;
+import com.gpb.datafirewall.util.ReplyMetadataEnricher;
 import com.gpb.datafirewall.transaction.BrokerConnectionAudit;
 
 import java.nio.charset.StandardCharsets;
@@ -118,6 +119,8 @@ public final class ArtemisTransactionalBroker implements TransactionBroker {
                 if (!id.equals(response.reply().getJmsCorrelationId())) {
                     throw new IllegalStateException("Reply correlation ID does not match JMS request " + id);
                 }
+                // One timestamp for reply, detail and Kafka audit, just before JMS send.
+                ReplyMetadataEnricher.enrich(response, record, Instant.now());
             } catch (CancellationException | InterruptedException cancellation) {
                 // A stopping worker must not acknowledge an unfinished request.
                 throw cancellation;

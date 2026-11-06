@@ -366,8 +366,6 @@ public final class MessageProcessingService {
                     originalEvent,
                     finalValidation,
                     qid,
-                    in.createdDttm,
-                    in.readedDttm,
                     controlArea,
                     classifiedMessages
             );
@@ -385,8 +383,6 @@ public final class MessageProcessingService {
                     originalEvent,
                     finalValidation,
                     qid,
-                    in.createdDttm,
-                    in.readedDttm,
                     excludedBlocks,
                     controlArea
             );
