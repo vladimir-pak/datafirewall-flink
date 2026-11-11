@@ -146,6 +146,8 @@ final class CefAuditFormatter {
         appendPayload(msg, payload, "connectionName");
         appendPayload(msg, payload, "topic");
         appendPayload(msg, payload, "queue");
+        appendPayload(msg, payload, "errorQueue");
+        appendPayload(msg, payload, "transactional");
         appendPayload(msg, payload, "qmgr");
         appendPayload(msg, payload, "channel");
         appendPayload(msg, payload, "propertiesHash");

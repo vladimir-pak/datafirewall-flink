@@ -80,9 +80,9 @@ public final class RulesCacheSnapshot {
     ) {
         this.compiledRules = safeMap(compiledRules);
         this.dataset2ControlArea = safeMap(dataset2ControlArea);
-        this.controlAreaRules = safeMap(controlAreaRules);
-        this.errorMessagesByRule = safeMap(errorMessagesByRule);
-        this.excludedBlocksByControlArea = safeMap(excludedBlocksByControlArea);
+        this.controlAreaRules = freezeNestedSets(controlAreaRules);
+        this.errorMessagesByRule = freezeNested(errorMessagesByRule);
+        this.excludedBlocksByControlArea = freezeSets(excludedBlocksByControlArea);
         this.filterFlagsByControlArea = safeMap(filterFlagsByControlArea);
         this.genderMapping = safeMap(genderMapping);
         this.typeDulMapping = safeMap(typeDulMapping);
@@ -91,7 +91,7 @@ public final class RulesCacheSnapshot {
 
         this.referencedFieldsByRule = preparedReferencedFieldsByRule == null
                 ? buildReferencedFieldsByRule(this.compiledRules)
-                : preparedReferencedFieldsByRule;
+                : freezeSets(preparedReferencedFieldsByRule);
         this.referencedFieldsByControlArea = buildReferencedFieldsByControlArea(
                 this.controlAreaRules,
                 this.referencedFieldsByRule
@@ -152,6 +152,7 @@ public final class RulesCacheSnapshot {
     public String politicsVersion() {
         return politicsVersion;
     }
+
 
     public Map<String, Set<String>> referencedFieldsByRule() {
         return referencedFieldsByRule;
@@ -346,6 +347,30 @@ public final class RulesCacheSnapshot {
     }
 
     private static <K, V> Map<K, V> safeMap(Map<K, V> value) {
-        return value == null ? Map.of() : value;
+        return value == null ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(value));
+    }
+
+    private static Map<String, Set<String>> freezeSets(Map<String, Set<String>> m) {
+        if (m == null) return Map.of();
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        m.forEach((k, v) -> result.put(k, freezeSet(v)));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static Map<String, Map<String, Set<String>>> freezeNestedSets(
+            Map<String, Map<String, Set<String>>> m) {
+        if (m == null) return Map.of();
+        Map<String, Map<String, Set<String>>> result = new LinkedHashMap<>();
+        m.forEach((k, v) -> result.put(k, freezeSets(v)));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static Map<String, Map<String, String>> freezeNested(
+            Map<String, Map<String, String>> m) {
+        if (m == null) return Map.of();
+        Map<String, Map<String, String>> result = new LinkedHashMap<>();
+        m.forEach((k, v) -> result.put(k, safeMap(v)));
+        return Collections.unmodifiableMap(result);
     }
 }

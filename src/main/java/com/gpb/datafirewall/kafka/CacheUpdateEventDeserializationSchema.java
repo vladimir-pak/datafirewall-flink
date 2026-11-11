@@ -3,34 +3,22 @@ package com.gpb.datafirewall.kafka;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.api.common.serialization.AbstractDeserializationSchema;
+import java.io.IOException;
 
-import java.nio.charset.StandardCharsets;
-
-public class CacheUpdateEventDeserializationSchema
+public final class CacheUpdateEventDeserializationSchema
         extends AbstractDeserializationSchema<CacheUpdateEvent> {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    @Override
-    public CacheUpdateEvent deserialize(byte[] message) {
-        try {
-            String s = new String(message, StandardCharsets.UTF_8);
-            JsonNode n = MAPPER.readTree(s);
-
-            long version = n.path("version").asLong(-1);
-            String cacheName = n.path("cacheName").asText(null);
-            String handler = n.path("handler").asText(null);
-
-            if (cacheName != null) {
-                cacheName = cacheName.trim();
-            }
-            if (handler != null) {
-                handler = handler.trim();
-            }
-
-            return new CacheUpdateEvent(version, cacheName, handler);
-        } catch (Exception e) {
-            return new CacheUpdateEvent(-1, null, null);
+    @Override public CacheUpdateEvent deserialize(byte[] message) throws IOException {
+        JsonNode node = MAPPER.readTree(message);
+        if (node == null || !node.isObject() || !node.path("version").canConvertToInt()
+                || !node.path("version").isIntegralNumber()) {
+            throw new IOException("Invalid cache update: version must be an integer");
         }
+        CacheUpdateEvent event = new CacheUpdateEvent(node.path("version").intValue(),
+                node.path("cacheName").asText(null), node.path("handler").asText(null));
+        if (!event.isValid()) throw new IOException("Unsupported cache update: " + event);
+        return event;
     }
 }

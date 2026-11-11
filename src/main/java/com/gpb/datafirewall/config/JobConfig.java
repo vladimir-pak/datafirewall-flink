@@ -41,11 +41,11 @@ public record JobConfig(
 
         if ("mq".equalsIgnoreCase(backend)) {
             if (user == null || user.isBlank()) {
-                throw new IllegalArgumentException("mqUser must be provided in vault");
+                throw new IllegalArgumentException("mqUser must be provided in configured secret source");
             }
 
             if (password == null || password.isBlank()) {
-                throw new IllegalArgumentException("mqPassword must be provided in vault");
+                throw new IllegalArgumentException("mqPassword must be provided in configured secret source");
             }
         }
 

@@ -120,7 +120,6 @@ public final class ValidationService {
 
         boolean anyError = false;
         boolean anyWarning = false;
-        boolean anyException = false;
 
         // logicalField -> (ruleName -> status)
         Map<String, Map<String, String>> detailByField =
@@ -209,6 +208,10 @@ public final class ValidationService {
                     );
                 }
 
+                if (rule == null) {
+                    throw new IllegalStateException("Compiled rule is missing: " + ruleName);
+                }
+
                 boolean triggered;
 
                 try {
@@ -250,20 +253,9 @@ public final class ValidationService {
                     );
                 } catch (Exception ex) {
 
-                    triggered = false;
-                    anyException = true;
+                    throw new IllegalStateException(
+                            "Rule execution failed: rule=" + ruleName + " field=" + logicalField, ex);
 
-                    log.error(
-                            "[RULE-DIAG] APPLY EXCEPTION field='{}' rule={} containsKey={} inputState={} implClass={}",
-                            logicalField,
-                            ruleName,
-                            ruleInput.containsKey(logicalField),
-                            valueState(ruleInput.get(logicalField)),
-                            rule == null
-                                    ? null
-                                    : rule.getClass().getName(),
-                            ex
-                    );
                 }
 
                 String status = SUCCESS;
@@ -328,22 +320,6 @@ public final class ValidationService {
                     );
                 }
 
-                /*
-                 * Сейчас отсутствующее compiled rule автоматически
-                 * приводит к triggered=false и далее SUCCESS.
-                 *
-                 * Пока бизнес-логику не меняем,
-                 * но явно фиксируем эту ситуацию.
-                 */
-                if (rule == null) {
-
-                    log.warn(
-                            "[RULE-DIAG] RULE NOT FOUND field='{}' rule={} -> current logic produces SUCCESS",
-                            logicalField,
-                            ruleName
-                    );
-                }
-
                 perRules.put(
                         ruleName,
                         status
@@ -378,10 +354,7 @@ public final class ValidationService {
                                 : SUCCESS
                 );
 
-        String processStatus =
-                anyException
-                        ? "RULE_EXCEPTION"
-                        : "OK";
+        String processStatus = "OK";
 
         if (debugEnabled) {
             log.debug(

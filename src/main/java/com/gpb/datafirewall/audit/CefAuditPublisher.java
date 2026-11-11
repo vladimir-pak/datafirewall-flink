@@ -20,6 +20,7 @@ public final class CefAuditPublisher implements AutoCloseable {
 
     private final AuditConfig config;
     private KafkaProducer<String, String> producer;
+    private long nextKafkaProducerAttemptNanos;
 
     public CefAuditPublisher(AuditConfig config) {
         this.config = config;
@@ -73,17 +74,35 @@ public final class CefAuditPublisher implements AutoCloseable {
     }
 
     private void sendToKafka(String key, String cef) {
-        KafkaProducer<String, String> p = getOrCreateProducer();
-        p.send(new ProducerRecord<>(config.kafkaTopic(), key, cef), (metadata, exception) -> {
-            if (exception != null) {
-                log.warn("Failed to send CEF audit event to Kafka topic={}", config.kafkaTopic(), exception);
-            }
-        });
+        long now = System.nanoTime();
+        if (producer == null && nextKafkaProducerAttemptNanos != 0
+                && now - nextKafkaProducerAttemptNanos < 0) return;
+        try {
+            KafkaProducer<String, String> p = getOrCreateProducer();
+            p.send(new ProducerRecord<>(config.kafkaTopic(), key, cef), (metadata, exception) -> {
+                if (exception != null) {
+                    log.warn("CEF Kafka audit dropped: topic={} reason={}",
+                            config.kafkaTopic(), exception.toString());
+                }
+            });
+        } catch (Exception failure) {
+            // Kafka transport is best-effort even when cef.audit.fail-on-error is enabled.
+            nextKafkaProducerAttemptNanos = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            log.warn("CEF Kafka event dropped (producer unavailable): {}", failure.toString());
+        }
     }
 
     private KafkaProducer<String, String> getOrCreateProducer() {
         if (producer == null) {
-            producer = new KafkaProducer<>(config.toKafkaProducerProperties());
+            java.util.Properties props = config.toKafkaProducerProperties();
+            props.setProperty("max.block.ms", "100");
+            props.setProperty("buffer.memory", "4194304");
+            props.setProperty("delivery.timeout.ms", "5000");
+            props.setProperty("request.timeout.ms", "3000");
+            props.setProperty("linger.ms", "0");
+            props.setProperty("retries", "0");
+            props.setProperty("enable.idempotence", "false");
+            producer = new KafkaProducer<>(props);
             CefAuditEvent event = config.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_AUDIT_PRODUCER_STARTED))
                     .put("bootstrap", config.kafkaBootstrap())
                     .put("topic", config.kafkaTopic())
@@ -120,12 +139,12 @@ public final class CefAuditPublisher implements AutoCloseable {
                 appendToFile(cef);
             }
             producer.send(new ProducerRecord<>(config.kafkaTopic(), event.eventId(), cef));
-            producer.flush();
+            // Best-effort: never block job termination waiting for Kafka delivery.
         } catch (Exception e) {
             log.warn("Failed to publish audit producer stopped event", e);
         } finally {
             try {
-                producer.close(Duration.ofSeconds(5));
+                producer.close(Duration.ofMillis(200));
             } catch (Exception e) {
                 log.warn("Failed to close CEF audit Kafka producer", e);
             } finally {

@@ -26,38 +26,32 @@ public final class ShortAnswerService {
         JsonNode originalEvent, 
         ValidationResult validation, 
         String qid,
-        Long createdDttm,
-        Long readedDttm,
         String controlArea
     ) {
-        return build(originalEvent, validation, qid, createdDttm, readedDttm, controlArea, null);
+        return build(originalEvent, validation, qid, controlArea, null);
     }
 
     public String build(
         JsonNode originalEvent,
         ValidationResult validation,
         String qid,
-        Long createdDttm,
-        Long readedDttm,
         String controlArea,
         ValidationMessages classifiedMessages
     ) {
-        if (originalEvent == null || validation == null) return null;
+        if (originalEvent == null || validation == null)
+            throw new IllegalArgumentException("Original event and validation are required");
 
         try {
             ObjectNode node = answerBuilder.buildAnswer(
                 originalEvent, 
                 validation,
                 qid,
-                createdDttm,
-                readedDttm,
                 controlArea,
                 classifiedMessages
             );
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
-            log.warn("Failed to build short ANSWER json", e);
-            return null;
+            throw new IllegalStateException("Failed to build short ANSWER", e);
         }
     }
 }

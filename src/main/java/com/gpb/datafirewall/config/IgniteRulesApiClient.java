@@ -76,10 +76,7 @@ public final class IgniteRulesApiClient {
             );
 
             if (resp.statusCode() / 100 != 2) {
-                throw new RuntimeException(
-                        "Ignite latest cache API HTTP " + resp.statusCode() + " for " + url +
-                                ": " + truncate(resp.body(), 800)
-                );
+                throw new CacheApiException(resp.statusCode(), url);
             }
 
             return OM.readValue(
@@ -91,6 +88,9 @@ public final class IgniteRulesApiClient {
                     )
             );
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Cache request interrupted", e);
         } catch (Exception e) {
             throw new RuntimeException("Failed to call Ignite latest cache API: " + url, e);
         }
@@ -109,10 +109,7 @@ public final class IgniteRulesApiClient {
             );
 
             if (resp.statusCode() / 100 != 2) {
-                throw new RuntimeException(
-                        "Ignite cache API HTTP " + resp.statusCode() + " for " + url +
-                                ": " + truncate(resp.body(), 800)
-                );
+                throw new CacheApiException(resp.statusCode(), url);
             }
 
             return OM.readValue(
@@ -124,6 +121,9 @@ public final class IgniteRulesApiClient {
                     )
             );
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Cache request interrupted", e);
         } catch (Exception e) {
             throw new RuntimeException("Failed to call Ignite cache API: " + url, e);
         }
@@ -189,13 +189,6 @@ public final class IgniteRulesApiClient {
 
     private static boolean isNotBlank(String s) {
         return s != null && !s.isBlank();
-    }
-
-    private static String truncate(String s, int max) {
-        if (s == null) {
-            return "";
-        }
-        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     private HttpRequest.Builder requestBuilder(String url) {

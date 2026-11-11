@@ -70,6 +70,10 @@ public final class DotnetHandlerClient {
                 this.url, this.requestTimeout.toMillis(), 3000, this.verifySsl, this.jwt != null && !this.jwt.isBlank());
     }
 
+    public boolean isConfigured() {
+        return url != null && !url.isBlank() && jwt != null && !jwt.isBlank();
+    }
+
     public ProcessingResult process(MessageRecord in) {
         if (in == null) {
             throw new IllegalArgumentException("MessageRecord is null");
@@ -89,7 +93,7 @@ public final class DotnetHandlerClient {
 
         if (jwt == null || jwt.isBlank()) {
             log.error("[DOTNET][eventId={}] dotnet JWT is not configured", eventId);
-            throw new IllegalStateException("dotnetJwt must be provided in Vault when runtime handler=dotnet");
+            throw new IllegalStateException("dotnetJwt must be provided in configured secret source when runtime handler=dotnet");
         }
 
         log.debug("[DOTNET][eventId={}] processing START url={} payloadSize={} createdDttm={} readedDttm={}",
@@ -110,8 +114,7 @@ public final class DotnetHandlerClient {
         DotnetHandlerResponse response = parseResponse(httpResponse.body(), eventId);
 
         if (response.shortJson() == null || response.shortJson().isBlank()) {
-            log.warn("[DOTNET][eventId={}] parsed response contains empty result -> return null", eventId);
-            return null;
+            throw new IllegalStateException("Empty .NET result for eventId=" + eventId);
         }
 
         if (in.mqMessageId != null) {

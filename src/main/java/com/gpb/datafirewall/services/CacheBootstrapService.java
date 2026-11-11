@@ -1,261 +1,128 @@
 package com.gpb.datafirewall.services;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.gpb.datafirewall.cache.CompiledRulesRegistry;
-import com.gpb.datafirewall.cache.GenderMappingCache;
-import com.gpb.datafirewall.cache.PoliticsControlAreaRulesCache;
-import com.gpb.datafirewall.cache.PoliticsDatasetControlAreaCache;
-import com.gpb.datafirewall.cache.PoliticsDatasetExclusionCache;
-import com.gpb.datafirewall.cache.PoliticsErrorMessagesCache;
-import com.gpb.datafirewall.cache.PoliticsFilterFlagCache;
-import com.gpb.datafirewall.cache.TypeDulMappingCache;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gpb.datafirewall.bundle.CacheBundleState;
 import com.gpb.datafirewall.config.IgniteRulesApiClient;
 import com.gpb.datafirewall.converter.CachePayloadConverter;
 import com.gpb.datafirewall.dto.CacheResponseDto;
-import com.gpb.datafirewall.rule.RulesReloader;
-
+import com.gpb.datafirewall.dto.HttpBytecodeSource;
+import com.gpb.datafirewall.ignite.BytecodeSource;
+import com.gpb.datafirewall.kafka.CacheUpdateEvent;
 import java.util.Map;
-import java.util.Set;
+import java.util.Objects;
 
-public class CacheBootstrapService {
-    private static final Logger log = LoggerFactory.getLogger(CacheBootstrapService.class);
+/** Loads versioned cache parts. Only CacheSnapshotSource calls this API-facing class. */
+public final class CacheBootstrapService {
+    private static final String RULES_PREFIX = "compiled_rules_";
+    private static final String POLITICS_LATEST = "politics_dataset2control_area";
 
-    private static final String CACHE_COMPILED_RULES = "compiled_rules";
-    private static final String CACHE_POLITICS_DATASET2CONTROL_AREA = "politics_dataset2control_area";
-    private static final String CACHE_POLITICS_CONTROL_AREA_RULES = "politics_control_area_rules";
-    private static final String CACHE_POLITICS_ERROR_MESSAGES = "politics_error_messages";
-    private static final String CACHE_POLITICS_DATASET_EXCLUSION = "politics_dataset_exclusion";
-    private static final String CACHE_POLITICS_FILTER_FLAG = "politics_filter_flag";
-    private static final String GENDER_MAPPING = RulesCacheRuntime.CACHE_GENDER_MAPPING;
-    private static final String TYPE_DUL_MAPPING = RulesCacheRuntime.CACHE_TYPE_DUL_MAPPING;
+    private final IgniteRulesApiClient api;
+    private final CachePayloadConverter converter = new CachePayloadConverter(new ObjectMapper());
+    private final BytecodeSource bytecodeSource;
 
-    private final IgniteRulesApiClient igniteApiClient;
-    private final RulesReloader rulesReloader;
-    private final CompiledRulesRegistry rulesRegistry;
-
-    private final PoliticsDatasetControlAreaCache politicsDatasetControlAreaCache;
-    private final PoliticsControlAreaRulesCache politicsControlAreaRulesCache;
-    private final PoliticsErrorMessagesCache politicsErrorMessagesCache;
-    private final PoliticsDatasetExclusionCache politicsDatasetExclusionCache;
-    private final PoliticsFilterFlagCache politicsFilterFlagCache;
-    private final GenderMappingCache genderMappingCache;
-    private final TypeDulMappingCache typeDulMappingCache;
-
-    private final CachePayloadConverter cachePayloadConverter;
-
-    private final boolean politicsBootstrapEnabled;
-
-    public CacheBootstrapService(
-            IgniteRulesApiClient igniteApiClient,
-            RulesReloader rulesReloader,
-            CompiledRulesRegistry rulesRegistry,
-            PoliticsDatasetControlAreaCache politicsDatasetControlAreaCache,
-            PoliticsControlAreaRulesCache politicsControlAreaRulesCache,
-            PoliticsErrorMessagesCache politicsErrorMessagesCache,
-            PoliticsDatasetExclusionCache politicsDatasetExclusionCache,
-            PoliticsFilterFlagCache politicsFilterFlagCache,
-            GenderMappingCache genderMappingCache,
-            TypeDulMappingCache typeDulMappingCache,
-            boolean politicsBootstrapEnabled
-    ) {
-        this.igniteApiClient = igniteApiClient;
-        this.rulesReloader = rulesReloader;
-        this.rulesRegistry = rulesRegistry;
-        this.politicsDatasetControlAreaCache = politicsDatasetControlAreaCache;
-        this.politicsControlAreaRulesCache = politicsControlAreaRulesCache;
-        this.politicsErrorMessagesCache = politicsErrorMessagesCache;
-        this.politicsDatasetExclusionCache = politicsDatasetExclusionCache;
-        this.politicsFilterFlagCache = politicsFilterFlagCache;
-        this.politicsBootstrapEnabled = politicsBootstrapEnabled;
-        this.genderMappingCache = genderMappingCache;
-        this.typeDulMappingCache = typeDulMappingCache;
-
-        this.cachePayloadConverter = new CachePayloadConverter(new com.fasterxml.jackson.databind.ObjectMapper());
+    public CacheBootstrapService(IgniteRulesApiClient api, BytecodeSource bytecodeSource) {
+        this.api = Objects.requireNonNull(api);
+        this.bytecodeSource = Objects.requireNonNull(bytecodeSource);
     }
 
-    public void initializeAll() {
-        long t0 = System.nanoTime();
+    public static CacheBootstrapService http(IgniteRulesApiClient api) {
+        return new CacheBootstrapService(api, new HttpBytecodeSource(api));
+    }
 
-        initCompiledRules();
+    /**
+     * Discover independent latest versions. Kafka position MUST be captured before this method.
+     * API /latest must return the concrete versioned cache name in cacheName.
+     */
+    public CacheBundleState loadLatest(String handler) {
+        int rulesVersion = latestVersion("compiled_rules", RULES_PREFIX);
+        int politicsVersion = latestVersion(POLITICS_LATEST, POLITICS_LATEST + "_");
+        return loadVersions(rulesVersion, politicsVersion, handler);
+    }
 
-        if (politicsBootstrapEnabled) {
-            initPoliticsCaches();
+    public CacheBundleState applyUpdate(CacheBundleState active, CacheUpdateEvent event) {
+        Objects.requireNonNull(active, "active");
+        Objects.requireNonNull(event, "event");
+        if (!event.isValid()) throw new IllegalArgumentException("Invalid cache update " + event);
+        if (event.isHandler()) {
+            throw new IllegalArgumentException("Handler-only updates do not load caches");
+        }
+
+        int current = event.isRules()
+                ? Integer.parseInt(active.compiledRulesVersion())
+                : Integer.parseInt(active.politicsVersion());
+        if (event.version <= current) {
+            return active;
+        }
+        String handler = event.handler == null || event.handler.isBlank()
+                ? active.handler() : event.handler;
+
+        CacheBundleState next;
+        if (event.isRules()) {
+            next = active.withRules(Integer.toString(event.version),
+                    bytecodes(Integer.toString(event.version)), handler);
         } else {
-            log.info("[BOOTSTRAP] politics bootstrap disabled");
+            String politics = Integer.toString(event.version);
+            next = make(active.compiledRulesVersion(), politics,
+                    active.classNameToBytecode(), handler);
         }
-
-        long ms = (System.nanoTime() - t0) / 1_000_000;
-        log.info(
-                "[BOOTSTRAP] all caches initialized in {}ms: rules={}, "
-                + "dataset2controlArea={}, "
-                + "controlAreaRules={}, "
-                + "errorMessages={}, "
-                + "datasetExclusion={}, "
-                + "filterFlag={}, "
-                + "genderMapping={}, "
-                + "typeDulMapping={}",
-                ms,
-                rulesRegistry.size(),
-                politicsDatasetControlAreaCache.size(),
-                politicsControlAreaRulesCache.size(),
-                politicsErrorMessagesCache.size(),
-                politicsDatasetExclusionCache.size(),
-                politicsFilterFlagCache.size(),
-                genderMappingCache.size(),
-                typeDulMappingCache.size()
-        );
+        next.verify();
+        return next;
     }
 
-    private void initCompiledRules() {
-        CacheResponseDto<String, Object> latest = igniteApiClient.getActualCache(CACHE_COMPILED_RULES);
-
-        String fullCacheName = latest.getCacheName();
-        String version = extractVersion(fullCacheName);
-
-        log.info("[BOOTSTRAP] loading latest compiled_rules: fullCacheName={}, version={}",
-                fullCacheName, version);
-
-        rulesReloader.reloadAllStrict(fullCacheName);
-
-        log.info("[BOOTSTRAP] compiled_rules initialized: version={}, size={}",
-                version, rulesRegistry.size());
+    private CacheBundleState loadVersions(int compiled, int politics, String handler) {
+        CacheBundleState bundle = make(Integer.toString(compiled), Integer.toString(politics),
+                bytecodes(Integer.toString(compiled)), handler);
+        validate(bundle);
+        return bundle;
     }
 
-    private void initPoliticsCaches() {
-        CacheResponseDto<String, Object> dataset2ControlAreaResponse =
-                igniteApiClient.getActualCache(CACHE_POLITICS_DATASET2CONTROL_AREA);
-
-        CacheResponseDto<String, Object> controlAreaRulesResponse =
-                igniteApiClient.getActualCache(CACHE_POLITICS_CONTROL_AREA_RULES);
-
-        CacheResponseDto<String, Object> errorMessagesResponse =
-                igniteApiClient.getActualCache(CACHE_POLITICS_ERROR_MESSAGES);
-
-        CacheResponseDto<String, Object> datasetExclusionResponse =
-                igniteApiClient.getActualCache(CACHE_POLITICS_DATASET_EXCLUSION);
-
-        CacheResponseDto<String, Object> filterFlagResponse =
-                igniteApiClient.getActualCache(CACHE_POLITICS_FILTER_FLAG);
-
-        CacheResponseDto<String, Object> genderMappingResponse =
-                igniteApiClient.getActualCache(GENDER_MAPPING);
-
-        CacheResponseDto<String, Object> typeDulMappingResponse =
-                igniteApiClient.getActualCache(TYPE_DUL_MAPPING);
-
-        String datasetVersion = extractVersion(dataset2ControlAreaResponse.getCacheName());
-        String rulesVersion = extractVersion(controlAreaRulesResponse.getCacheName());
-        String errorsVersion = extractVersion(errorMessagesResponse.getCacheName());
-        String exclusionVersion = extractVersion(datasetExclusionResponse.getCacheName());
-        String filterFlagVersion = extractVersion(filterFlagResponse.getCacheName());
-        String genderMappingVersion = extractVersion(genderMappingResponse.getCacheName());
-        String typeDulMappingVersion = extractVersion(typeDulMappingResponse.getCacheName());
-
-        ensureSamePoliticsVersion(
-                datasetVersion,
-                rulesVersion,
-                errorsVersion,
-                exclusionVersion,
-                filterFlagVersion,
-                genderMappingVersion,
-                typeDulMappingVersion
-        );
-
-        Map<String, String> dataset2ControlArea =
-                cachePayloadConverter.toStringMap(dataset2ControlAreaResponse.getCache(), CACHE_POLITICS_DATASET2CONTROL_AREA);
-
-        Map<String, Map<String, Set<String>>> controlAreaRules =
-                cachePayloadConverter.toNestedRulesMap(controlAreaRulesResponse.getCache(), CACHE_POLITICS_CONTROL_AREA_RULES);
-
-        Map<String, Map<String, String>> errorMessages =
-                cachePayloadConverter.toNestedStringMap(errorMessagesResponse.getCache(), CACHE_POLITICS_ERROR_MESSAGES);
-
-        Map<String, Set<String>> datasetExclusion =
-                cachePayloadConverter.toSetMap(datasetExclusionResponse.getCache(), CACHE_POLITICS_DATASET_EXCLUSION);
-
-        Map<String, Boolean> filterFlags =
-                cachePayloadConverter.toBooleanMap(filterFlagResponse.getCache(), CACHE_POLITICS_FILTER_FLAG);
-
-        Map<String, String> genderMapping =
-                cachePayloadConverter.toStringMap(genderMappingResponse.getCache(), GENDER_MAPPING);
-        
-        Map<String, String> typeDulMapping =
-                cachePayloadConverter.toStringMap(typeDulMappingResponse.getCache(), TYPE_DUL_MAPPING);  
-
-        politicsDatasetControlAreaCache.replaceAll(dataset2ControlArea, datasetVersion);
-        politicsControlAreaRulesCache.replaceAll(controlAreaRules, datasetVersion);
-        politicsErrorMessagesCache.replaceAll(errorMessages, datasetVersion);
-        politicsDatasetExclusionCache.replaceAll(datasetExclusion, datasetVersion);
-        politicsFilterFlagCache.replaceAll(filterFlags, datasetVersion);
-        genderMappingCache.replaceAll(genderMapping, datasetVersion);
-        typeDulMappingCache.replaceAll(typeDulMapping, datasetVersion);
-
-        log.info(
-                "[BOOTSTRAP] politics initialized: version={}, "
-                + "dataset2controlArea={}, "
-                + "controlAreaRules={}, "
-                + "errorMessages={}, "
-                + "datasetExclusion={}, "
-                + "filterFlag={} "
-                + "genderMapping={} "
-                + "typeDulMapping={}",
-                datasetVersion,
-                dataset2ControlArea.size(),
-                controlAreaRules.size(),
-                errorMessages.size(),
-                datasetExclusion.size(),
-                filterFlags.size(),
-                genderMapping.size(),
-                typeDulMapping.size()
-        );
+    private CacheBundleState make(String compiled, String politics, Map<String, byte[]> bytecodes,
+                                   String handler) {
+        return CacheBundleState.create(compiled, politics, bytecodes,
+                converter.toStringMap(cache("politics_dataset2control_area_", politics), "dataset2controlArea"),
+                converter.toNestedRulesMap(cache("politics_control_area_rules_", politics), "controlAreaRules"),
+                converter.toNestedStringMap(cache("politics_error_messages_", politics), "errorMessages"),
+                converter.toSetMap(cache("politics_dataset_exclusion_", politics), "datasetExclusion"),
+                converter.toBooleanMap(cache("politics_filter_flag_", politics), "filterFlag"),
+                converter.toStringMap(cache("gender_mapping_", politics), "genderMapping"),
+                converter.toStringMap(cache("type_dul_mapping_", politics), "typeDulMapping"), handler);
     }
 
-    private void ensureSamePoliticsVersion(
-            String datasetVersion,
-            String rulesVersion,
-            String errorsVersion,
-            String exclusionVersion,
-            String filterFlagVersion,
-            String genderMappingVersion,
-            String typeDulMappingVersion
-    ) {
-        if (!datasetVersion.equals(rulesVersion)
-                || !datasetVersion.equals(errorsVersion)
-                || !datasetVersion.equals(exclusionVersion)
-                || !datasetVersion.equals(filterFlagVersion)
-                || !datasetVersion.equals(genderMappingVersion)
-                || !datasetVersion.equals(typeDulMappingVersion)) {
-            throw new IllegalStateException(
-                    "Politics cache versions mismatch: " +
-                            "dataset=" + datasetVersion +
-                            ", rules=" + rulesVersion +
-                            ", errors=" + errorsVersion +
-                            ", exclusion=" + exclusionVersion +
-                            ", filterFlag=" + filterFlagVersion +
-                            ", genderMappingVersion=" + genderMappingVersion +
-                            ", typeDulMappingVersion=" + typeDulMappingVersion
-            );
+    private Map<String, byte[]> bytecodes(String version) {
+        Map<String, byte[]> codes = bytecodeSource.loadAll(RULES_PREFIX + version);
+        if (codes == null || codes.isEmpty()) throw new IllegalStateException("Empty compiled rules " + version);
+        return codes;
+    }
+
+    private int latestVersion(String baseName, String expectedPrefix) {
+        CacheResponseDto<String, Object> result = api.getActualCache(baseName);
+        String fullName = result == null ? null : result.getCacheName();
+        if (fullName == null || !fullName.startsWith(expectedPrefix)) {
+            throw new IllegalStateException("Expected /latest to return a concrete " + expectedPrefix
+                    + "<version> cacheName, actual=" + fullName);
+        }
+        try {
+            int version = Integer.parseInt(fullName.substring(expectedPrefix.length()));
+            if (version < 0) throw new NumberFormatException("Negative version");
+            return version;
+        } catch (NumberFormatException ex) {
+            throw new IllegalStateException("Invalid latest cache name: " + fullName, ex);
         }
     }
 
-    private String extractVersion(String fullCacheName) {
-        if (fullCacheName == null || fullCacheName.isBlank()) {
-            throw new IllegalArgumentException("fullCacheName must not be null/blank");
+    private Map<String, Object> cache(String prefix, String version) {
+        String fullName = prefix + version;
+        CacheResponseDto<String, Object> response = api.getVersionedCache(fullName);
+        if (response == null || response.getCache() == null
+                || !fullName.equals(response.getCacheName())) {
+            throw new IllegalStateException("Missing or unexpected versioned cache " + fullName);
         }
+        return response.getCache();
+    }
 
-        int idx = fullCacheName.lastIndexOf('_');
-        if (idx < 0 || idx == fullCacheName.length() - 1) {
-            throw new IllegalArgumentException(
-                    "Cannot extract version from cache name '" + fullCacheName + "'"
-            );
-        }
-
-        String version = fullCacheName.substring(idx + 1).trim();
-        if (version.isEmpty()) {
-            throw new IllegalArgumentException("Empty version in cache name '" + fullCacheName + "'");
-        }
-        return version;
+    public static void validate(CacheBundleState bundle) {
+        bundle.verify();
+        // Check references and generated classes before publishing to all subtasks.
+        new RulesCacheRuntime(null, null).prepare(bundle);
     }
 }
