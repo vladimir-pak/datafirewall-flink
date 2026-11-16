@@ -373,32 +373,23 @@ public class Main {
 
                             @Override
                             public void flatMap(ProcessingResult result, Collector<String> out) {
-                                if (result == null) {
-                                    return;
-                                }
-
+                                if (result == null) return;
                                 try {
                                     JsonNode requestNode = safeReadTree(mapper, result.getOriginalJson());
                                     JsonNode shortNode = safeReadTree(mapper, result.getShortJson());
                                     JsonNode detailNode = safeReadTree(mapper, result.getDetailJson());
-
-                                    // QUERY, ANSWER and ANSWER_DETAIL are enriched together
-                                    // immediately before the broker send (MQPUT / JMS send).
-                                    // Do not generate a second dfw_action_dttm in the Kafka task.
-
+                                    boolean failed = requestNode != null && requestNode.hasNonNull("error") && shortNode == null;
                                     AuditRecord audit = new AuditRecord(
                                             result.getEventId(),
                                             requestNode,
-                                            shortNode,
-                                            detailNode,
+                                            failed ? null : shortNode,
+                                            failed ? null : detailNode,
                                             Instant.now().toString(),
-                                            "PROCESSED"
+                                            failed ? "ERROR" : "PROCESSED"
                                     );
-
                                     out.collect(mapper.writeValueAsString(audit));
                                 } catch (Exception e) {
-                                    log.warn("Dropping malformed Kafka processing audit eventId={}: {}",
-                                            result.getEventId(), e.toString());
+                                    log.warn("Dropping malformed Kafka processing audit eventId={}: {}", result.getEventId(), e.toString(), e);
                                 }
                             }
                         })

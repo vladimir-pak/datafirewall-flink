@@ -89,11 +89,16 @@ public final class BrokerWorker implements AutoCloseable {
                     log.info("Broker connected: worker={}", thread.getName());
                     while (!closed) {
                         // poll blocks at the broker while idle; no timer/pulse/record is generated.
-                        TransactionalReply result = broker.poll(this::processUnlessClosed);
-                        backoff.onSuccess();
+                        TransactionalReply result = broker.poll(this::processUnlessClosed, committedAudit);                        backoff.onSuccess();
                         if (result != null) {
                             repliesCommitted.incrementAndGet();
-                            if (!closed) committedAudit.accept(result.audit());
+                            if (!closed) {
+                                try {
+                                    committedAudit.accept(result.audit());
+                                } catch (Exception error) {
+                                    log.warn("Failed to enqueue successful processing audit: eventId={}", result.audit().getEventId(), error);
+                                }
+                            }
                         }
                     }
                 } catch (MQException | JMSException | JMSRuntimeException unavailable) {
