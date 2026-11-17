@@ -10,6 +10,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class CefAuditPublisher implements AutoCloseable {
@@ -49,7 +51,10 @@ public final class CefAuditPublisher implements AutoCloseable {
         }
     }
 
-    public void publish(AuditEventType type, String status, java.util.Map<String, ?> payload) {
+    public void publish(
+            AuditEventType type, 
+            String status, 
+            Map<String, ?> payload) {
         CefAuditEvent.Builder builder = config.enrich(CefAuditEvent.builder(type))
                 .status(status);
         if (payload != null) {
@@ -87,14 +92,15 @@ public final class CefAuditPublisher implements AutoCloseable {
             });
         } catch (Exception failure) {
             // Kafka transport is best-effort even when cef.audit.fail-on-error is enabled.
-            nextKafkaProducerAttemptNanos = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            nextKafkaProducerAttemptNanos = 
+                    System.nanoTime() + Duration.ofSeconds(5).toNanos();
             log.warn("CEF Kafka event dropped (producer unavailable): {}", failure.toString());
         }
     }
 
     private KafkaProducer<String, String> getOrCreateProducer() {
         if (producer == null) {
-            java.util.Properties props = config.toKafkaProducerProperties();
+            Properties props = config.toKafkaProducerProperties();
             props.setProperty("max.block.ms", "100");
             props.setProperty("buffer.memory", "4194304");
             props.setProperty("delivery.timeout.ms", "5000");
@@ -102,8 +108,12 @@ public final class CefAuditPublisher implements AutoCloseable {
             props.setProperty("linger.ms", "0");
             props.setProperty("retries", "0");
             props.setProperty("enable.idempotence", "false");
+
             producer = new KafkaProducer<>(props);
-            CefAuditEvent event = config.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_AUDIT_PRODUCER_STARTED))
+
+            CefAuditEvent event = config.enrich(
+                    CefAuditEvent.builder(AuditEventType.KAFKA_AUDIT_PRODUCER_STARTED)
+            )
                     .put("bootstrap", config.kafkaBootstrap())
                     .put("topic", config.kafkaTopic())
                     .put("protocol", config.kafkaSecurityProtocol())
@@ -111,11 +121,21 @@ public final class CefAuditPublisher implements AutoCloseable {
                     .put("cefFilePath", Path.of(config.cefFilePath()).toAbsolutePath().normalize().toString())
                     .build();
             try {
-                String cef = CefAuditFormatter.format(config, event, EXTERNAL_ID_COUNTER.incrementAndGet());
+                String cef = CefAuditFormatter.format(
+                        config, 
+                        event, 
+                        EXTERNAL_ID_COUNTER.incrementAndGet()
+                );
                 if (config.fileEnabled()) {
                     appendToFile(cef);
                 }
-                producer.send(new ProducerRecord<>(config.kafkaTopic(), event.eventId(), cef));
+                producer.send(
+                        new ProducerRecord<>(
+                                config.kafkaTopic(), 
+                                event.eventId(), 
+                                cef
+                        )
+                );
             } catch (Exception e) {
                 log.warn("Failed to publish audit producer started event", e);
             }
@@ -129,7 +149,9 @@ public final class CefAuditPublisher implements AutoCloseable {
             return;
         }
         try {
-            CefAuditEvent event = config.enrich(CefAuditEvent.builder(AuditEventType.KAFKA_AUDIT_PRODUCER_STOPPED))
+            CefAuditEvent event = config.enrich(
+                    CefAuditEvent.builder(AuditEventType.KAFKA_AUDIT_PRODUCER_STOPPED)
+            )
                     .put("topic", config.kafkaTopic())
                     .put("protocol", config.kafkaSecurityProtocol())
                     .put("connectionUser", config.kafkaUser())

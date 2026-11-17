@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 
 public class Main {
 
@@ -648,7 +649,10 @@ public class Main {
         }
     }
 
-    private static Properties buildKafkaClientProperties(ParameterTool pt, String prefix, VaultSecretsDto vaultSecrets) {
+    private static Properties buildKafkaClientProperties(
+            ParameterTool pt, 
+            String prefix, 
+            VaultSecretsDto vaultSecrets) {
         Properties props = new Properties();
 
         String securityProtocol = kafkaParam(pt, prefix, "security.protocol", null);
@@ -695,7 +699,19 @@ public class Main {
             );
         }
 
-        copyKafkaClientOverride(pt, prefix, props, "client.id");
+        String kafkaClientIdSuffix = UUID.randomUUID().toString();
+        String clientIdPrefix = kafkaParam(
+                pt, 
+                prefix, 
+                "client.id", 
+                "dfw-client-id"
+        );
+        putIfNotBlank(
+                props, 
+                "client.id",
+                clientIdPrefix + "-" + kafkaClientIdSuffix
+        );
+
         copyKafkaClientOverride(pt, prefix, props, "retries");
         copyKafkaClientOverride(pt, prefix, props, "retry.backoff.ms");
         copyKafkaClientOverride(pt, prefix, props, "reconnect.backoff.ms");
@@ -708,9 +724,17 @@ public class Main {
         return props;
     }
 
-    private static String buildKafkaJaasConfig(String mechanism, VaultSecretsDto vaultSecrets) {
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaUser(), "kafkaUser in configured secret source");
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), "kafkaPassword in configured secret source");
+    private static String buildKafkaJaasConfig(
+            String mechanism, 
+            VaultSecretsDto vaultSecrets) {
+        requireNotBlank(
+                vaultSecrets == null ? null : vaultSecrets.kafkaUser(), 
+                "kafkaUser in configured secret source"
+        );
+        requireNotBlank(
+                vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), 
+                "kafkaPassword in configured secret source"
+        );
 
         String loginModule = "PLAIN".equalsIgnoreCase(mechanism)
                 ? "org.apache.kafka.common.security.plain.PlainLoginModule"
@@ -722,7 +746,14 @@ public class Main {
     }
 
     private static String escapeJaas(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        return value == null ? "" : 
+                value.replace(
+                        "\\", 
+                        "\\\\"
+                ).replace(
+                        "\"", 
+                        "\\\""
+                );
     }
 
     private static boolean isSslProtocol(String securityProtocol) {
@@ -733,7 +764,11 @@ public class Main {
         return securityProtocol != null && securityProtocol.toUpperCase().startsWith("SASL_");
     }
 
-    private static String kafkaParam(ParameterTool pt, String prefix, String suffix, String defaultValue) {
+    private static String kafkaParam(
+            ParameterTool pt, 
+            String prefix,
+            String suffix, 
+            String defaultValue) {
         String value = pt.get(prefix + "." + suffix, null);
         if (value != null && !value.isBlank()) {
             return value;
@@ -749,16 +784,41 @@ public class Main {
         return defaultValue;
     }
 
-    private static boolean kafkaBooleanParam(ParameterTool pt, String prefix, String suffix, boolean defaultValue) {
-        String value = kafkaParam(pt, prefix, suffix, null);
+    private static boolean kafkaBooleanParam(
+            ParameterTool pt, 
+            String prefix, 
+            String suffix, 
+            boolean defaultValue) {
+        String value = kafkaParam(
+                pt, 
+                prefix, 
+                suffix, 
+                null
+        );
         return value == null ? defaultValue : Boolean.parseBoolean(value);
     }
 
-    private static void copyKafkaClientOverride(ParameterTool pt, String prefix, Properties props, String kafkaProperty) {
-        putIfNotBlank(props, kafkaProperty, kafkaParam(pt, prefix, kafkaProperty, null));
+    private static void copyKafkaClientOverride(
+            ParameterTool pt, 
+            String prefix, 
+            Properties props, 
+            String kafkaProperty) {
+        putIfNotBlank(
+                props, 
+                kafkaProperty, 
+                kafkaParam(
+                        pt, 
+                        prefix, 
+                        kafkaProperty, 
+                        null
+                )
+        );
     }
 
-    private static void putIfNotBlank(Properties props, String key, String value) {
+    private static void putIfNotBlank(
+            Properties props, 
+            String key, 
+            String value) {
         if (value != null && !value.isBlank()) {
             props.setProperty(key, value);
         }

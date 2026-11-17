@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.security.CodeSource;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -63,6 +64,9 @@ public final class AuditConfig implements Serializable {
     private final String sourceMac;
     private final String sourceHost;
     private final int sourcePort;
+    private final String clientId;
+
+    private final static String kafkaClientIdSuffix = UUID.randomUUID().toString();
 
     private AuditConfig(
             boolean enabled,
@@ -96,7 +100,8 @@ public final class AuditConfig implements Serializable {
             String sourceIp,
             String sourceMac,
             String sourceHost,
-            int sourcePort
+            int sourcePort,
+            String clientId
     ) {
         this.enabled = enabled;
         this.fileEnabled = fileEnabled;
@@ -130,21 +135,52 @@ public final class AuditConfig implements Serializable {
         this.sourceMac = sourceMac;
         this.sourceHost = sourceHost;
         this.sourcePort = sourcePort;
+        this.clientId = clientId;
     }
 
-    public static AuditConfig from(ParameterTool pt, VaultSecretsDto vaultSecrets, String defaultKafkaBootstrap) {
+    public static AuditConfig from(
+            ParameterTool pt, 
+            VaultSecretsDto vaultSecrets, 
+            String defaultKafkaBootstrap) {
+
         ParameterTool params = pt == null ? ParameterTool.fromMap(Map.of()) : pt;
 
         String kafkaBootstrap = kafkaParam(params, "bootstrap", defaultKafkaBootstrap);
 
         String kafkaTopic = auditKafkaTopicParam(params, "datafirewall.audit");
 
-        String cefPath = params.get("cef.audit.cef.path",
-                params.get("audit.cef.path", "cef.log"));
+        String cefPath = params.get(
+                "cef.audit.cef.path",
+                params.get("audit.cef.path", "cef.log")
+        );
+        
+        String clientIdPrefix = params.get(
+                "cef.audit.kafka.client.id",
+                "dfw-cef-audit"
+        );
 
-        String securityProtocol = kafkaParam(params, "security.protocol", null);
-        boolean tlsEnabled = kafkaBooleanParam(params, "tls.enabled", false) || isSslProtocol(securityProtocol);
-        boolean saslEnabled = kafkaBooleanParam(params, "sasl.enabled", false) || isSaslProtocol(securityProtocol);
+        String clientId = clientIdPrefix + "-" + kafkaClientIdSuffix;
+
+        String securityProtocol = 
+                kafkaParam(
+                        params, 
+                        "security.protocol", 
+                        null
+                );
+
+        boolean tlsEnabled = 
+                kafkaBooleanParam(
+                        params, 
+                        "tls.enabled", 
+                        false
+                ) || isSslProtocol(securityProtocol);
+
+        boolean saslEnabled = 
+                kafkaBooleanParam(
+                        params, 
+                        "sasl.enabled", 
+                        false
+                ) || isSaslProtocol(securityProtocol);
 
         if (securityProtocol == null || securityProtocol.isBlank()) {
             if (saslEnabled) {
@@ -160,8 +196,18 @@ public final class AuditConfig implements Serializable {
         String truststoreType = kafkaParam(params, "ssl.truststore.type", null);
         String keystoreLocation = kafkaParam(params, "ssl.keystore.location", null);
         String keystoreType = kafkaParam(params, "ssl.keystore.type", null);
-        String keyPassword = kafkaParam(params, "ssl.key.password", vaultSecrets == null ? null : vaultSecrets.keystorePassword());
-        String endpointIdentification = kafkaParam(params, "ssl.endpoint.identification.algorithm", "https");
+        String keyPassword = 
+                kafkaParam(
+                        params, 
+                        "ssl.key.password", 
+                        vaultSecrets == null ? null : vaultSecrets.keystorePassword()
+                );
+        String endpointIdentification = 
+                kafkaParam(
+                        params, 
+                        "ssl.endpoint.identification.algorithm", 
+                        "https"
+                );
 
         JarApplicationInfo jarInfo = resolveJarApplicationInfo();
         String hostName = firstNotBlank(params.get("cef.audit.host.name", null), resolveHostname());
@@ -200,7 +246,8 @@ public final class AuditConfig implements Serializable {
                 srcIp,
                 srcMac,
                 hostName,
-                resolveSourcePort(params)
+                resolveSourcePort(params),
+                clientId
         );
     }
 
@@ -223,6 +270,7 @@ public final class AuditConfig implements Serializable {
         props.setProperty(ProducerConfig.LINGER_MS_CONFIG, "20");
         props.setProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "120000");
         props.setProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "30000");
+        props.setProperty(ProducerConfig.CLIENT_ID_CONFIG, clientId);
 
         putIfNotBlank(props, "security.protocol", kafkaSecurityProtocol);
 
@@ -298,14 +346,25 @@ public final class AuditConfig implements Serializable {
         return defaultValue;
     }
 
-    private static boolean kafkaBooleanParam(ParameterTool params, String suffix, boolean defaultValue) {
+    private static boolean kafkaBooleanParam(
+            ParameterTool params, 
+            String suffix, 
+            boolean defaultValue) {
         String value = kafkaParam(params, suffix, null);
         return value == null ? defaultValue : Boolean.parseBoolean(value);
     }
 
-    private static String buildKafkaJaasConfig(String mechanism, VaultSecretsDto vaultSecrets) {
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaUser(), "kafkaUser in configured secret source");
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), "kafkaPassword in configured secret source");
+    private static String buildKafkaJaasConfig(
+            String mechanism, 
+            VaultSecretsDto vaultSecrets) {
+        requireNotBlank(
+                vaultSecrets == null ? null : vaultSecrets.kafkaUser(),
+                "kafkaUser in configured secret source"
+        );
+        requireNotBlank(
+                vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), 
+                "kafkaPassword in configured secret source"
+        );
 
         String loginModule = "PLAIN".equalsIgnoreCase(mechanism)
                 ? "org.apache.kafka.common.security.plain.PlainLoginModule"
@@ -317,7 +376,14 @@ public final class AuditConfig implements Serializable {
     }
 
     private static String escapeJaas(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        return value == null ? "" : 
+                value.replace(
+                        "\\", 
+                        "\\\\"
+                ).replace(
+                        "\"", 
+                        "\\\""
+                );
     }
 
     private static boolean isSslProtocol(String securityProtocol) {
