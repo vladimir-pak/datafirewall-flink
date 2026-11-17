@@ -1,6 +1,7 @@
 package com.gpb.datafirewall.transaction.mq;
 
 import com.gpb.datafirewall.audit.AuditConfig;
+import com.gpb.datafirewall.util.SslStoreTypes;
 
 import com.gpb.datafirewall.services.MessageRecord;
 import com.gpb.datafirewall.transaction.TransactionBroker;
@@ -37,7 +38,7 @@ public final class MqTransactionalBroker implements TransactionBroker {
     private final String host, channel, qmgr, inQueue, outQueue, user, password;
     private final int port, waitMs;
     private final boolean tls;
-    private final String cipherSuite, trustStore, trustStorePassword, xFrom, xServiceId;
+    private final String cipherSuite, trustStore, trustStorePassword, trustStoreType, xFrom, xServiceId;
     private final BrokerConnectionAudit audit;
     private MQQueueManager manager;
     private MQQueue input, output;
@@ -60,6 +61,19 @@ public final class MqTransactionalBroker implements TransactionBroker {
             boolean tls, String cipherSuite, String trustStore, String trustStorePassword,
             String xFrom, String xServiceId,
             AuditConfig auditConfig, int subtaskIndex, int parallelism) throws MQException {
+        this(host, port, channel, qmgr, inQueue, outQueue, user, password,
+                waitMs, tls, cipherSuite, trustStore, trustStorePassword, xFrom, xServiceId,
+                auditConfig, subtaskIndex, parallelism, "JKS");
+    }
+
+    public MqTransactionalBroker(
+            String host, int port, String channel, String qmgr,
+            String inQueue, String outQueue,
+            String user, String password, int waitMs,
+            boolean tls, String cipherSuite, String trustStore, String trustStorePassword,
+            String xFrom, String xServiceId,
+            AuditConfig auditConfig, int subtaskIndex, int parallelism,
+            String trustStoreType) throws MQException {
         this.host = host;
         this.port = port;
         this.channel = channel;
@@ -73,6 +87,7 @@ public final class MqTransactionalBroker implements TransactionBroker {
         this.cipherSuite = cipherSuite;
         this.trustStore = trustStore;
         this.trustStorePassword = trustStorePassword;
+        this.trustStoreType = SslStoreTypes.normalize(trustStoreType);
         this.xFrom = xFrom;
         this.xServiceId = xServiceId;
         this.audit = BrokerConnectionAudit.mq(
@@ -81,7 +96,7 @@ public final class MqTransactionalBroker implements TransactionBroker {
                 user, tls, cipherSuite, trustStore, xFrom, xServiceId);
         try {
             connect();
-        } catch (MQException error) {
+        } catch (MQException | RuntimeException error) {
             audit.close();
             throw error;
         }
@@ -93,12 +108,30 @@ public final class MqTransactionalBroker implements TransactionBroker {
         MQQueue newInput = null;
         MQQueue newOutput = null;
         try {
-            newManager = MqConnect.connect(qmgr, host, port, channel, user, password,
-                    tls, cipherSuite, trustStore, trustStorePassword);
-            newInput = newManager.accessQueue(inQueue,
-                    MQConstants.MQOO_INPUT_SHARED | MQConstants.MQOO_FAIL_IF_QUIESCING);
-            newOutput = newManager.accessQueue(outQueue,
-                    MQConstants.MQOO_OUTPUT | MQConstants.MQOO_FAIL_IF_QUIESCING);
+            newManager = MqConnect.connect(
+                    qmgr, 
+                    host, 
+                    port, 
+                    channel, 
+                    user, 
+                    password,
+                    tls, 
+                    cipherSuite, 
+                    trustStore, 
+                    trustStorePassword, 
+                    trustStoreType
+            );
+
+            newInput = newManager.accessQueue(
+                    inQueue,
+                    MQConstants.MQOO_INPUT_SHARED | MQConstants.MQOO_FAIL_IF_QUIESCING
+            );
+
+            newOutput = newManager.accessQueue(
+                    outQueue,
+                    MQConstants.MQOO_OUTPUT | MQConstants.MQOO_FAIL_IF_QUIESCING
+            );
+
             this.input = newInput;
             this.output = newOutput;
             this.manager = newManager;
@@ -108,7 +141,9 @@ public final class MqTransactionalBroker implements TransactionBroker {
             closeQueueQuietly(newOutput);
             closeQueueQuietly(newInput);
             if (newManager != null) {
-                try { newManager.disconnect(); } catch (Exception ignored) { }
+                try { 
+                    newManager.disconnect(); 
+                } catch (Exception ignored) { }
             }
             throw error;
         }
@@ -132,8 +167,10 @@ public final class MqTransactionalBroker implements TransactionBroker {
     @Override
     public TransactionalReply poll(Processor processor) throws Exception {
         MQGetMessageOptions gmo = new MQGetMessageOptions();
-        gmo.options = MQConstants.MQGMO_WAIT | MQConstants.MQGMO_FAIL_IF_QUIESCING
-                | MQConstants.MQGMO_PROPERTIES_IN_HANDLE | MQConstants.MQGMO_SYNCPOINT;
+        gmo.options = MQConstants.MQGMO_WAIT 
+                | MQConstants.MQGMO_FAIL_IF_QUIESCING
+                | MQConstants.MQGMO_PROPERTIES_IN_HANDLE 
+                | MQConstants.MQGMO_SYNCPOINT;
         gmo.waitInterval = waitMs;
         MQMessage received = new MQMessage();
         try {
@@ -151,11 +188,19 @@ public final class MqTransactionalBroker implements TransactionBroker {
                 result = processor.process(record);
                 // A malformed reply is a processing failure, not an infrastructure outage.
                 if (result.reply().getMqCorrelationId() == null
-                        || !Arrays.equals(result.reply().getMqCorrelationId(), received.messageId)) {
+                        || !Arrays.equals(
+                                result.reply().getMqCorrelationId(), 
+                                received.messageId
+                        )
+                ) {
                     throw new IllegalStateException("Reply correlation ID does not match MQ request");
                 }
                 // Stamp all response/audit metadata as late as possible, before MQPUT.
-                ReplyMetadataEnricher.enrich(result, record, Instant.now());
+                ReplyMetadataEnricher.enrich(
+                        result, 
+                        record, 
+                        Instant.now()
+                );
             } catch (CancellationException | InterruptedException cancellation) {
                 // A stopping worker must not acknowledge an unfinished request.
                 throw cancellation;
@@ -171,7 +216,10 @@ public final class MqTransactionalBroker implements TransactionBroker {
                         businessFailure);
                 return null;
             }
-            putReply(result.reply().getMqCorrelationId(), result.reply().getShortJson());
+            putReply(
+                    result.reply().getMqCorrelationId(), 
+                    result.reply().getShortJson()
+            );
             commit();
             return result;
         } catch (Exception e) {

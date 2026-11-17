@@ -3,6 +3,7 @@ package com.gpb.datafirewall.transaction;
 import com.gpb.datafirewall.audit.AuditConfig;
 import com.gpb.datafirewall.transaction.artemis.ArtemisTransactionalBroker;
 import com.gpb.datafirewall.transaction.mq.MqTransactionalBroker;
+import com.gpb.datafirewall.util.SslStoreTypes;
 
 import java.io.Serializable;
 
@@ -21,12 +22,15 @@ public record TransactionSettings(
         String tlsCipherSuite, 
         String trustStore, 
         String trustStorePassword,
+        String trustStoreType,
         String xFrom, 
         String xServiceId,
         String artemisUrl,
         long receiveTimeoutMs) implements Serializable {
 
     public TransactionSettings {
+        trustStoreType = SslStoreTypes.normalize(trustStoreType);
+        
         if (!"mq".equals(backend) && !"artemis".equals(backend)) {
             throw new IllegalArgumentException("Unknown broker: " + backend);
         }
@@ -69,7 +73,8 @@ public record TransactionSettings(
                     xServiceId,
                     auditConfig, 
                     subtaskIndex, 
-                    parallelism
+                    parallelism,
+                    trustStoreType
             );
         }
         

@@ -11,7 +11,7 @@ class TransactionSettingsTest {
         return new TransactionSettings(
                 "mq", "localhost", 1414, "DEV.APP.SVRCONN", "QM1",
                 input, output, "user", "password",
-                false, null, null, null, "DFW", "service",
+                false, null, null, null, null, "DFW", "service",
                 null, 100);
     }
 

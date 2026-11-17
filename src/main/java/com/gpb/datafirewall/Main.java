@@ -137,6 +137,7 @@ public class Main {
         boolean mqTlsEnabled = pt.getBoolean("mq.tls.enabled", false);
         String mqTlsCipherSuite = pt.get("mq.tls.cipherSuite", null);
         String mqTrustStore = pt.get("mq.ssl.truststore.location", null);
+        String mqTrustStoreType = pt.get("mq.ssl.truststore.type", null);
         String mqTrustStorePassword = vaultSecrets.mqTruststorePassword();
         String mqReplyXFrom = firstNotBlank(
                 pt.get("mq.reply.xFrom", null),
@@ -156,6 +157,8 @@ public class Main {
         String artemisKeyStore = pt.get("artemis.ssl.keystore.location", null);
         String artemisKeyStorePassword = vaultSecrets.mqKeystorePassword();
         String artemisCipherSuites = pt.get("artemis.ssl.enabled.cipher.suites", null);
+        String artemisTrustStoreType = pt.get("artemis.ssl.truststore.type", null);
+        String artemisKeyStoreType = pt.get("artemis.ssl.keystore.type", null);
 
         String artemisBrokerUrlRaw = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
 
@@ -166,7 +169,9 @@ public class Main {
                 artemisTrustStorePassword,
                 artemisKeyStore,
                 artemisKeyStorePassword,
-                artemisCipherSuites
+                artemisCipherSuites,
+                artemisTrustStoreType,
+                artemisKeyStoreType
         );
         log.info("Artemis URL: {}", maskConnectionUrl(artemisBrokerUrl));
 
@@ -310,13 +315,22 @@ public class Main {
             // Kafka cache updates are the only Flink input and are prepared off-mailbox.
             TransactionSettings txSettings = new TransactionSettings(
                 backend,
-                cfg.mqHost(), cfg.mqPort(), cfg.mqChannel(), cfg.mqQmgr(),
+                cfg.mqHost(), 
+                cfg.mqPort(), 
+                cfg.mqChannel(), 
+                cfg.mqQmgr(),
                 "mq".equals(backend) ? cfg.mqInQueue() : artemisInQueue,
                 "mq".equals(backend) ? cfg.mqOutQueue() : artemisOutQueue,
                 "mq".equals(backend) ? cfg.mqUser() : artemisUser,
                 "mq".equals(backend) ? cfg.mqPassword() : artemisPassword,
-                mqTlsEnabled, mqTlsCipherSuite, mqTrustStore, mqTrustStorePassword,
-                mqReplyXFrom, mqReplyXServiceId, artemisBrokerUrl,
+                mqTlsEnabled, 
+                mqTlsCipherSuite, 
+                mqTrustStore, 
+                mqTrustStorePassword,
+                mqTrustStoreType,
+                mqReplyXFrom, 
+                mqReplyXServiceId, 
+                artemisBrokerUrl,
                 "mq".equals(backend)
                         ? pt.getInt("mq.wait.interval.ms", 5000)
                         : artemisReceiveTimeoutMs);
