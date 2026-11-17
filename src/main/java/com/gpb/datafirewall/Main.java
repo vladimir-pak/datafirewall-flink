@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 
 public class Main {
 
@@ -137,6 +138,7 @@ public class Main {
         boolean mqTlsEnabled = pt.getBoolean("mq.tls.enabled", false);
         String mqTlsCipherSuite = pt.get("mq.tls.cipherSuite", null);
         String mqTrustStore = pt.get("mq.ssl.truststore.location", null);
+        String mqTrustStoreType = pt.get("mq.ssl.truststore.type", null);
         String mqTrustStorePassword = vaultSecrets.mqTruststorePassword();
         String mqReplyXFrom = firstNotBlank(
                 pt.get("mq.reply.xFrom", null),
@@ -156,6 +158,8 @@ public class Main {
         String artemisKeyStore = pt.get("artemis.ssl.keystore.location", null);
         String artemisKeyStorePassword = vaultSecrets.mqKeystorePassword();
         String artemisCipherSuites = pt.get("artemis.ssl.enabled.cipher.suites", null);
+        String artemisTrustStoreType = pt.get("artemis.ssl.truststore.type", null);
+        String artemisKeyStoreType = pt.get("artemis.ssl.keystore.type", null);
 
         String artemisBrokerUrlRaw = pt.get("artemis.broker.url", DEFAULT_ARTEMIS_BROKER_URL);
 
@@ -166,7 +170,9 @@ public class Main {
                 artemisTrustStorePassword,
                 artemisKeyStore,
                 artemisKeyStorePassword,
-                artemisCipherSuites
+                artemisCipherSuites,
+                artemisTrustStoreType,
+                artemisKeyStoreType
         );
         log.info("Artemis URL: {}", maskConnectionUrl(artemisBrokerUrl));
 
@@ -310,13 +316,22 @@ public class Main {
             // Kafka cache updates are the only Flink input and are prepared off-mailbox.
             TransactionSettings txSettings = new TransactionSettings(
                 backend,
-                cfg.mqHost(), cfg.mqPort(), cfg.mqChannel(), cfg.mqQmgr(),
+                cfg.mqHost(), 
+                cfg.mqPort(), 
+                cfg.mqChannel(), 
+                cfg.mqQmgr(),
                 "mq".equals(backend) ? cfg.mqInQueue() : artemisInQueue,
                 "mq".equals(backend) ? cfg.mqOutQueue() : artemisOutQueue,
                 "mq".equals(backend) ? cfg.mqUser() : artemisUser,
                 "mq".equals(backend) ? cfg.mqPassword() : artemisPassword,
-                mqTlsEnabled, mqTlsCipherSuite, mqTrustStore, mqTrustStorePassword,
-                mqReplyXFrom, mqReplyXServiceId, artemisBrokerUrl,
+                mqTlsEnabled, 
+                mqTlsCipherSuite, 
+                mqTrustStore, 
+                mqTrustStorePassword,
+                mqTrustStoreType,
+                mqReplyXFrom, 
+                mqReplyXServiceId, 
+                artemisBrokerUrl,
                 "mq".equals(backend)
                         ? pt.getInt("mq.wait.interval.ms", 5000)
                         : artemisReceiveTimeoutMs);
@@ -625,7 +640,10 @@ public class Main {
         }
     }
 
-    private static Properties buildKafkaClientProperties(ParameterTool pt, String prefix, VaultSecretsDto vaultSecrets) {
+    private static Properties buildKafkaClientProperties(
+            ParameterTool pt, 
+            String prefix, 
+            VaultSecretsDto vaultSecrets) {
         Properties props = new Properties();
 
         String securityProtocol = kafkaParam(pt, prefix, "security.protocol", null);
@@ -672,7 +690,19 @@ public class Main {
             );
         }
 
-        copyKafkaClientOverride(pt, prefix, props, "client.id");
+        String kafkaClientIdSuffix = UUID.randomUUID().toString();
+        String clientIdPrefix = kafkaParam(
+                pt, 
+                prefix, 
+                "client.id", 
+                "dfw-client-id"
+        );
+        putIfNotBlank(
+                props, 
+                "client.id",
+                clientIdPrefix + "-" + kafkaClientIdSuffix
+        );
+
         copyKafkaClientOverride(pt, prefix, props, "retries");
         copyKafkaClientOverride(pt, prefix, props, "retry.backoff.ms");
         copyKafkaClientOverride(pt, prefix, props, "reconnect.backoff.ms");
@@ -685,9 +715,17 @@ public class Main {
         return props;
     }
 
-    private static String buildKafkaJaasConfig(String mechanism, VaultSecretsDto vaultSecrets) {
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaUser(), "kafkaUser in configured secret source");
-        requireNotBlank(vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), "kafkaPassword in configured secret source");
+    private static String buildKafkaJaasConfig(
+            String mechanism, 
+            VaultSecretsDto vaultSecrets) {
+        requireNotBlank(
+                vaultSecrets == null ? null : vaultSecrets.kafkaUser(), 
+                "kafkaUser in configured secret source"
+        );
+        requireNotBlank(
+                vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), 
+                "kafkaPassword in configured secret source"
+        );
 
         String loginModule = "PLAIN".equalsIgnoreCase(mechanism)
                 ? "org.apache.kafka.common.security.plain.PlainLoginModule"
@@ -699,7 +737,14 @@ public class Main {
     }
 
     private static String escapeJaas(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        return value == null ? "" : 
+                value.replace(
+                        "\\", 
+                        "\\\\"
+                ).replace(
+                        "\"", 
+                        "\\\""
+                );
     }
 
     private static boolean isSslProtocol(String securityProtocol) {
@@ -710,7 +755,11 @@ public class Main {
         return securityProtocol != null && securityProtocol.toUpperCase().startsWith("SASL_");
     }
 
-    private static String kafkaParam(ParameterTool pt, String prefix, String suffix, String defaultValue) {
+    private static String kafkaParam(
+            ParameterTool pt, 
+            String prefix,
+            String suffix, 
+            String defaultValue) {
         String value = pt.get(prefix + "." + suffix, null);
         if (value != null && !value.isBlank()) {
             return value;
@@ -726,16 +775,41 @@ public class Main {
         return defaultValue;
     }
 
-    private static boolean kafkaBooleanParam(ParameterTool pt, String prefix, String suffix, boolean defaultValue) {
-        String value = kafkaParam(pt, prefix, suffix, null);
+    private static boolean kafkaBooleanParam(
+            ParameterTool pt, 
+            String prefix, 
+            String suffix, 
+            boolean defaultValue) {
+        String value = kafkaParam(
+                pt, 
+                prefix, 
+                suffix, 
+                null
+        );
         return value == null ? defaultValue : Boolean.parseBoolean(value);
     }
 
-    private static void copyKafkaClientOverride(ParameterTool pt, String prefix, Properties props, String kafkaProperty) {
-        putIfNotBlank(props, kafkaProperty, kafkaParam(pt, prefix, kafkaProperty, null));
+    private static void copyKafkaClientOverride(
+            ParameterTool pt, 
+            String prefix, 
+            Properties props, 
+            String kafkaProperty) {
+        putIfNotBlank(
+                props, 
+                kafkaProperty, 
+                kafkaParam(
+                        pt, 
+                        prefix, 
+                        kafkaProperty, 
+                        null
+                )
+        );
     }
 
-    private static void putIfNotBlank(Properties props, String key, String value) {
+    private static void putIfNotBlank(
+            Properties props, 
+            String key, 
+            String value) {
         if (value != null && !value.isBlank()) {
             props.setProperty(key, value);
         }
