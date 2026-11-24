@@ -12,6 +12,7 @@ public class AuditRecord implements Serializable {
     private JsonNode detailAnswerJson;
     private String actionDttm;
     private String status;
+    private JsonNode error;
 
     public AuditRecord() {
     }
@@ -71,6 +72,9 @@ public class AuditRecord implements Serializable {
     public void setActionDttm(String actionDttm) {
         this.actionDttm = actionDttm;
     }
+
+    public JsonNode getError() { return error; }
+    public void setError(JsonNode error) { this.error = error; }
 
     public String getStatus() {
         return status;

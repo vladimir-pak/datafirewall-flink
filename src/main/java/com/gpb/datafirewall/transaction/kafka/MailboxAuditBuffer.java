@@ -23,7 +23,7 @@ final class MailboxAuditBuffer implements AutoCloseable {
     private boolean closed;
 
     MailboxAuditBuffer(MailboxExecutor mailbox, Consumer<ProcessingResult> output,
-            Consumer<Throwable> fatalError, int maxRecords, long maxBytes) {
+                       Consumer<Throwable> fatalError, int maxRecords, long maxBytes) {
         if (maxRecords < 1 || maxBytes < 1) throw new IllegalArgumentException("Invalid audit buffer limits");
         this.mailbox = mailbox;
         this.output = output;
@@ -87,7 +87,7 @@ final class MailboxAuditBuffer implements AutoCloseable {
 
     private static long estimateBytes(ProcessingResult result) {
         long size = 256 + stringBytes(result.getOriginalJson()) + stringBytes(result.getShortJson())
-                + stringBytes(result.getDetailJson()) + stringBytes(result.getEventId())
+                + stringBytes(result.getDetailJson()) + stringBytes(result.getErrorJson()) + stringBytes(result.getEventId())
                 + stringBytes(result.getJmsCorrelationId());
         Map<String, Object> headers = result.getHeaders();
         if (headers != null) for (var header : headers.entrySet()) {

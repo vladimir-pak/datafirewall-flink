@@ -257,84 +257,84 @@ public class Main {
         try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
 
             publishKafkaConnectionCheck(
-                    jobAuditPublisher, 
-                    cefAuditConfig, 
-                    "rules-kafka", 
-                    kafkaBootstrap, 
-                    kafkaClientProps, 
+                    jobAuditPublisher,
+                    cefAuditConfig,
+                    "rules-kafka",
+                    kafkaBootstrap,
+                    kafkaClientProps,
                     vaultSecrets.kafkaUser()
             );
 
             publishKafkaConnectionCheck(
-                    jobAuditPublisher, 
-                    cefAuditConfig, 
-                    "cef-audit-kafka", 
-                    cefAuditConfig.kafkaBootstrap(), 
-                    cefAuditConfig.toKafkaProducerProperties(), 
+                    jobAuditPublisher,
+                    cefAuditConfig,
+                    "cef-audit-kafka",
+                    cefAuditConfig.kafkaBootstrap(),
+                    cefAuditConfig.toKafkaProducerProperties(),
                     vaultSecrets.kafkaUser()
             );
 
             jobAuditPublisher.publish(
                     cefAuditConfig.enrich(
-                            CefAuditEvent.builder(
-                                    AuditEventType.KAFKA_RULES_SOURCE_CONFIGURED
+                                    CefAuditEvent.builder(
+                                            AuditEventType.KAFKA_RULES_SOURCE_CONFIGURED
+                                    )
                             )
-                    )
-                    .put("bootstrap", kafkaBootstrap)
-                    .put("protocol", String.valueOf(
-                            kafkaClientProps.getOrDefault(
-                                    "security.protocol", 
-                                    "TCP"
-                            )
-                    ))
-                    .put("connectionUser", vaultSecrets.kafkaUser())
-                    .put("topic", kafkaTopic)
-                    .put("groupId", kafkaGroup)
-                    .build()
+                            .put("bootstrap", kafkaBootstrap)
+                            .put("protocol", String.valueOf(
+                                    kafkaClientProps.getOrDefault(
+                                            "security.protocol",
+                                            "TCP"
+                                    )
+                            ))
+                            .put("connectionUser", vaultSecrets.kafkaUser())
+                            .put("topic", kafkaTopic)
+                            .put("groupId", kafkaGroup)
+                            .build()
             );
         }
 
         // Источник полных снимков кэша
         DataStream<CacheBundleEnvelope> cacheUpdates = env.addSource(
-                new CacheSnapshotSource(
-                        SecretsProvider.withoutLocalSecrets(pt),
-                        vaultSecrets.jwt(),
-                        kafkaClientProps,
-                        kafkaBootstrap,
-                        kafkaTopic,
-                        kafkaGroup
-                ),
-                "cache-snapshot-source",
-                Types.POJO(CacheBundleEnvelope.class)
-            )
-            .name("cache-snapshot-source")
-            .uid("cache-snapshot-source-v2")
-            .setParallelism(1);
+                        new CacheSnapshotSource(
+                                SecretsProvider.withoutLocalSecrets(pt),
+                                vaultSecrets.jwt(),
+                                kafkaClientProps,
+                                kafkaBootstrap,
+                                kafkaTopic,
+                                kafkaGroup
+                        ),
+                        "cache-snapshot-source",
+                        Types.POJO(CacheBundleEnvelope.class)
+                )
+                .name("cache-snapshot-source")
+                .uid("cache-snapshot-source-v2")
+                .setParallelism(1);
 
         if (!messagingDisable) {
             // Independent broker transactions: a worker owns its own MQ manager/JMS session.
             // Kafka cache updates are the only Flink input and are prepared off-mailbox.
             TransactionSettings txSettings = new TransactionSettings(
-                backend,
-                cfg.mqHost(), 
-                cfg.mqPort(), 
-                cfg.mqChannel(), 
-                cfg.mqQmgr(),
-                "mq".equals(backend) ? cfg.mqInQueue() : artemisInQueue,
-                "mq".equals(backend) ? cfg.mqOutQueue() : artemisOutQueue,
-                "mq".equals(backend) ? cfg.mqUser() : artemisUser,
-                "mq".equals(backend) ? cfg.mqPassword() : artemisPassword,
-                mqTlsEnabled, 
-                mqTlsCipherSuite, 
-                mqTrustStore, 
-                mqTrustStorePassword,
-                mqTrustStoreType,
-                mqReplyXFrom, 
-                mqReplyXServiceId, 
-                artemisBrokerUrl,
-                "mq".equals(backend)
-                        ? pt.getInt("mq.wait.interval.ms", 5000)
-                        : artemisReceiveTimeoutMs);
+                    backend,
+                    cfg.mqHost(),
+                    cfg.mqPort(),
+                    cfg.mqChannel(),
+                    cfg.mqQmgr(),
+                    "mq".equals(backend) ? cfg.mqInQueue() : artemisInQueue,
+                    "mq".equals(backend) ? cfg.mqOutQueue() : artemisOutQueue,
+                    "mq".equals(backend) ? cfg.mqUser() : artemisUser,
+                    "mq".equals(backend) ? cfg.mqPassword() : artemisPassword,
+                    mqTlsEnabled,
+                    mqTlsCipherSuite,
+                    mqTrustStore,
+                    mqTrustStorePassword,
+                    mqTrustStoreType,
+                    mqReplyXFrom,
+                    mqReplyXServiceId,
+                    artemisBrokerUrl,
+                    "mq".equals(backend)
+                            ? pt.getInt("mq.wait.interval.ms", 5000)
+                            : artemisReceiveTimeoutMs);
 
             if (pt.has("transaction.pulse.interval.ms")) {
                 log.warn(
@@ -343,20 +343,20 @@ public class Main {
             }
 
             SingleOutputStreamOperator<ProcessingResult> processed = cacheUpdates
-                .broadcast()
-                .transform(
-                        "transactional-broker-worker",
-                        Types.POJO(ProcessingResult.class),
-                        new TransactionalRulesOperatorFactory(
-                                vaultSecrets.jwt(),
-                                vaultSecrets, 
-                                txSettings, 
-                                cefAuditConfig
-                        )
-                )
-                .uid("transactional-broker-worker-v3")
-                .setParallelism(processParallelism);
-        
+                    .broadcast()
+                    .transform(
+                            "transactional-broker-worker",
+                            Types.POJO(ProcessingResult.class),
+                            new TransactionalRulesOperatorFactory(
+                                    vaultSecrets.jwt(),
+                                    vaultSecrets,
+                                    txSettings,
+                                    cefAuditConfig
+                            )
+                    )
+                    .uid("transactional-broker-worker-v3")
+                    .setParallelism(processParallelism);
+
 
             // Only the independent Kafka audit is emitted after successful broker commit.
             // It is NOT part of the MQ/JMS transaction and is not a durable outbox.
@@ -369,10 +369,10 @@ public class Main {
 
                 if (!"NONE".equalsIgnoreCase(configuredGuarantee)) {
                     log.warn("[MAIN] Ignoring audit.kafka.delivery-guarantee={}; "
-                            + "audit is now best-effort and never checkpoints Kafka transactions",
+                                    + "audit is now best-effort and never checkpoints Kafka transactions",
                             configuredGuarantee);
                 }
-                
+
                 BestEffortKafkaAuditSink auditKafkaSink = new BestEffortKafkaAuditSink(
                         auditKafkaBootstrap, auditKafkaTopic, auditKafkaClientProps,
                         pt.getLong("audit.kafka.best-effort.max-block.ms", 100L));
@@ -393,7 +393,8 @@ public class Main {
                                     JsonNode requestNode = safeReadTree(mapper, result.getOriginalJson());
                                     JsonNode shortNode = safeReadTree(mapper, result.getShortJson());
                                     JsonNode detailNode = safeReadTree(mapper, result.getDetailJson());
-                                    boolean failed = requestNode != null && requestNode.hasNonNull("error") && shortNode == null;
+                                    JsonNode errorNode = safeReadTree(mapper, result.getErrorJson());
+                                    boolean failed = errorNode != null;
                                     AuditRecord audit = new AuditRecord(
                                             result.getEventId(),
                                             requestNode,
@@ -402,6 +403,7 @@ public class Main {
                                             Instant.now().toString(),
                                             failed ? "ERROR" : "PROCESSED"
                                     );
+                                    if (failed) audit.setError(errorNode);
                                     out.collect(mapper.writeValueAsString(audit));
                                 } catch (Exception e) {
                                     log.warn("Dropping malformed Kafka processing audit eventId={}: {}", result.getEventId(), e.toString(), e);
@@ -452,32 +454,32 @@ public class Main {
         }
 
         try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
+            jobAuditPublisher.publish(
+                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_STARTED))
+                            .put("parallelism", parallelism)
+                            .put("messagingBackend", backend)
+                            .build()
+            );
+
+            env.execute(cefAuditConfig.jobName());
+
+            jobAuditPublisher.publish(
+                    cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_STOPPED))
+                            .put("result", "env.execute returned")
+                            .build()
+            );
+        } catch (Exception e) {
+            try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
                 jobAuditPublisher.publish(
-                        cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_STARTED))
-                                .put("parallelism", parallelism)
-                                .put("messagingBackend", backend)
+                        cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_FAILED))
+                                .status("FAILED")
+                                .put("errorClass", e.getClass().getName())
+                                .put("errorMessage", e.getMessage())
                                 .build()
                 );
-
-                env.execute(cefAuditConfig.jobName());
-
-                jobAuditPublisher.publish(
-                        cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_STOPPED))
-                                .put("result", "env.execute returned")
-                                .build()
-                );
-            } catch (Exception e) {
-                try (CefAuditPublisher jobAuditPublisher = new CefAuditPublisher(cefAuditConfig)) {
-                    jobAuditPublisher.publish(
-                            cefAuditConfig.enrich(CefAuditEvent.builder(AuditEventType.JOB_FAILED))
-                                    .status("FAILED")
-                                    .put("errorClass", e.getClass().getName())
-                                    .put("errorMessage", e.getMessage())
-                                    .build()
-                    );
-                }
-                throw e;
             }
+            throw e;
+        }
     }
 
     private static String maskConnectionUrl(String value) {
@@ -641,8 +643,8 @@ public class Main {
     }
 
     private static Properties buildKafkaClientProperties(
-            ParameterTool pt, 
-            String prefix, 
+            ParameterTool pt,
+            String prefix,
             VaultSecretsDto vaultSecrets) {
         Properties props = new Properties();
 
@@ -692,13 +694,13 @@ public class Main {
 
         String kafkaClientIdSuffix = UUID.randomUUID().toString();
         String clientIdPrefix = kafkaParam(
-                pt, 
-                prefix, 
-                "client.id", 
+                pt,
+                prefix,
+                "client.id",
                 "dfw-client-id"
         );
         putIfNotBlank(
-                props, 
+                props,
                 "client.id",
                 clientIdPrefix + "-" + kafkaClientIdSuffix
         );
@@ -716,14 +718,14 @@ public class Main {
     }
 
     private static String buildKafkaJaasConfig(
-            String mechanism, 
+            String mechanism,
             VaultSecretsDto vaultSecrets) {
         requireNotBlank(
-                vaultSecrets == null ? null : vaultSecrets.kafkaUser(), 
+                vaultSecrets == null ? null : vaultSecrets.kafkaUser(),
                 "kafkaUser in configured secret source"
         );
         requireNotBlank(
-                vaultSecrets == null ? null : vaultSecrets.kafkaPassword(), 
+                vaultSecrets == null ? null : vaultSecrets.kafkaPassword(),
                 "kafkaPassword in configured secret source"
         );
 
@@ -737,12 +739,12 @@ public class Main {
     }
 
     private static String escapeJaas(String value) {
-        return value == null ? "" : 
+        return value == null ? "" :
                 value.replace(
-                        "\\", 
+                        "\\",
                         "\\\\"
                 ).replace(
-                        "\"", 
+                        "\"",
                         "\\\""
                 );
     }
@@ -756,9 +758,9 @@ public class Main {
     }
 
     private static String kafkaParam(
-            ParameterTool pt, 
+            ParameterTool pt,
             String prefix,
-            String suffix, 
+            String suffix,
             String defaultValue) {
         String value = pt.get(prefix + "." + suffix, null);
         if (value != null && !value.isBlank()) {
@@ -776,39 +778,39 @@ public class Main {
     }
 
     private static boolean kafkaBooleanParam(
-            ParameterTool pt, 
-            String prefix, 
-            String suffix, 
+            ParameterTool pt,
+            String prefix,
+            String suffix,
             boolean defaultValue) {
         String value = kafkaParam(
-                pt, 
-                prefix, 
-                suffix, 
+                pt,
+                prefix,
+                suffix,
                 null
         );
         return value == null ? defaultValue : Boolean.parseBoolean(value);
     }
 
     private static void copyKafkaClientOverride(
-            ParameterTool pt, 
-            String prefix, 
-            Properties props, 
+            ParameterTool pt,
+            String prefix,
+            Properties props,
             String kafkaProperty) {
         putIfNotBlank(
-                props, 
-                kafkaProperty, 
+                props,
+                kafkaProperty,
                 kafkaParam(
-                        pt, 
-                        prefix, 
-                        kafkaProperty, 
+                        pt,
+                        prefix,
+                        kafkaProperty,
                         null
                 )
         );
     }
 
     private static void putIfNotBlank(
-            Properties props, 
-            String key, 
+            Properties props,
+            String key,
             String value) {
         if (value != null && !value.isBlank()) {
             props.setProperty(key, value);

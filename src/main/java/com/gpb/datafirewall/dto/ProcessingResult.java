@@ -12,6 +12,7 @@ public class ProcessingResult implements Serializable {
     private String eventId;
     private String shortJson;
     private String originalJson;
+    private String errorJson;
     private String detailJson;
     private Map<String, Object> headers;
     private Long createdDttm;
@@ -20,11 +21,11 @@ public class ProcessingResult implements Serializable {
     public ProcessingResult() {}
 
     public ProcessingResult(
-            byte[] mqCorrelationId, 
-            String jmsCorrelationId, 
+            byte[] mqCorrelationId,
+            String jmsCorrelationId,
             String eventId,
-            String shortJson, 
-            String detailJson, 
+            String shortJson,
+            String detailJson,
             String originalJson) {
         this.mqCorrelationId = copyBytes(mqCorrelationId);
         this.jmsCorrelationId = jmsCorrelationId;
@@ -35,42 +36,42 @@ public class ProcessingResult implements Serializable {
     }
 
     public static ProcessingResult forMq(
-            byte[] mqCorrelationId, 
+            byte[] mqCorrelationId,
             String shortJson,
-            String detailJson, 
+            String detailJson,
             String originalJson) {
 
         return new ProcessingResult(
-                mqCorrelationId, 
+                mqCorrelationId,
                 null,
                 mqIdToHex(mqCorrelationId),
-                shortJson, 
-                detailJson, 
+                shortJson,
+                detailJson,
                 originalJson
         );
     }
 
     public static ProcessingResult forJms(
-            String jmsCorrelationId, 
+            String jmsCorrelationId,
             String shortJson,
-            String detailJson, 
+            String detailJson,
             String originalJson) {
 
         return new ProcessingResult(
-                null, 
+                null,
                 jmsCorrelationId,
                 jmsCorrelationId == null || jmsCorrelationId.isBlank() ? "unknown" : jmsCorrelationId,
-                shortJson, 
-                detailJson, 
+                shortJson,
+                detailJson,
                 originalJson
         );
     }
 
     public byte[] getMqCorrelationId() {
-        return copyBytes(mqCorrelationId); 
+        return copyBytes(mqCorrelationId);
     }
 
-    public void setMqCorrelationId(byte[] value) { 
+    public void setMqCorrelationId(byte[] value) {
         this.mqCorrelationId = copyBytes(value);
     }
 
@@ -117,6 +118,9 @@ public class ProcessingResult implements Serializable {
         this.originalJson = value;
     }
 
+    public String getErrorJson() { return errorJson; }
+    public void setErrorJson(String value) { this.errorJson = value; }
+
     public Map<String, Object> getHeaders() {
         return headers == null ? null : new LinkedHashMap<>(headers);
     }
@@ -125,34 +129,34 @@ public class ProcessingResult implements Serializable {
         this.headers = value == null ? null : new LinkedHashMap<>(value);
     }
 
-    public Long getCreatedDttm() { 
-        return createdDttm; 
+    public Long getCreatedDttm() {
+        return createdDttm;
     }
 
-    public void setCreatedDttm(Long value) { 
-        this.createdDttm = value; 
+    public void setCreatedDttm(Long value) {
+        this.createdDttm = value;
     }
 
-    public Long getReadedDttm() { 
-        return readedDttm; 
+    public Long getReadedDttm() {
+        return readedDttm;
     }
 
-    public void setReadedDttm(Long value) { 
-        this.readedDttm = value; 
+    public void setReadedDttm(Long value) {
+        this.readedDttm = value;
     }
 
-    public boolean isMq() { 
-        return mqCorrelationId != null; 
+    public boolean isMq() {
+        return mqCorrelationId != null;
     }
 
-    public boolean isJms() { 
-        return jmsCorrelationId != null && !jmsCorrelationId.isBlank(); 
+    public boolean isJms() {
+        return jmsCorrelationId != null && !jmsCorrelationId.isBlank();
     }
 
     public static String mqIdToHex(byte[] bytes) {
-        if (bytes == null || bytes.length == 0) 
+        if (bytes == null || bytes.length == 0)
             return "unknown";
-        
+
         return HexUtils.toUpperHex(bytes);
     }
 

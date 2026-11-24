@@ -7,10 +7,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.datafirewall.dto.ProcessingResult;
 import com.gpb.datafirewall.services.MessageRecord;
-import com.gpb.datafirewall.util.ReplyMetadataEnricher;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.time.Instant;
 
 public final class ProcessingErrorAudit {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -20,7 +18,7 @@ public final class ProcessingErrorAudit {
     public static ProcessingResult create(MessageRecord record, Exception failure) throws Exception {
         ObjectNode query = readQuery(record.payload);
         Throwable cause = rootCause(failure);
-        ObjectNode error = query.putObject("error");
+        ObjectNode error = MAPPER.createObjectNode();
         error.put("type", cause.getClass().getSimpleName());
         error.put("message", cause.getMessage());
         error.put("component", cause.getStackTrace().length == 0 ? "Unknown" : cause.getStackTrace()[0].getClassName());
@@ -28,11 +26,12 @@ public final class ProcessingErrorAudit {
         failure.printStackTrace(new PrintWriter(writer));
         String stack = writer.toString();
         error.put("stackTrace", stack.length() > 8192 ? stack.substring(0, 8192) : stack);
-        ReplyMetadataEnricher.enrichErrorQuery(query, record, Instant.now());
+
         String json = MAPPER.writeValueAsString(query);
         ProcessingResult result = record.isMq()
                 ? ProcessingResult.forMq(record.mqMessageId, null, null, json)
                 : ProcessingResult.forJms(record.jmsMessageId, null, null, json);
+        result.setErrorJson(MAPPER.writeValueAsString(error));
         result.setHeaders(record.headers);
         result.setCreatedDttm(record.getCreatedDttm());
         result.setReadedDttm(record.getReadedDttm());

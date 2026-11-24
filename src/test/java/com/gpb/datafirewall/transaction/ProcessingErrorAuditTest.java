@@ -19,9 +19,10 @@ class ProcessingErrorAuditTest {
 
         assertEquals("ID:test", result.getJmsCorrelationId());
         assertEquals("123", query.path("data").path("clientId").asText());
-        assertEquals("IllegalStateException", query.path("error").path("type").asText());
-        assertEquals("Test processing failure", query.path("error").path("message").asText());
-        assertTrue(query.path("error").path("stackTrace").asText().contains("IllegalStateException"));
+        assertEquals("IllegalStateException", MAPPER.readTree(result.getErrorJson()).path("type").asText());
+        assertEquals("Test processing failure", MAPPER.readTree(result.getErrorJson()).path("message").asText());
+        assertTrue(MAPPER.readTree(result.getErrorJson()).path("stackTrace").asText().contains("IllegalStateException"));
+        assertFalse(query.has("error"));
         assertNull(result.getShortJson());
         assertNull(result.getDetailJson());
     }
@@ -33,8 +34,9 @@ class ProcessingErrorAuditTest {
         JsonNode query = MAPPER.readTree(result.getOriginalJson());
 
         assertEquals("invalid-json", query.path("rawPayload").asText());
-        assertEquals("IllegalArgumentException", query.path("error").path("type").asText());
-        assertEquals("Invalid request", query.path("error").path("message").asText());
+        assertEquals("IllegalArgumentException", MAPPER.readTree(result.getErrorJson()).path("type").asText());
+        assertEquals("Invalid request", MAPPER.readTree(result.getErrorJson()).path("message").asText());
+        assertFalse(query.has("error"));
         assertNull(result.getShortJson());
         assertNull(result.getDetailJson());
     }
